@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { AreaChart, Area, XAxis, YAxis, ReferenceLine, ResponsiveContainer } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Settings2, RotateCcw, Target, Trash2, ChevronDown } from 'lucide-react';
+import { useSignalSource, type SignalSourceMode } from './useSignalSource';
 
 type FeedbackState = 'ready' | 'recording' | 'good' | 'weak' | 'noisy' | 'short';
 type SampleQuality = 'good' | 'weak' | 'noisy';
@@ -19,8 +20,9 @@ interface GestureData {
   samples: Sample[];
 }
 
+type SignalSourceLabel = Record<SignalSourceMode, string>;
+
 export default function App() {
-  const [signalData, setSignalData] = useState<{ time: number; value: number }[]>([]);
   const [feedbackState, setFeedbackState] = useState<FeedbackState>('ready');
   const [threshold, setThreshold] = useState(0.6);
   const [isAdjustingThreshold, setIsAdjustingThreshold] = useState(false);
@@ -33,6 +35,37 @@ export default function App() {
   const [showGestureChangeMessage, setShowGestureChangeMessage] = useState(false);
   const previewPanelRef = useRef<HTMLDivElement>(null);
   const gestureDropdownRef = useRef<HTMLDivElement>(null);
+
+  const generateMockSignalValue = useCallback(() => {
+    const time = Date.now();
+    const baseNoise = (Math.random() - 0.5) * 0.1;
+
+    switch (feedbackState) {
+      case 'recording':
+      case 'good':
+        return 0.7 + Math.sin(time * 0.01) * 0.15 + baseNoise * 0.3;
+      case 'weak':
+        return 0.3 + Math.sin(time * 0.01) * 0.1 + baseNoise * 0.5;
+      case 'noisy':
+        return 0.65 + (Math.random() - 0.5) * 0.4 + Math.sin(time * 0.02) * 0.1;
+      case 'short':
+        return 0.75 + baseNoise * 0.2;
+      default:
+        return 0.15 + baseNoise * 0.8;
+    }
+  }, [feedbackState]);
+
+  const {
+    signalData,
+    signalSourceMode,
+    connectGanglion,
+    useMockSignal,
+    liveConnectionStatus,
+    liveConnectionMessage,
+    liveDeviceName,
+    livePacketCount,
+    isBluetoothAvailable
+  } = useSignalSource(generateMockSignalValue);
   
   const availableGestures: GestureName[] = ['Pinch', 'Squeeze', 'Relax'];
   
@@ -100,49 +133,12 @@ export default function App() {
 
   const samplesCollected = currentSamples.filter(s => s.status === 'collected').length;
 
-  // Simulate real-time EMG signal
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const time = Date.now();
-      const baseNoise = (Math.random() - 0.5) * 0.1;
-      
-      let signalValue = 0;
-      
-      // Generate different signal patterns based on state
-      switch (feedbackState) {
-        case 'recording':
-        case 'good':
-          // Strong, clean signal above threshold
-          signalValue = 0.7 + Math.sin(time * 0.01) * 0.15 + baseNoise * 0.3;
-          break;
-        case 'weak':
-          // Weak signal below threshold
-          signalValue = 0.3 + Math.sin(time * 0.01) * 0.1 + baseNoise * 0.5;
-          break;
-        case 'noisy':
-          // Noisy signal
-          signalValue = 0.65 + (Math.random() - 0.5) * 0.4 + Math.sin(time * 0.02) * 0.1;
-          break;
-        case 'short':
-          // Brief spike
-          signalValue = 0.75 + baseNoise * 0.2;
-          break;
-        default:
-          // Ready state - baseline with minimal noise
-          signalValue = 0.15 + baseNoise * 0.8;
-      }
-
-      setSignalData(prev => {
-        const newData = [...prev, { time, value: Math.max(0, Math.min(1, signalValue)) }];
-        return newData.slice(-100); // Keep last 100 points
-      });
-    }, 50);
-
-    return () => clearInterval(interval);
-  }, [feedbackState]);
-
   // Simulate state changes for demonstration
   useEffect(() => {
+    if (signalSourceMode !== 'mock') {
+      return;
+    }
+
     const stateSequence: FeedbackState[] = ['ready', 'recording', 'good', 'ready', 'weak', 'ready', 'noisy', 'ready'];
     let currentIndex = 0;
 
@@ -162,7 +158,24 @@ export default function App() {
     }, 3000);
 
     return () => clearInterval(stateInterval);
-  }, []);
+  }, [signalSourceMode]);
+
+  useEffect(() => {
+    if (signalSourceMode !== 'live') {
+      return;
+    }
+
+    const latestValue = signalData.at(-1)?.value ?? 0;
+
+    if (latestValue > threshold) {
+      setFeedbackState('recording');
+      setHighlightSegment('good');
+      return;
+    }
+
+    setFeedbackState('ready');
+    setHighlightSegment(null);
+  }, [signalData, signalSourceMode, threshold]);
 
   // Close preview when clicking outside
   useEffect(() => {
@@ -220,6 +233,15 @@ export default function App() {
 
   const handleThresholdChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setThreshold(parseFloat(e.target.value));
+  };
+
+  const handleSignalSourceChange = (mode: SignalSourceMode) => {
+    if (mode === 'live') {
+      void connectGanglion();
+      return;
+    }
+
+    void useMockSignal();
   };
 
   const handleTargetChange = (delta: number) => {
@@ -344,6 +366,20 @@ export default function App() {
   
   // Determine graph glow based on signal crossing threshold
   const isAboveThreshold = signalData.length > 0 && signalData[signalData.length - 1]?.value > threshold;
+  const signalSourceLabels: SignalSourceLabel = {
+    mock: 'Mock',
+    live: 'Connect Ganglion'
+  };
+  const liveStatusText =
+    liveConnectionStatus === 'streaming'
+      ? `Ganglion: Streaming${liveDeviceName ? ` (${liveDeviceName})` : ''}`
+      : liveConnectionStatus === 'connected'
+      ? `Ganglion: Connected${liveDeviceName ? ` (${liveDeviceName})` : ''}`
+      : liveConnectionStatus === 'connecting'
+      ? 'Ganglion: Connecting'
+      : liveConnectionStatus === 'error'
+      ? `Ganglion: ${liveConnectionMessage}`
+      : 'Ganglion: Disconnected';
 
   return (
     <div className="size-full bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 flex items-center justify-center p-8">
@@ -428,38 +464,76 @@ export default function App() {
           </div>
           
           {/* Target adjustment control */}
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setIsEditingTarget(!isEditingTarget)}
-              className="p-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 transition-colors"
-              title="Adjust sample target"
-            >
-              <Target className="w-4 h-4 text-white/60" />
-            </button>
-            
-            {isEditingTarget && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                className="flex items-center gap-2 bg-slate-800/80 backdrop-blur-sm border border-white/10 rounded-lg px-3 py-2"
+          <div className="flex flex-col items-end gap-2">
+            <div className="flex items-center gap-2 rounded-lg bg-white/5 border border-white/10 p-1">
+              <button
+                onClick={() => handleSignalSourceChange('mock')}
+                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                  signalSourceMode === 'mock'
+                    ? 'bg-cyan-400/15 text-cyan-300'
+                    : 'text-white/60 hover:text-white hover:bg-white/5'
+                }`}
+                title="Use mock signal source"
               >
-                <button
-                  onClick={() => handleTargetChange(-1)}
-                  className="text-white/60 hover:text-white transition-colors"
+                {signalSourceLabels.mock}
+              </button>
+              <button
+                onClick={() => handleSignalSourceChange('live')}
+                disabled={liveConnectionStatus === 'connecting' || liveConnectionStatus === 'streaming'}
+                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                  signalSourceMode === 'live'
+                    ? 'bg-cyan-400/15 text-cyan-300'
+                    : 'text-white/60 hover:text-white hover:bg-white/5'
+                }`}
+                title="Connect OpenBCI Ganglion over browser Bluetooth"
+              >
+                {liveConnectionStatus === 'connecting' ? 'Connecting...' : signalSourceLabels.live}
+              </button>
+            </div>
+
+            <div className="text-xs text-white/40 min-h-[1rem]">
+              {signalSourceMode === 'live' ? liveStatusText : 'Mock: Local'}
+            </div>
+
+            <div className="text-xs text-white/40 min-h-[1rem]">
+              {signalSourceMode === 'live'
+                ? `Packets: ${livePacketCount}`
+                : `Browser BLE: ${isBluetoothAvailable ? 'Available' : 'Unavailable'}`}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setIsEditingTarget(!isEditingTarget)}
+                className="p-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 transition-colors"
+                title="Adjust sample target"
+              >
+                <Target className="w-4 h-4 text-white/60" />
+              </button>
+              
+              {isEditingTarget && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="flex items-center gap-2 bg-slate-800/80 backdrop-blur-sm border border-white/10 rounded-lg px-3 py-2"
                 >
-                  −
-                </button>
-                <span className="text-sm text-white/80 min-w-[3rem] text-center">
-                  Target: {sampleTarget}
-                </span>
-                <button
-                  onClick={() => handleTargetChange(1)}
-                  className="text-white/60 hover:text-white transition-colors"
-                >
-                  +
-                </button>
-              </motion.div>
-            )}
+                  <button
+                    onClick={() => handleTargetChange(-1)}
+                    className="text-white/60 hover:text-white transition-colors"
+                  >
+                    −
+                  </button>
+                  <span className="text-sm text-white/80 min-w-[3rem] text-center">
+                    Target: {sampleTarget}
+                  </span>
+                  <button
+                    onClick={() => handleTargetChange(1)}
+                    className="text-white/60 hover:text-white transition-colors"
+                  >
+                    +
+                  </button>
+                </motion.div>
+              )}
+            </div>
           </div>
         </div>
 

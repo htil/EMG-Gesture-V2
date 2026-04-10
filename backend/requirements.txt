@@ -1,0 +1,4 @@
+fastapi==0.115.9
+uvicorn[standard]==0.34.0
+# Ganglion support (install from GitHub if pip package install fails in your environment)
+pyOpenBCI==0.13
