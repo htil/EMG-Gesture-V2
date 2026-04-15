@@ -4,6 +4,8 @@ import { connectGanglion as connectGanglionDevice, isWebBluetoothAvailable, type
 export type SignalPoint = {
   time: number;
   value: number;
+  raw: number;
+  envelope: number;
 };
 
 export type SignalSourceMode = 'mock' | 'live';
@@ -22,14 +24,19 @@ type UseSignalSourceResult = {
   isBluetoothAvailable: boolean;
 };
 
-const MAX_SIGNAL_POINTS = 100;
-const LIVE_BASELINE = 0.12;
-const LIVE_GAIN = 0.7;
-const LIVE_SMOOTHING = 0.2;
-const LIVE_ENVELOPE_SCALE_COUNTS = 600000;
-const LIVE_BASELINE_SMOOTHING = 0.01;
+const MAX_SIGNAL_POINTS = 512;
+const EMG_SIGNAL_MULTIPLIER = 10_000_000;
+const LIVE_FILTER_CUTOFF_HZ = 3;
+const LIVE_RENDER_INTERVAL_MS = 100;
+const LIVE_PEAK_DECAY = 0.995;
 
 const clampSignalValue = (value: number) => Math.max(0, Math.min(1, value));
+const getLowPassAlpha = (deltaMs: number) => {
+  const safeDeltaMs = Math.max(1, deltaMs);
+  const dt = safeDeltaMs / 1000;
+  const rc = 1 / (2 * Math.PI * LIVE_FILTER_CUTOFF_HZ);
+  return dt / (rc + dt);
+};
 
 export function useSignalSource(generateMockSignalValue: () => number): UseSignalSourceResult {
   const [signalData, setSignalData] = useState<SignalPoint[]>([]);
@@ -39,8 +46,10 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
   const [liveDeviceName, setLiveDeviceName] = useState<string | null>(null);
   const [livePacketCount, setLivePacketCount] = useState(0);
   const ganglionRef = useRef<GanglionConnection | null>(null);
-  const liveLevelRef = useRef(LIVE_BASELINE);
-  const liveRawBaselineRef = useRef<number | null>(null);
+  const liveFilteredRef = useRef(0);
+  const livePeakRef = useRef(1);
+  const liveLastTimestampRef = useRef<number | null>(null);
+  const pendingLivePointsRef = useRef<SignalPoint[]>([]);
 
   const pushSignalPoint = useCallback((point: SignalPoint) => {
     setSignalData(prev => [...prev, point].slice(-MAX_SIGNAL_POINTS));
@@ -86,8 +95,10 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
       setSignalData([]);
       setLivePacketCount(0);
       setLiveDeviceName(null);
-      liveLevelRef.current = LIVE_BASELINE;
-      liveRawBaselineRef.current = null;
+      liveFilteredRef.current = 0;
+      livePeakRef.current = 1;
+      liveLastTimestampRef.current = null;
+      pendingLivePointsRef.current = [];
       setLiveConnectionStatus('connecting');
       setLiveConnectionMessage('Choose your Ganglion in the Bluetooth prompt.');
 
@@ -97,26 +108,27 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
       setLiveConnectionStatus('connected');
       setLiveConnectionMessage('Connected. Starting stream...');
 
-      connection.onPacket((packet) => {
-        const channelZeroSamples = packet.channelSamples.filter((_, index) => index % 4 === 0);
-        const rawSample = channelZeroSamples.length > 0
-          ? channelZeroSamples.reduce((sum, sample) => sum + sample, 0) / channelZeroSamples.length
-          : packet.level * LIVE_ENVELOPE_SCALE_COUNTS;
+      connection.onSample((sample) => {
+        const rawSample = sample.data[0] ?? 0;
+        const rectified = Math.abs(rawSample * EMG_SIGNAL_MULTIPLIER);
+        const previousTimestamp = liveLastTimestampRef.current;
+        const deltaMs = previousTimestamp === null ? 5 : sample.timestamp - previousTimestamp;
+        const alpha = getLowPassAlpha(deltaMs);
+        liveLastTimestampRef.current = sample.timestamp;
 
-        if (liveRawBaselineRef.current === null) {
-          liveRawBaselineRef.current = rawSample;
-        }
+        liveFilteredRef.current += (rectified - liveFilteredRef.current) * alpha;
+        livePeakRef.current = Math.max(liveFilteredRef.current, livePeakRef.current * LIVE_PEAK_DECAY);
 
-        liveRawBaselineRef.current += (rawSample - liveRawBaselineRef.current) * LIVE_BASELINE_SMOOTHING;
-
-        const envelope = Math.abs(rawSample - liveRawBaselineRef.current) / LIVE_ENVELOPE_SCALE_COUNTS;
-        const targetLevel = clampSignalValue(LIVE_BASELINE + envelope * LIVE_GAIN);
-        liveLevelRef.current = liveLevelRef.current + (targetLevel - liveLevelRef.current) * LIVE_SMOOTHING;
+        const normalizedValue = clampSignalValue(
+          liveFilteredRef.current / Math.max(livePeakRef.current, 1)
+        );
 
         setLivePacketCount(count => count + 1);
-        pushSignalPoint({
-          time: Date.now(),
-          value: clampSignalValue(liveLevelRef.current)
+        pendingLivePointsRef.current.push({
+          time: sample.timestamp,
+          value: normalizedValue,
+          raw: rawSample,
+          envelope: normalizedValue
         });
       });
 
@@ -149,14 +161,36 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
     }
 
     const interval = setInterval(() => {
+      const value = clampSignalValue(generateMockSignalValue());
       pushSignalPoint({
         time: Date.now(),
-        value: clampSignalValue(generateMockSignalValue())
+        value,
+        raw: value,
+        envelope: value,
       });
     }, 50);
 
     return () => clearInterval(interval);
   }, [generateMockSignalValue, pushSignalPoint, signalSourceMode]);
+
+  useEffect(() => {
+    if (signalSourceMode !== 'live') {
+      pendingLivePointsRef.current = [];
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      if (pendingLivePointsRef.current.length === 0) {
+        return;
+      }
+
+      const pending = pendingLivePointsRef.current;
+      pendingLivePointsRef.current = [];
+      setSignalData(prev => [...prev, ...pending].slice(-MAX_SIGNAL_POINTS));
+    }, LIVE_RENDER_INTERVAL_MS);
+
+    return () => window.clearInterval(interval);
+  }, [signalSourceMode]);
 
   useEffect(() => {
     return () => {

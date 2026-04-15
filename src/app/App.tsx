@@ -165,9 +165,9 @@ export default function App() {
       return;
     }
 
-    const latestValue = signalData.at(-1)?.value ?? 0;
+    const latestEnvelope = signalData.at(-1)?.envelope ?? 0;
 
-    if (latestValue > threshold) {
+    if (latestEnvelope > threshold) {
       setFeedbackState('recording');
       setHighlightSegment('good');
       return;
@@ -363,9 +363,11 @@ export default function App() {
   };
 
   const feedback = getFeedbackConfig();
-  
+  const latestSignal = signalData[signalData.length - 1];
   // Determine graph glow based on signal crossing threshold
-  const isAboveThreshold = signalData.length > 0 && signalData[signalData.length - 1]?.value > threshold;
+  const isAboveThreshold = signalSourceMode === 'live'
+    ? (latestSignal?.envelope ?? 0) > threshold
+    : (latestSignal?.value ?? 0) > threshold;
   const signalSourceLabels: SignalSourceLabel = {
     mock: 'Mock',
     live: 'Connect Ganglion'
@@ -497,8 +499,14 @@ export default function App() {
 
             <div className="text-xs text-white/40 min-h-[1rem]">
               {signalSourceMode === 'live'
-                ? `Packets: ${livePacketCount}`
+                ? `Samples: ${livePacketCount}`
                 : `Browser BLE: ${isBluetoothAvailable ? 'Available' : 'Unavailable'}`}
+            </div>
+
+            <div className="text-xs text-white/40 min-h-[1rem]">
+              {signalSourceMode === 'live'
+                ? `Signal ${(latestSignal?.value ?? 0).toFixed(2)}`
+                : `Value ${(latestSignal?.value ?? 0).toFixed(2)}`}
             </div>
 
             <div className="flex items-center gap-2">
@@ -561,7 +569,7 @@ export default function App() {
                   hide 
                 />
                 <YAxis 
-                  domain={[0, 1]} 
+                  domain={[0, 1]}
                   hide
                 />
                 {/* Threshold line */}
@@ -576,10 +584,10 @@ export default function App() {
                 {/* Baseline */}
                 <ReferenceLine 
                   key="main-baseline"
-                  y={0} 
+                  y={0}
                   stroke="#ffffff" 
                   strokeWidth={1}
-                  opacity={0.1}
+                  opacity={0.2}
                 />
                 <Area
                   type="monotone"

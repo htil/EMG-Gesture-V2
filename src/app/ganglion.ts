@@ -11,16 +11,24 @@ export interface GanglionPacket {
   channelSamples: number[];
 }
 
+export interface GanglionSample {
+  packetId: number;
+  timestamp: number;
+  data: number[];
+}
+
 export interface GanglionConnection {
   deviceName: string;
   startStreaming: () => Promise<void>;
   stopStreaming: () => Promise<void>;
   disconnect: () => void;
   onPacket: (callback: (packet: GanglionPacket) => void) => void;
+  onSample: (callback: (sample: GanglionSample) => void) => void;
   onDisconnected: (callback: () => void) => void;
 }
 
 type PacketListener = (packet: GanglionPacket) => void;
+type SampleListener = (sample: GanglionSample) => void;
 
 declare global {
   interface Navigator {
@@ -93,6 +101,7 @@ export async function connectGanglion(): Promise<GanglionConnection> {
   }
 
   const listeners = new Set<PacketListener>();
+  const sampleListeners = new Set<SampleListener>();
   const disconnectedListeners = new Set<() => void>();
   const server = await device.gatt.connect();
   const service = await server.getPrimaryService(GANGLION_SERVICE_UUID);
@@ -108,6 +117,9 @@ export async function connectGanglion(): Promise<GanglionConnection> {
     }
 
     listeners.forEach((listener) => listener(packet));
+    expandPacketSamples(packet).forEach((sample) => {
+      sampleListeners.forEach((listener) => listener(sample));
+    });
   });
 
   device.addEventListener('gattserverdisconnected', () => {
@@ -129,6 +141,9 @@ export async function connectGanglion(): Promise<GanglionConnection> {
     },
     onPacket: (callback) => {
       listeners.add(callback);
+    },
+    onSample: (callback) => {
+      sampleListeners.add(callback);
     },
     onDisconnected: (callback) => {
       disconnectedListeners.add(callback);
@@ -180,6 +195,32 @@ function decodeChannelSamples(bytes: Uint8Array) {
   }
 
   return [];
+}
+
+function expandPacketSamples(packet: GanglionPacket) {
+  const samples: GanglionSample[] = [];
+
+  if (packet.channelSamples.length === 4) {
+    samples.push({
+      packetId: packet.packetId,
+      timestamp: Date.now(),
+      data: packet.channelSamples,
+    });
+    return samples;
+  }
+
+  const groupSize = 4;
+  const timestamp = Date.now();
+
+  for (let index = 0; index + groupSize <= packet.channelSamples.length; index += groupSize) {
+    samples.push({
+      packetId: packet.packetId,
+      timestamp: timestamp + (index / groupSize) * 5,
+      data: packet.channelSamples.slice(index, index + groupSize),
+    });
+  }
+
+  return samples;
 }
 
 function unpackCompressedSamples(payload: Uint8Array, bitsPerSample: number, restoreShift: number) {
