@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import Fili from 'fili';
 import { connectGanglion as connectGanglionDevice, isWebBluetoothAvailable, type GanglionConnection } from './ganglion';
 
 export type SignalPoint = {
@@ -27,16 +28,17 @@ type UseSignalSourceResult = {
 const MAX_SIGNAL_POINTS = 512;
 const EMG_SIGNAL_MULTIPLIER = 10_000_000;
 const LIVE_FILTER_CUTOFF_HZ = 3;
+const LIVE_FILTER_ORDER = 100;
+const LIVE_FILTER_SAMPLE_RATE = 250;
 const LIVE_RENDER_INTERVAL_MS = 100;
-const LIVE_PEAK_DECAY = 0.995;
+const LIVE_DISPLAY_SCALE = 6000;
 
 const clampSignalValue = (value: number) => Math.max(0, Math.min(1, value));
-const getLowPassAlpha = (deltaMs: number) => {
-  const safeDeltaMs = Math.max(1, deltaMs);
-  const dt = safeDeltaMs / 1000;
-  const rc = 1 / (2 * Math.PI * LIVE_FILTER_CUTOFF_HZ);
-  return dt / (rc + dt);
-};
+const filterCoefficients = new Fili.FirCoeffs().lowpass({
+  order: LIVE_FILTER_ORDER,
+  Fs: LIVE_FILTER_SAMPLE_RATE,
+  Fc: LIVE_FILTER_CUTOFF_HZ,
+});
 
 export function useSignalSource(generateMockSignalValue: () => number): UseSignalSourceResult {
   const [signalData, setSignalData] = useState<SignalPoint[]>([]);
@@ -46,9 +48,7 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
   const [liveDeviceName, setLiveDeviceName] = useState<string | null>(null);
   const [livePacketCount, setLivePacketCount] = useState(0);
   const ganglionRef = useRef<GanglionConnection | null>(null);
-  const liveFilteredRef = useRef(0);
-  const livePeakRef = useRef(1);
-  const liveLastTimestampRef = useRef<number | null>(null);
+  const liveFilterRef = useRef(new Fili.FirFilter(filterCoefficients));
   const pendingLivePointsRef = useRef<SignalPoint[]>([]);
 
   const pushSignalPoint = useCallback((point: SignalPoint) => {
@@ -95,9 +95,7 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
       setSignalData([]);
       setLivePacketCount(0);
       setLiveDeviceName(null);
-      liveFilteredRef.current = 0;
-      livePeakRef.current = 1;
-      liveLastTimestampRef.current = null;
+      liveFilterRef.current = new Fili.FirFilter(filterCoefficients);
       pendingLivePointsRef.current = [];
       setLiveConnectionStatus('connecting');
       setLiveConnectionMessage('Choose your Ganglion in the Bluetooth prompt.');
@@ -111,17 +109,8 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
       connection.onSample((sample) => {
         const rawSample = sample.data[0] ?? 0;
         const rectified = Math.abs(rawSample * EMG_SIGNAL_MULTIPLIER);
-        const previousTimestamp = liveLastTimestampRef.current;
-        const deltaMs = previousTimestamp === null ? 5 : sample.timestamp - previousTimestamp;
-        const alpha = getLowPassAlpha(deltaMs);
-        liveLastTimestampRef.current = sample.timestamp;
-
-        liveFilteredRef.current += (rectified - liveFilteredRef.current) * alpha;
-        livePeakRef.current = Math.max(liveFilteredRef.current, livePeakRef.current * LIVE_PEAK_DECAY);
-
-        const normalizedValue = clampSignalValue(
-          liveFilteredRef.current / Math.max(livePeakRef.current, 1)
-        );
+        const filteredValue = Math.max(0, liveFilterRef.current.singleStep(rectified));
+        const normalizedValue = clampSignalValue(filteredValue / LIVE_DISPLAY_SCALE);
 
         setLivePacketCount(count => count + 1);
         pendingLivePointsRef.current.push({

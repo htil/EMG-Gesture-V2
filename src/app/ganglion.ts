@@ -1,8 +1,30 @@
+import OpenBCIUtilities from '@openbci/utilities/dist/openbci-utilities.js';
+import { Buffer } from 'buffer';
+
+const { constants, utilities } = OpenBCIUtilities as {
+  constants: {
+    numberOfChannelsForBoardType: (boardName: string) => number;
+    rawDataToSampleObjectDefault: (channelCount: number) => {
+      rawDataPacket?: Buffer;
+      [key: string]: unknown;
+    };
+  };
+  utilities: {
+    parseGanglion: (rawDataPacketToSample: { rawDataPacket?: Buffer }) => Array<{
+      sampleNumber?: number;
+      timestamp?: number;
+      channelData?: number[];
+      accelData?: number[];
+    }>;
+  };
+};
+
 const GANGLION_SERVICE_UUID = '0000fe84-0000-1000-8000-00805f9b34fb';
 const GANGLION_RECEIVE_UUID = '2d30c082-f39f-4ce6-923f-3484ea480596';
 const GANGLION_SEND_UUID = '2d30c083-f39f-4ce6-923f-3484ea480596';
 const START_STREAM_COMMAND = 'b';
 const STOP_STREAM_COMMAND = 's';
+const BOARD_NAME = 'ganglion';
 
 export interface GanglionPacket {
   packetId: number;
@@ -77,6 +99,7 @@ declare global {
 }
 
 const textEncoder = new TextEncoder();
+const channelCount = constants.numberOfChannelsForBoardType(BOARD_NAME);
 
 export function isWebBluetoothAvailable() {
   return typeof navigator !== 'undefined' && Boolean(navigator.bluetooth);
@@ -103,6 +126,7 @@ export async function connectGanglion(): Promise<GanglionConnection> {
   const listeners = new Set<PacketListener>();
   const sampleListeners = new Set<SampleListener>();
   const disconnectedListeners = new Set<() => void>();
+  const rawDataPacketToSample = constants.rawDataToSampleObjectDefault(channelCount);
   const server = await device.gatt.connect();
   const service = await server.getPrimaryService(GANGLION_SERVICE_UUID);
   const receiveCharacteristic = await service.getCharacteristic(GANGLION_RECEIVE_UUID);
@@ -110,14 +134,17 @@ export async function connectGanglion(): Promise<GanglionConnection> {
 
   receiveCharacteristic.addEventListener('characteristicvaluechanged', (event) => {
     const characteristic = event.target as BluetoothRemoteGATTCharacteristic;
-    const packet = packetFromDataView(characteristic.value);
+    const bytes = dataViewToBytes(characteristic.value);
 
-    if (!packet) {
+    if (!bytes) {
       return;
     }
 
+    const parsedSamples = parseSamples(bytes, rawDataPacketToSample);
+    const packet = packetFromBytes(bytes, parsedSamples);
+
     listeners.forEach((listener) => listener(packet));
-    expandPacketSamples(packet).forEach((sample) => {
+    parsedSamples.forEach((sample) => {
       sampleListeners.forEach((listener) => listener(sample));
     });
   });
@@ -151,119 +178,66 @@ export async function connectGanglion(): Promise<GanglionConnection> {
   };
 }
 
-function packetFromDataView(value?: DataView): GanglionPacket | null {
+function dataViewToBytes(value?: DataView) {
   if (!value || value.byteLength === 0) {
     return null;
   }
 
-  const bytes = new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+  return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+}
 
+function parseSamples(
+  bytes: Uint8Array,
+  rawDataPacketToSample: { rawDataPacket?: Buffer }
+): GanglionSample[] {
+  rawDataPacketToSample.rawDataPacket = Buffer.from(bytes);
+
+  return utilities.parseGanglion(rawDataPacketToSample)
+    .map((sample) => renameDataProp(sample, bytes[0]))
+    .filter((sample): sample is GanglionSample => sample.data.length > 0);
+}
+
+function renameDataProp(
+  sample: {
+    sampleNumber?: number;
+    timestamp?: number;
+    channelData?: number[];
+  },
+  packetId: number
+): GanglionSample {
   return {
-    packetId: bytes[0],
-    level: estimateDisplayLevel(bytes),
-    bytes,
-    channelSamples: decodeChannelSamples(bytes),
+    packetId: sample.sampleNumber ?? packetId,
+    timestamp: sample.timestamp ?? Date.now(),
+    data: sample.channelData ?? [],
   };
 }
 
-function estimateDisplayLevel(bytes: Uint8Array) {
-  const samples = decodeChannelSamples(bytes);
+function packetFromBytes(bytes: Uint8Array, parsedSamples: GanglionSample[]): GanglionPacket {
+  const channelSamples = parsedSamples.flatMap((sample) => sample.data);
 
-  if (samples.length > 0) {
-    const channelZeroSamples = samples.filter((_, index) => index % 4 === 0);
-    const meanAbs = channelZeroSamples.reduce((sum, sample) => sum + Math.abs(sample), 0) / channelZeroSamples.length;
-
-    return clamp01(meanAbs / 2000000);
-  }
-
-  return 0;
+  return {
+    packetId: bytes[0],
+    level: estimateDisplayLevel(parsedSamples),
+    bytes,
+    channelSamples,
+  };
 }
 
-function decodeChannelSamples(bytes: Uint8Array) {
-  const packetId = bytes[0];
-
-  if (packetId === 0 && bytes.length >= 13) {
-    return [1, 4, 7, 10].map((offset) => readSigned24(bytes, offset));
+function estimateDisplayLevel(samples: GanglionSample[]) {
+  if (samples.length === 0) {
+    return 0;
   }
 
-  if (packetId >= 101 && packetId <= 200) {
-    return unpackCompressedSamples(bytes.slice(1), 19, 5);
+  const channelZeroSamples = samples
+    .map((sample) => sample.data[0] ?? 0)
+    .filter((value) => Number.isFinite(value));
+
+  if (channelZeroSamples.length === 0) {
+    return 0;
   }
 
-  if (packetId >= 1 && packetId <= 100) {
-    return unpackCompressedSamples(bytes.slice(1, 19), 18, 6);
-  }
-
-  return [];
-}
-
-function expandPacketSamples(packet: GanglionPacket) {
-  const samples: GanglionSample[] = [];
-
-  if (packet.channelSamples.length === 4) {
-    samples.push({
-      packetId: packet.packetId,
-      timestamp: Date.now(),
-      data: packet.channelSamples,
-    });
-    return samples;
-  }
-
-  const groupSize = 4;
-  const timestamp = Date.now();
-
-  for (let index = 0; index + groupSize <= packet.channelSamples.length; index += groupSize) {
-    samples.push({
-      packetId: packet.packetId,
-      timestamp: timestamp + (index / groupSize) * 5,
-      data: packet.channelSamples.slice(index, index + groupSize),
-    });
-  }
-
-  return samples;
-}
-
-function unpackCompressedSamples(payload: Uint8Array, bitsPerSample: number, restoreShift: number) {
-  const samples: number[] = [];
-  const expectedSampleCount = Math.floor((payload.length * 8) / bitsPerSample);
-
-  for (let sampleIndex = 0; sampleIndex < expectedSampleCount; sampleIndex += 1) {
-    const packedSample = readBits(payload, sampleIndex * bitsPerSample, bitsPerSample);
-    const signBit = packedSample & 1;
-    const magnitudeBits = packedSample >> 1;
-    const restored = (signBit << (bitsPerSample - 1)) | magnitudeBits;
-    samples.push(signExtend(restored, bitsPerSample) << restoreShift);
-  }
-
-  return samples;
-}
-
-function readBits(bytes: Uint8Array, bitOffset: number, bitLength: number) {
-  let value = 0;
-
-  for (let bitIndex = 0; bitIndex < bitLength; bitIndex += 1) {
-    const absoluteBit = bitOffset + bitIndex;
-    const byte = bytes[Math.floor(absoluteBit / 8)];
-    const bit = (byte >> (7 - (absoluteBit % 8))) & 1;
-    value = (value << 1) | bit;
-  }
-
-  return value;
-}
-
-function signExtend(value: number, bitLength: number) {
-  const signMask = 1 << (bitLength - 1);
-  return (value & signMask) ? value - (1 << bitLength) : value;
-}
-
-function readSigned24(bytes: Uint8Array, offset: number) {
-  let value = (bytes[offset] << 16) | (bytes[offset + 1] << 8) | bytes[offset + 2];
-
-  if (value & 0x800000) {
-    value -= 0x1000000;
-  }
-
-  return value;
+  const meanAbs = channelZeroSamples.reduce((sum, sample) => sum + Math.abs(sample), 0) / channelZeroSamples.length;
+  return clamp01(meanAbs / 0.0002);
 }
 
 function clamp01(value: number) {
