@@ -22,6 +22,9 @@ interface GestureData {
 
 type SignalSourceLabel = Record<SignalSourceMode, string>;
 
+const LIVE_SAMPLE_MIN_DURATION_MS = 350;
+const LIVE_SAMPLE_MIN_POINTS = 6;
+
 export default function App() {
   const [feedbackState, setFeedbackState] = useState<FeedbackState>('ready');
   const [threshold, setThreshold] = useState(0.6);
@@ -35,6 +38,16 @@ export default function App() {
   const [showGestureChangeMessage, setShowGestureChangeMessage] = useState(false);
   const previewPanelRef = useRef<HTMLDivElement>(null);
   const gestureDropdownRef = useRef<HTMLDivElement>(null);
+  const liveCaptureRef = useRef<{
+    active: boolean;
+    startedAt: number | null;
+    points: { time: number; value: number }[];
+  }>({
+    active: false,
+    startedAt: null,
+    points: [],
+  });
+  const lastLivePointTimeRef = useRef<number | null>(null);
 
   const generateMockSignalValue = useCallback(() => {
     const time = Date.now();
@@ -161,7 +174,7 @@ export default function App() {
   }, [signalSourceMode]);
 
   useEffect(() => {
-    if (signalSourceMode !== 'live') {
+    if (signalSourceMode === 'mock') {
       return;
     }
 
@@ -176,6 +189,91 @@ export default function App() {
     setFeedbackState('ready');
     setHighlightSegment(null);
   }, [signalData, signalSourceMode, threshold]);
+
+  useEffect(() => {
+    if (signalSourceMode !== 'mock') {
+      return;
+    }
+
+    liveCaptureRef.current = { active: false, startedAt: null, points: [] };
+    lastLivePointTimeRef.current = null;
+  }, [signalSourceMode]);
+
+  useEffect(() => {
+    if (signalData.length === 0) {
+      return;
+    }
+
+    const lastProcessedTime = lastLivePointTimeRef.current;
+    const newPoints = lastProcessedTime === null
+      ? signalData
+      : signalData.filter((point) => point.time > lastProcessedTime);
+
+    if (newPoints.length === 0) {
+      return;
+    }
+    for (const point of newPoints) {
+      lastLivePointTimeRef.current = point.time;
+
+      const capture = liveCaptureRef.current;
+      const isActive = point.envelope > threshold;
+
+      if (isActive) {
+        if (!capture.active) {
+          capture.active = true;
+          capture.startedAt = point.time;
+          capture.points = [];
+        }
+
+        capture.points.push({ time: point.time, value: point.value });
+        continue;
+      }
+
+      if (!capture.active) {
+        continue;
+      }
+
+      const durationMs = point.time - (capture.startedAt ?? point.time);
+      const waveformData = capture.points.slice();
+      liveCaptureRef.current = { active: false, startedAt: null, points: [] };
+
+      if (durationMs < LIVE_SAMPLE_MIN_DURATION_MS || waveformData.length < LIVE_SAMPLE_MIN_POINTS) {
+        continue;
+      }
+
+      const peak = waveformData.reduce((max, samplePoint) => Math.max(max, samplePoint.value), 0);
+      const quality: SampleQuality = peak >= threshold + 0.08 ? 'good' : 'weak';
+
+      setGestureData((prev) => {
+        const gesture = prev[currentGesture];
+        const targetIndex = gesture.samples.findIndex((sample) => sample.status === 'empty');
+
+        if (targetIndex === -1) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          [currentGesture]: {
+            samples: gesture.samples.map((sample, index) =>
+              index === targetIndex
+                ? {
+                    ...sample,
+                    status: 'collected',
+                    timestamp: Date.now(),
+                    waveformData,
+                    quality,
+                  }
+                : sample
+            ),
+          },
+        };
+      });
+
+      setHighlightSegment(quality === 'good' ? 'good' : 'bad');
+      setTimeout(() => setHighlightSegment(null), 800);
+    }
+  }, [currentGesture, signalData, signalSourceMode, threshold]);
 
   // Close preview when clicking outside
   useEffect(() => {
