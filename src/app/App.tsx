@@ -22,12 +22,17 @@ interface GestureData {
 
 type SignalSourceLabel = Record<SignalSourceMode, string>;
 
-const LIVE_SAMPLE_MIN_DURATION_MS = 350;
-const LIVE_SAMPLE_MIN_POINTS = 6;
+const DEFAULT_SEGMENT_DURATION_MS = 1200;
+const MIN_SEGMENT_POINTS = 6;
 
 export default function App() {
   const [feedbackState, setFeedbackState] = useState<FeedbackState>('ready');
   const [threshold, setThreshold] = useState(0.6);
+  const [segmentDurationMs] = useState(DEFAULT_SEGMENT_DURATION_MS);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingStartTime, setRecordingStartTime] = useState<number | null>(null);
+  const [recordingProgress, setRecordingProgress] = useState(0);
+  const [currentCapturedSegment, setCurrentCapturedSegment] = useState<{ time: number; value: number }[]>([]);
   const [isAdjustingThreshold, setIsAdjustingThreshold] = useState(false);
   const [minRequired, setMinRequired] = useState(8);
   const [sampleTarget, setSampleTarget] = useState(12);
@@ -38,15 +43,9 @@ export default function App() {
   const [showGestureChangeMessage, setShowGestureChangeMessage] = useState(false);
   const previewPanelRef = useRef<HTMLDivElement>(null);
   const gestureDropdownRef = useRef<HTMLDivElement>(null);
-  const liveCaptureRef = useRef<{
-    active: boolean;
-    startedAt: number | null;
-    points: { time: number; value: number }[];
-  }>({
-    active: false,
-    startedAt: null,
-    points: [],
-  });
+  const recordingStartTimeRef = useRef<number | null>(null);
+  const currentCapturedSegmentRef = useRef<{ time: number; value: number }[]>([]);
+  const wasAboveThresholdRef = useRef(false);
   const lastLivePointTimeRef = useRef<number | null>(null);
 
   const generateMockSignalValue = useCallback(() => {
@@ -148,7 +147,7 @@ export default function App() {
 
   // Simulate state changes for demonstration
   useEffect(() => {
-    if (signalSourceMode !== 'mock') {
+    if (signalSourceMode !== 'mock' || isRecording) {
       return;
     }
 
@@ -171,10 +170,10 @@ export default function App() {
     }, 3000);
 
     return () => clearInterval(stateInterval);
-  }, [signalSourceMode]);
+  }, [isRecording, signalSourceMode]);
 
   useEffect(() => {
-    if (signalSourceMode === 'mock') {
+    if (signalSourceMode === 'mock' || isRecording) {
       return;
     }
 
@@ -188,15 +187,27 @@ export default function App() {
 
     setFeedbackState('ready');
     setHighlightSegment(null);
-  }, [signalData, signalSourceMode, threshold]);
+  }, [isRecording, signalData, signalSourceMode, threshold]);
 
   useEffect(() => {
-    if (signalSourceMode !== 'mock') {
+    if (!isRecording) {
       return;
     }
 
-    liveCaptureRef.current = { active: false, startedAt: null, points: [] };
+    setFeedbackState('recording');
+    setHighlightSegment('good');
+  }, [isRecording]);
+
+  useEffect(() => {
+    recordingStartTimeRef.current = null;
+    currentCapturedSegmentRef.current = [];
+    wasAboveThresholdRef.current = false;
     lastLivePointTimeRef.current = null;
+    setIsRecording(false);
+    setRecordingStartTime(null);
+    setRecordingProgress(0);
+    setCurrentCapturedSegment([]);
+    setHighlightSegment(null);
   }, [signalSourceMode]);
 
   useEffect(() => {
@@ -214,35 +225,56 @@ export default function App() {
     }
     for (const point of newPoints) {
       lastLivePointTimeRef.current = point.time;
-
-      const capture = liveCaptureRef.current;
       const isActive = point.envelope > threshold;
+      const crossedThreshold = !wasAboveThresholdRef.current && isActive;
+      wasAboveThresholdRef.current = isActive;
 
-      if (isActive) {
-        if (!capture.active) {
-          capture.active = true;
-          capture.startedAt = point.time;
-          capture.points = [];
+      if (!isRecording) {
+        if (!crossedThreshold) {
+          continue;
         }
 
-        capture.points.push({ time: point.time, value: point.value });
+        const seededSegment = [{ time: point.time, value: point.value }];
+        recordingStartTimeRef.current = point.time;
+        currentCapturedSegmentRef.current = seededSegment;
+        setIsRecording(true);
+        setRecordingStartTime(point.time);
+        setRecordingProgress(0);
+        setCurrentCapturedSegment(seededSegment);
+        setFeedbackState('recording');
+        setHighlightSegment('good');
         continue;
       }
 
-      if (!capture.active) {
+      const startedAt = recordingStartTimeRef.current ?? point.time;
+      const nextSegment = [...currentCapturedSegmentRef.current, { time: point.time, value: point.value }];
+      currentCapturedSegmentRef.current = nextSegment;
+      setCurrentCapturedSegment(nextSegment);
+
+      const elapsedMs = point.time - startedAt;
+      const progress = Math.max(0, Math.min(1, elapsedMs / Math.max(segmentDurationMs, 1)));
+      setRecordingProgress(progress);
+
+      if (elapsedMs < segmentDurationMs) {
         continue;
       }
 
-      const durationMs = point.time - (capture.startedAt ?? point.time);
-      const waveformData = capture.points.slice();
-      liveCaptureRef.current = { active: false, startedAt: null, points: [] };
+      recordingStartTimeRef.current = null;
+      setIsRecording(false);
+      setRecordingStartTime(null);
+      setRecordingProgress(0);
 
-      if (durationMs < LIVE_SAMPLE_MIN_DURATION_MS || waveformData.length < LIVE_SAMPLE_MIN_POINTS) {
+      if (nextSegment.length < MIN_SEGMENT_POINTS) {
+        currentCapturedSegmentRef.current = [];
+        setCurrentCapturedSegment([]);
+        setFeedbackState('ready');
+        setHighlightSegment(null);
         continue;
       }
 
-      const peak = waveformData.reduce((max, samplePoint) => Math.max(max, samplePoint.value), 0);
+      const peak = nextSegment.reduce((max, samplePoint) => Math.max(max, samplePoint.value), 0);
       const quality: SampleQuality = peak >= threshold + 0.08 ? 'good' : 'weak';
+      const waveformData = nextSegment;
 
       setGestureData((prev) => {
         const gesture = prev[currentGesture];
@@ -270,10 +302,12 @@ export default function App() {
         };
       });
 
+      currentCapturedSegmentRef.current = [];
+      setCurrentCapturedSegment([]);
       setHighlightSegment(quality === 'good' ? 'good' : 'bad');
       setTimeout(() => setHighlightSegment(null), 800);
     }
-  }, [currentGesture, signalData, signalSourceMode, threshold]);
+  }, [currentGesture, isRecording, segmentDurationMs, signalData, threshold]);
 
   // Close preview when clicking outside
   useEffect(() => {
@@ -462,6 +496,13 @@ export default function App() {
 
   const feedback = getFeedbackConfig();
   const latestSignal = signalData[signalData.length - 1];
+  const recordingSecondsRemaining = Math.max(
+    0,
+    (segmentDurationMs - Math.round(recordingProgress * segmentDurationMs)) / 1000
+  );
+  const progressCircleRadius = 26;
+  const progressCircleCircumference = 2 * Math.PI * progressCircleRadius;
+  const progressCircleOffset = progressCircleCircumference * (1 - recordingProgress);
   // Determine graph glow based on signal crossing threshold
   const isAboveThreshold = signalSourceMode === 'live'
     ? (latestSignal?.envelope ?? 0) > threshold
@@ -748,10 +789,51 @@ export default function App() {
             transition={{ duration: 0.3 }}
             className="flex flex-col gap-3 items-center"
           >
-            <div className={`px-8 py-4 rounded-xl border ${feedback.borderColor} ${feedback.bgColor} backdrop-blur-sm`}>
-              <p className={`text-2xl font-medium ${feedback.color}`}>
-                {feedback.text}
-              </p>
+            <div className="flex items-center gap-4">
+              <div className={`px-8 py-4 rounded-xl border ${feedback.borderColor} ${feedback.bgColor} backdrop-blur-sm`}>
+                <p className={`text-2xl font-medium ${feedback.color}`}>
+                  {feedback.text}
+                </p>
+              </div>
+              <div className="flex h-20 w-20 items-center justify-center rounded-xl border border-white/10 bg-slate-900/50 backdrop-blur-sm">
+                <div
+                  className={`relative flex h-16 w-16 items-center justify-center rounded-full border bg-slate-900/60 transition-opacity ${
+                    isRecording
+                      ? 'border-cyan-400/20 opacity-100'
+                      : 'border-white/10 opacity-35'
+                  }`}
+                >
+                  <svg className="absolute inset-0 -rotate-90" viewBox="0 0 64 64">
+                    <circle
+                      cx="32"
+                      cy="32"
+                      r={progressCircleRadius}
+                      fill="none"
+                      stroke="rgba(255,255,255,0.12)"
+                      strokeWidth="4"
+                    />
+                    <circle
+                      cx="32"
+                      cy="32"
+                      r={progressCircleRadius}
+                      fill="none"
+                      stroke={isRecording ? '#22d3ee' : 'rgba(255,255,255,0.18)'}
+                      strokeWidth="4"
+                      strokeLinecap="round"
+                      strokeDasharray={progressCircleCircumference}
+                      strokeDashoffset={isRecording ? progressCircleOffset : progressCircleCircumference}
+                    />
+                  </svg>
+                  <div className="relative text-center">
+                    <div className={`text-xs font-medium ${isRecording ? 'text-cyan-300' : 'text-white/45'}`}>
+                      {isRecording ? `${Math.ceil(recordingSecondsRemaining * 10) / 10}s` : '--'}
+                    </div>
+                    <div className="text-[10px] text-white/50">
+                      {isRecording ? `${Math.round(recordingProgress * 100)}%` : 'idle'}
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
             <p className="text-lg text-white/60 font-light">
               {feedback.instruction}

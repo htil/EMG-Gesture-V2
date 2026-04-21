@@ -1,44 +1,94 @@
 
-  # Untitled
+# EMG Gesture V2
 
-  This is a code bundle for Untitled. The original project is available at https://www.figma.com/design/YVxBgDxmVFyUo5HtENqhnv/Untitled.
+EMG Gesture V2 is an EMG training and data-collection interface for testing gesture capture with either mock data or a live OpenBCI Ganglion signal.
 
-  ## Running the code
+## Run the app
 
-  Run `npm i` to install the dependencies.
+From the project root:
 
-  Run `npm run dev` to start the development server.
+```bash
+npm install
+npm run dev
+```
 
-  ## Signal source modes
+Vite will print a local URL, usually:
 
-  The training screen supports two signal sources:
+```bash
+http://127.0.0.1:5173/
+```
 
-  - Mock mode: local generated EMG data
-  - Connect Ganglion: direct OpenBCI Ganglion BLE stream through Chrome/Edge Web Bluetooth
+Open that URL in your browser.
 
-  ## Run frontend
+## Modes
 
-  Install and start:
+The app supports two signal source modes:
 
-  ```bash
-  npm i
-  npm run dev
-  ```
+- `Mock`: generated EMG-like signal for UI and recording-flow testing
+- `Connect Ganglion`: live OpenBCI Ganglion signal through browser BLE
 
-  To stay in mock mode, leave the UI toggle on `Mock`.
+## How to use Mock mode
 
-  To test direct Ganglion BLE, open the frontend on `localhost` in Chrome or Edge, then click `Connect Ganglion` and choose the board from the browser Bluetooth prompt. The current live path displays a normalized packet-level preview signal for UI testing, not calibrated microvolt values yet.
+1. Run:
 
-  ## Optional backend
+```bash
+npm run dev
+```
 
-  Backend instructions are in `backend/README.md`. The current frontend live button uses direct browser BLE instead of the backend WebSocket.
+2. Open the local Vite URL
+3. Leave the source toggle on `Mock`
+4. The graph will animate with generated signal data
+5. You can test threshold-triggered recording behavior without hardware
 
-  Quick start:
+## How to use Live Ganglion mode
 
-  ```bash
-  pip install -r backend/requirements.txt
-  uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
-  ```
+1. Run:
 
-  Then switch the UI toggle to `Live`.
+```bash
+npm run dev
+```
+
+2. Open the local Vite URL in **Chrome or Edge**
+3. Click `Connect Ganglion`
+4. Choose the Ganglion from the browser Bluetooth picker
+5. The live signal should begin streaming into the chart
+
+Notes:
+
+- Web Bluetooth works best from `localhost` / `127.0.0.1`
+- Use Chrome or Edge, not Firefox
+- Make sure the Ganglion is not already connected to another app
+
+## Useful commands
+
+Start dev server:
+
+```bash
+npm run dev
+```
+
+Build production bundle:
+
+```bash
+npm run build
+```
+
+## Backend
+
+There is a `backend/` folder in the repo, but the current frontend live signal path uses direct browser BLE for the Ganglion. You do not need the backend running for the current UI workflow.
+
+  ## TODO
+
+  - [ ] Fixed-length recording flow: use threshold crossing only to trigger the start of capture, then record for a set duration so every sample has the same time window.
+  - [ ] Add a visible recording progress indicator, such as a loading bar or circular timer, while a fixed-length sample is being captured.
+  - [ ] Save richer sample metadata with each recording, including gesture name, timestamp, threshold used, duration, and peak signal value.
+  - [ ] Add a short cooldown between recordings so one long contraction does not accidentally create multiple samples.
+  - [ ] Improve sample quality rules so captures can be labeled more accurately as good, weak, noisy, or too short.
+  - [ ] Add a calibration flow for rest baseline and threshold suggestion before recording starts.
+  - [ ] Let the user clear all samples for the current gesture and restart collection quickly.
+  - [ ] Export recorded samples for training, ideally as JSON or CSV.
+  - [ ] Persist collected samples locally so refreshes do not wipe out a session.
+  - [ ] Add a lightweight session summary showing how many usable samples exist per gesture.
+  - [ ] Make the live status panel more explicit about source, connection state, and whether capture is idle, armed, or recording.
+  - [ ] Tune the UI around one-channel EMG collection so the workflow feels intentional rather than generic.
   
