@@ -3,6 +3,14 @@ import { AreaChart, Area, XAxis, YAxis, ReferenceLine, ResponsiveContainer } fro
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Settings2, RotateCcw, Target, Trash2, ChevronDown } from 'lucide-react';
 import { useSignalSource, type SignalSourceMode } from './useSignalSource';
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger
+} from './components/ui/sheet';
 
 type FeedbackState = 'ready' | 'recording' | 'good' | 'weak' | 'noisy' | 'short';
 type SampleQuality = 'good' | 'weak' | 'noisy';
@@ -28,15 +36,14 @@ const MIN_SEGMENT_POINTS = 6;
 export default function App() {
   const [feedbackState, setFeedbackState] = useState<FeedbackState>('ready');
   const [threshold, setThreshold] = useState(0.6);
-  const [segmentDurationMs] = useState(DEFAULT_SEGMENT_DURATION_MS);
+  const [segmentDurationMs, setSegmentDurationMs] = useState(DEFAULT_SEGMENT_DURATION_MS);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingStartTime, setRecordingStartTime] = useState<number | null>(null);
   const [recordingProgress, setRecordingProgress] = useState(0);
   const [currentCapturedSegment, setCurrentCapturedSegment] = useState<{ time: number; value: number }[]>([]);
-  const [isAdjustingThreshold, setIsAdjustingThreshold] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [minRequired, setMinRequired] = useState(8);
   const [sampleTarget, setSampleTarget] = useState(12);
-  const [isEditingTarget, setIsEditingTarget] = useState(false);
   const [selectedSampleId, setSelectedSampleId] = useState<number | null>(null);
   const [currentGesture, setCurrentGesture] = useState<GestureName>('Pinch');
   const [isGestureDropdownOpen, setIsGestureDropdownOpen] = useState(false);
@@ -367,6 +374,14 @@ export default function App() {
     setThreshold(parseFloat(e.target.value));
   };
 
+  const handleMinRequiredChange = (delta: number) => {
+    setMinRequired(prev => Math.max(1, Math.min(sampleTarget, prev + delta)));
+  };
+
+  const handleSegmentDurationChange = (delta: number) => {
+    setSegmentDurationMs(prev => Math.max(400, Math.min(3000, prev + delta)));
+  };
+
   const handleSignalSourceChange = (mode: SignalSourceMode) => {
     if (mode === 'live') {
       void connectGanglion();
@@ -379,6 +394,7 @@ export default function App() {
   const handleTargetChange = (delta: number) => {
     const newTarget = Math.max(minRequired, Math.min(20, sampleTarget + delta));
     setSampleTarget(newTarget);
+    setMinRequired(prev => Math.min(prev, newTarget));
     // Adjust samples array
     if (newTarget > currentSamples.length) {
       setGestureData(prev => ({
@@ -604,84 +620,171 @@ export default function App() {
             </div>
           </div>
           
-          {/* Target adjustment control */}
-          <div className="flex flex-col items-end gap-2">
-            <div className="flex items-center gap-2 rounded-lg bg-white/5 border border-white/10 p-1">
+          <Sheet open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
+            <SheetTrigger asChild>
               <button
-                onClick={() => handleSignalSourceChange('mock')}
-                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
-                  signalSourceMode === 'mock'
-                    ? 'bg-cyan-400/15 text-cyan-300'
-                    : 'text-white/60 hover:text-white hover:bg-white/5'
-                }`}
-                title="Use mock signal source"
+                className="flex items-center justify-center rounded-lg border border-white/10 bg-white/5 p-2 text-white/60 transition-colors hover:bg-white/10 hover:text-white"
+                title="Open settings"
               >
-                {signalSourceLabels.mock}
+                <Settings2 className="w-4 h-4" />
               </button>
-              <button
-                onClick={() => handleSignalSourceChange('live')}
-                disabled={liveConnectionStatus === 'connecting' || liveConnectionStatus === 'streaming'}
-                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
-                  signalSourceMode === 'live'
-                    ? 'bg-cyan-400/15 text-cyan-300'
-                    : 'text-white/60 hover:text-white hover:bg-white/5'
-                }`}
-                title="Connect OpenBCI Ganglion over browser Bluetooth"
-              >
-                {liveConnectionStatus === 'connecting' ? 'Connecting...' : signalSourceLabels.live}
-              </button>
-            </div>
+            </SheetTrigger>
+            <SheetContent side="right" className="border-white/10 bg-slate-900 text-white sm:max-w-md">
+              <SheetHeader className="border-b border-white/10 pb-4">
+                <SheetTitle className="text-white">Session Settings</SheetTitle>
+                <SheetDescription className="text-white/50">
+                  Adjust capture behavior without changing the training screen.
+                </SheetDescription>
+              </SheetHeader>
 
-            <div className="text-xs text-white/40 min-h-[1rem]">
-              {signalSourceMode === 'live' ? liveStatusText : 'Mock: Local'}
-            </div>
+              <div className="flex flex-col gap-6 overflow-y-auto px-4 pb-6">
+                <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div>
+                    <p className="text-sm font-medium text-white/90">Signal Source</p>
+                    <p className="text-xs text-white/45">Switch between local mock data and the Ganglion connection.</p>
+                  </div>
+                  <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-slate-950/50 p-1">
+                    <button
+                      onClick={() => handleSignalSourceChange('mock')}
+                      className={`flex-1 px-3 py-1.5 text-sm rounded-md transition-colors ${
+                        signalSourceMode === 'mock'
+                          ? 'bg-cyan-400/15 text-cyan-300'
+                          : 'text-white/60 hover:text-white hover:bg-white/5'
+                      }`}
+                      title="Use mock signal source"
+                    >
+                      {signalSourceLabels.mock}
+                    </button>
+                    <button
+                      onClick={() => handleSignalSourceChange('live')}
+                      disabled={liveConnectionStatus === 'connecting' || liveConnectionStatus === 'streaming'}
+                      className={`flex-1 px-3 py-1.5 text-sm rounded-md transition-colors ${
+                        signalSourceMode === 'live'
+                          ? 'bg-cyan-400/15 text-cyan-300'
+                          : 'text-white/60 hover:text-white hover:bg-white/5'
+                      }`}
+                      title="Connect OpenBCI Ganglion over browser Bluetooth"
+                    >
+                      {liveConnectionStatus === 'connecting' ? 'Connecting...' : signalSourceLabels.live}
+                    </button>
+                  </div>
+                  <div className="space-y-1 text-xs text-white/45">
+                    <div>{signalSourceMode === 'live' ? liveStatusText : 'Mock: Local'}</div>
+                    <div>
+                      {signalSourceMode === 'live'
+                        ? `Samples: ${livePacketCount}`
+                        : `Browser BLE: ${isBluetoothAvailable ? 'Available' : 'Unavailable'}`}
+                    </div>
+                    <div>
+                      {signalSourceMode === 'live'
+                        ? `Signal ${(latestSignal?.value ?? 0).toFixed(2)}`
+                        : `Value ${(latestSignal?.value ?? 0).toFixed(2)}`}
+                    </div>
+                  </div>
+                </div>
 
-            <div className="text-xs text-white/40 min-h-[1rem]">
-              {signalSourceMode === 'live'
-                ? `Samples: ${livePacketCount}`
-                : `Browser BLE: ${isBluetoothAvailable ? 'Available' : 'Unavailable'}`}
-            </div>
+                <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-white/90">Threshold</p>
+                      <p className="text-xs text-white/45">Set the signal level that starts a recording.</p>
+                    </div>
+                    <span className="text-sm text-white/75">{(threshold * 100).toFixed(0)}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.2"
+                    max="0.9"
+                    step="0.05"
+                    value={threshold}
+                    onChange={handleThresholdChange}
+                    className="w-full accent-amber-500"
+                  />
+                </div>
 
-            <div className="text-xs text-white/40 min-h-[1rem]">
-              {signalSourceMode === 'live'
-                ? `Signal ${(latestSignal?.value ?? 0).toFixed(2)}`
-                : `Value ${(latestSignal?.value ?? 0).toFixed(2)}`}
-            </div>
+                <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-white/90">Minimum Required Samples</p>
+                      <p className="text-xs text-white/45">Set the collection goal shown for the current gesture.</p>
+                    </div>
+                    <span className="text-sm text-white/75">{minRequired}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handleMinRequiredChange(-1)}
+                      className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+                    >
+                      -
+                    </button>
+                    <div className="flex-1 rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-center text-sm text-white/80">
+                      Minimum required: {minRequired}
+                    </div>
+                    <button
+                      onClick={() => handleMinRequiredChange(1)}
+                      className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setIsEditingTarget(!isEditingTarget)}
-                className="p-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 transition-colors"
-                title="Adjust sample target"
-              >
-                <Target className="w-4 h-4 text-white/60" />
-              </button>
-              
-              {isEditingTarget && (
-                <motion.div
-                  initial={{ opacity: 0, scale: 0.9 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  className="flex items-center gap-2 bg-slate-800/80 backdrop-blur-sm border border-white/10 rounded-lg px-3 py-2"
-                >
-                  <button
-                    onClick={() => handleTargetChange(-1)}
-                    className="text-white/60 hover:text-white transition-colors"
-                  >
-                    −
-                  </button>
-                  <span className="text-sm text-white/80 min-w-[3rem] text-center">
-                    Target: {sampleTarget}
-                  </span>
-                  <button
-                    onClick={() => handleTargetChange(1)}
-                    className="text-white/60 hover:text-white transition-colors"
-                  >
-                    +
-                  </button>
-                </motion.div>
-              )}
-            </div>
-          </div>
+                <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-white/90">Segment Duration</p>
+                      <p className="text-xs text-white/45">Fixed capture length after threshold crossing.</p>
+                    </div>
+                    <span className="text-sm text-white/75">{(segmentDurationMs / 1000).toFixed(1)}s</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handleSegmentDurationChange(-100)}
+                      className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+                    >
+                      -
+                    </button>
+                    <div className="flex-1 rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-center text-sm text-white/80">
+                      Duration: {segmentDurationMs} ms
+                    </div>
+                    <button
+                      onClick={() => handleSegmentDurationChange(100)}
+                      className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-white/90">Sample Slots</p>
+                      <p className="text-xs text-white/45">Adjust the number of available sample slots for this gesture.</p>
+                    </div>
+                    <Target className="w-4 h-4 text-white/45" />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handleTargetChange(-1)}
+                      className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+                    >
+                      -
+                    </button>
+                    <div className="flex-1 rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-center text-sm text-white/80">
+                      Target: {sampleTarget}
+                    </div>
+                    <button
+                      onClick={() => handleTargetChange(1)}
+                      className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </SheetContent>
+          </Sheet>
         </div>
 
         {/* 2. Main Signal Visualization */}
@@ -738,44 +841,6 @@ export default function App() {
                 />
               </AreaChart>
             </ResponsiveContainer>
-            
-            {/* Threshold adjustment overlay */}
-            {isAdjustingThreshold && (
-              <motion.div
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="absolute top-4 right-4 bg-slate-800/95 backdrop-blur-sm border border-white/10 rounded-lg px-4 py-3 shadow-xl"
-              >
-                <div className="flex flex-col gap-2 min-w-[200px]">
-                  <label className="text-xs text-white/60">Threshold Level</label>
-                  <input
-                    type="range"
-                    min="0.2"
-                    max="0.9"
-                    step="0.05"
-                    value={threshold}
-                    onChange={handleThresholdChange}
-                    className="w-full accent-amber-500"
-                  />
-                  <div className="text-sm text-white/80 text-center">{(threshold * 100).toFixed(0)}%</div>
-                </div>
-              </motion.div>
-            )}
-          </div>
-          
-          {/* Threshold control button */}
-          <div className="flex justify-end mt-2">
-            <button
-              onClick={() => setIsAdjustingThreshold(!isAdjustingThreshold)}
-              className={`p-2 rounded-lg border transition-colors ${
-                isAdjustingThreshold 
-                  ? 'bg-amber-500/20 border-amber-500/30 text-amber-400' 
-                  : 'bg-white/5 border-white/10 text-white/60 hover:bg-white/10'
-              }`}
-              title="Adjust threshold"
-            >
-              <Settings2 className="w-4 h-4" />
-            </button>
           </div>
         </div>
 
