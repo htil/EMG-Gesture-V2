@@ -389,27 +389,37 @@ export default function App() {
     setSampleTarget(clampedValue);
     setMinRequired(clampedValue);
 
-    if (clampedValue > currentSamples.length) {
-      setGestureData(prev => ({
-        ...prev,
-        [currentGesture]: {
-          samples: [
-            ...prev[currentGesture].samples,
-            ...Array.from({ length: clampedValue - prev[currentGesture].samples.length }, (_, i) => ({
-              id: prev[currentGesture].samples.length + i,
-              status: 'empty' as const
-            }))
-          ]
+    setGestureData(prev => {
+      const nextGestureData = { ...prev };
+
+      for (const gesture of availableGestures) {
+        const existingSamples = prev[gesture].samples;
+
+        if (clampedValue > existingSamples.length) {
+          nextGestureData[gesture] = {
+            samples: [
+              ...existingSamples,
+              ...Array.from({ length: clampedValue - existingSamples.length }, (_, i) => ({
+                id: existingSamples.length + i,
+                status: 'empty' as const
+              }))
+            ]
+          };
+          continue;
         }
-      }));
-    } else if (clampedValue < currentSamples.length) {
-      setGestureData(prev => ({
-        ...prev,
-        [currentGesture]: {
-          samples: prev[currentGesture].samples.slice(0, clampedValue)
+
+        if (clampedValue < existingSamples.length) {
+          nextGestureData[gesture] = {
+            samples: existingSamples.slice(0, clampedValue)
+          };
+          continue;
         }
-      }));
-    }
+
+        nextGestureData[gesture] = prev[gesture];
+      }
+
+      return nextGestureData;
+    });
   };
 
   const handleTargetSampleChange = (delta: number) => {
