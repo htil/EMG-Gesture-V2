@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { AreaChart, Area, XAxis, YAxis, ReferenceLine, ResponsiveContainer } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, Settings2, RotateCcw, Target, Trash2, ChevronDown } from 'lucide-react';
+import { X, Settings2, RotateCcw, Trash2, ChevronDown } from 'lucide-react';
 import { useSignalSource, type SignalSourceMode } from './useSignalSource';
 import {
   Sheet,
@@ -44,6 +44,8 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [minRequired, setMinRequired] = useState(8);
   const [sampleTarget, setSampleTarget] = useState(12);
+  const [targetSamplesInputValue, setTargetSamplesInputValue] = useState('12');
+  const [segmentDurationInputValue, setSegmentDurationInputValue] = useState(String(DEFAULT_SEGMENT_DURATION_MS));
   const [selectedSampleId, setSelectedSampleId] = useState<number | null>(null);
   const [currentGesture, setCurrentGesture] = useState<GestureName>('Pinch');
   const [isGestureDropdownOpen, setIsGestureDropdownOpen] = useState(false);
@@ -151,6 +153,14 @@ export default function App() {
   const [highlightSegment, setHighlightSegment] = useState<'good' | 'bad' | null>(null);
 
   const samplesCollected = currentSamples.filter(s => s.status === 'collected').length;
+
+  useEffect(() => {
+    setTargetSamplesInputValue(String(sampleTarget));
+  }, [sampleTarget]);
+
+  useEffect(() => {
+    setSegmentDurationInputValue(String(segmentDurationMs));
+  }, [segmentDurationMs]);
 
   // Simulate state changes for demonstration
   useEffect(() => {
@@ -374,12 +384,84 @@ export default function App() {
     setThreshold(parseFloat(e.target.value));
   };
 
-  const handleMinRequiredChange = (delta: number) => {
-    setMinRequired(prev => Math.max(1, Math.min(sampleTarget, prev + delta)));
+  const applyTargetSampleValue = (nextValue: number) => {
+    const clampedValue = Math.max(1, Math.min(50, nextValue));
+    setSampleTarget(clampedValue);
+    setMinRequired(clampedValue);
+
+    if (clampedValue > currentSamples.length) {
+      setGestureData(prev => ({
+        ...prev,
+        [currentGesture]: {
+          samples: [
+            ...prev[currentGesture].samples,
+            ...Array.from({ length: clampedValue - prev[currentGesture].samples.length }, (_, i) => ({
+              id: prev[currentGesture].samples.length + i,
+              status: 'empty' as const
+            }))
+          ]
+        }
+      }));
+    } else if (clampedValue < currentSamples.length) {
+      setGestureData(prev => ({
+        ...prev,
+        [currentGesture]: {
+          samples: prev[currentGesture].samples.slice(0, clampedValue)
+        }
+      }));
+    }
+  };
+
+  const handleTargetSampleChange = (delta: number) => {
+    applyTargetSampleValue(sampleTarget + delta);
+  };
+
+  const handleTargetSampleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setTargetSamplesInputValue(e.target.value);
+  };
+
+  const commitTargetSamplesInputValue = () => {
+    const parsedValue = Number.parseInt(targetSamplesInputValue, 10);
+    if (targetSamplesInputValue.trim() === '' || Number.isNaN(parsedValue)) {
+      setTargetSamplesInputValue(String(sampleTarget));
+      return;
+    }
+
+    applyTargetSampleValue(parsedValue);
+  };
+
+  const applySegmentDurationValue = (nextValue: number) => {
+    setSegmentDurationMs(Math.max(400, Math.min(3000, nextValue)));
   };
 
   const handleSegmentDurationChange = (delta: number) => {
-    setSegmentDurationMs(prev => Math.max(400, Math.min(3000, prev + delta)));
+    applySegmentDurationValue(segmentDurationMs + delta);
+  };
+
+  const handleSegmentDurationInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setSegmentDurationInputValue(e.target.value);
+  };
+
+  const commitSegmentDurationInputValue = () => {
+    const parsedValue = Number.parseInt(segmentDurationInputValue, 10);
+    if (segmentDurationInputValue.trim() === '' || Number.isNaN(parsedValue)) {
+      setSegmentDurationInputValue(String(segmentDurationMs));
+      return;
+    }
+
+    applySegmentDurationValue(parsedValue);
+  };
+
+  const handleNumericInputKeyDown = (
+    e: React.KeyboardEvent<HTMLInputElement>,
+    commitValue: () => void
+  ) => {
+    if (e.key !== 'Enter') {
+      return;
+    }
+
+    commitValue();
+    e.currentTarget.blur();
   };
 
   const handleSignalSourceChange = (mode: SignalSourceMode) => {
@@ -389,31 +471,6 @@ export default function App() {
     }
 
     void useMockSignal();
-  };
-
-  const handleTargetChange = (delta: number) => {
-    const newTarget = Math.max(minRequired, Math.min(20, sampleTarget + delta));
-    setSampleTarget(newTarget);
-    setMinRequired(prev => Math.min(prev, newTarget));
-    // Adjust samples array
-    if (newTarget > currentSamples.length) {
-      setGestureData(prev => ({
-        ...prev,
-        [currentGesture]: {
-          samples: [...prev[currentGesture].samples, ...Array.from({ length: newTarget - prev[currentGesture].samples.length }, (_, i) => ({
-            id: prev[currentGesture].samples.length + i,
-            status: 'empty' as const
-          }))]
-        }
-      }));
-    } else if (newTarget < currentSamples.length) {
-      setGestureData(prev => ({
-        ...prev,
-        [currentGesture]: {
-          samples: prev[currentGesture].samples.slice(0, newTarget)
-        }
-      }));
-    }
   };
 
   const getFeedbackConfig = () => {
@@ -705,23 +762,31 @@ export default function App() {
                 <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
                   <div className="flex items-start justify-between gap-4">
                     <div>
-                      <p className="text-sm font-medium text-white/90">Minimum Required Samples</p>
-                      <p className="text-xs text-white/45">Set the collection goal shown for the current gesture.</p>
+                      <p className="text-sm font-medium text-white/90">Target Samples</p>
+                      <p className="text-xs text-white/45">Set how many samples to collect for the current gesture.</p>
                     </div>
-                    <span className="text-sm text-white/75">{minRequired}</span>
+                    <span className="text-sm text-white/75">{sampleTarget}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <button
-                      onClick={() => handleMinRequiredChange(-1)}
+                      onClick={() => handleTargetSampleChange(-1)}
                       className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
                     >
                       -
                     </button>
-                    <div className="flex-1 rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-center text-sm text-white/80">
-                      Minimum required: {minRequired}
-                    </div>
+                    <input
+                      type="number"
+                      min={1}
+                      max={50}
+                      step={1}
+                      value={targetSamplesInputValue}
+                      onChange={handleTargetSampleInputChange}
+                      onBlur={commitTargetSamplesInputValue}
+                      onKeyDown={(e) => handleNumericInputKeyDown(e, commitTargetSamplesInputValue)}
+                      className="flex-1 rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-center text-sm text-white/80 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                    />
                     <button
-                      onClick={() => handleMinRequiredChange(1)}
+                      onClick={() => handleTargetSampleChange(1)}
                       className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
                     >
                       +
@@ -735,7 +800,7 @@ export default function App() {
                       <p className="text-sm font-medium text-white/90">Segment Duration</p>
                       <p className="text-xs text-white/45">Fixed capture length after threshold crossing.</p>
                     </div>
-                    <span className="text-sm text-white/75">{(segmentDurationMs / 1000).toFixed(1)}s</span>
+                    <span className="text-sm text-white/75">{segmentDurationMs} ms ({(segmentDurationMs / 1000).toFixed(1)} s)</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <button
@@ -744,38 +809,19 @@ export default function App() {
                     >
                       -
                     </button>
-                    <div className="flex-1 rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-center text-sm text-white/80">
-                      Duration: {segmentDurationMs} ms
-                    </div>
+                    <input
+                      type="number"
+                      min={400}
+                      max={3000}
+                      step={100}
+                      value={segmentDurationInputValue}
+                      onChange={handleSegmentDurationInputChange}
+                      onBlur={commitSegmentDurationInputValue}
+                      onKeyDown={(e) => handleNumericInputKeyDown(e, commitSegmentDurationInputValue)}
+                      className="flex-1 rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-center text-sm text-white/80 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                    />
                     <button
                       onClick={() => handleSegmentDurationChange(100)}
-                      className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
-                    >
-                      +
-                    </button>
-                  </div>
-                </div>
-
-                <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <p className="text-sm font-medium text-white/90">Sample Slots</p>
-                      <p className="text-xs text-white/45">Adjust the number of available sample slots for this gesture.</p>
-                    </div>
-                    <Target className="w-4 h-4 text-white/45" />
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => handleTargetChange(-1)}
-                      className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
-                    >
-                      -
-                    </button>
-                    <div className="flex-1 rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-center text-sm text-white/80">
-                      Target: {sampleTarget}
-                    </div>
-                    <button
-                      onClick={() => handleTargetChange(1)}
                       className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
                     >
                       +
