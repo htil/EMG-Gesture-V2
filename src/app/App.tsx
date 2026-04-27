@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { AreaChart, Area, XAxis, YAxis, ReferenceLine, ResponsiveContainer } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Settings2, RotateCcw, Trash2, ChevronDown } from 'lucide-react';
+import * as dfd from 'danfojs';
 import { useSignalSource, type SignalSourceMode } from './useSignalSource';
 import {
   Sheet,
@@ -15,17 +16,26 @@ import {
 type FeedbackState = 'ready' | 'recording' | 'good' | 'weak' | 'noisy' | 'short';
 type SampleQuality = 'good' | 'weak' | 'noisy';
 type GestureName = 'Pinch' | 'Squeeze' | 'Relax';
+type WaveformPoint = { time: number; value: number };
 
 interface Sample {
   id: number;
   status: 'collected' | 'empty';
   timestamp?: number;
-  waveformData?: { time: number; value: number }[];
+  waveformData?: WaveformPoint[];
   quality?: SampleQuality;
 }
 
 interface GestureData {
   samples: Sample[];
+}
+
+interface ExportSample {
+  id: string;
+  label: GestureName;
+  timestamp: number;
+  data: number[];
+  duration: number;
 }
 
 type SignalSourceLabel = Record<SignalSourceMode, string>;
@@ -40,7 +50,7 @@ export default function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingStartTime, setRecordingStartTime] = useState<number | null>(null);
   const [recordingProgress, setRecordingProgress] = useState(0);
-  const [currentCapturedSegment, setCurrentCapturedSegment] = useState<{ time: number; value: number }[]>([]);
+  const [currentCapturedSegment, setCurrentCapturedSegment] = useState<WaveformPoint[]>([]);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [minRequired, setMinRequired] = useState(8);
   const [sampleTarget, setSampleTarget] = useState(12);
@@ -53,7 +63,7 @@ export default function App() {
   const previewPanelRef = useRef<HTMLDivElement>(null);
   const gestureDropdownRef = useRef<HTMLDivElement>(null);
   const recordingStartTimeRef = useRef<number | null>(null);
-  const currentCapturedSegmentRef = useRef<{ time: number; value: number }[]>([]);
+  const currentCapturedSegmentRef = useRef<WaveformPoint[]>([]);
   const wasAboveThresholdRef = useRef(false);
   const lastLivePointTimeRef = useRef<number | null>(null);
 
@@ -78,6 +88,7 @@ export default function App() {
 
   const {
     signalData,
+    recordingSignalData,
     signalSourceMode,
     connectGanglion,
     useMockSignal,
@@ -91,8 +102,8 @@ export default function App() {
   const availableGestures: GestureName[] = ['Pinch', 'Squeeze', 'Relax'];
   
   // Generate mock waveform data for samples
-  const generateMockWaveform = (quality: SampleQuality): { time: number; value: number }[] => {
-    const data: { time: number; value: number }[] = [];
+  const generateMockWaveform = (quality: SampleQuality): WaveformPoint[] => {
+    const data: WaveformPoint[] = [];
     const baseTime = Date.now();
     
     for (let i = 0; i < 60; i++) {
@@ -153,7 +164,6 @@ export default function App() {
   const [highlightSegment, setHighlightSegment] = useState<'good' | 'bad' | null>(null);
 
   const samplesCollected = currentSamples.filter(s => s.status === 'collected').length;
-
   useEffect(() => {
     setTargetSamplesInputValue(String(sampleTarget));
   }, [sampleTarget]);
@@ -194,7 +204,7 @@ export default function App() {
       return;
     }
 
-    const latestEnvelope = signalData.at(-1)?.envelope ?? 0;
+    const latestEnvelope = recordingSignalData.at(-1)?.envelope ?? 0;
 
     if (latestEnvelope > threshold) {
       setFeedbackState('recording');
@@ -204,7 +214,7 @@ export default function App() {
 
     setFeedbackState('ready');
     setHighlightSegment(null);
-  }, [isRecording, signalData, signalSourceMode, threshold]);
+  }, [isRecording, recordingSignalData, signalSourceMode, threshold]);
 
   useEffect(() => {
     if (!isRecording) {
@@ -228,14 +238,14 @@ export default function App() {
   }, [signalSourceMode]);
 
   useEffect(() => {
-    if (signalData.length === 0) {
+    if (recordingSignalData.length === 0) {
       return;
     }
 
     const lastProcessedTime = lastLivePointTimeRef.current;
     const newPoints = lastProcessedTime === null
-      ? signalData
-      : signalData.filter((point) => point.time > lastProcessedTime);
+      ? recordingSignalData
+      : recordingSignalData.filter((point) => point.time > lastProcessedTime);
 
     if (newPoints.length === 0) {
       return;
@@ -251,7 +261,7 @@ export default function App() {
           continue;
         }
 
-        const seededSegment = [{ time: point.time, value: point.value }];
+        const seededSegment = [{ time: point.time, value: point.raw }];
         recordingStartTimeRef.current = point.time;
         currentCapturedSegmentRef.current = seededSegment;
         setIsRecording(true);
@@ -264,7 +274,7 @@ export default function App() {
       }
 
       const startedAt = recordingStartTimeRef.current ?? point.time;
-      const nextSegment = [...currentCapturedSegmentRef.current, { time: point.time, value: point.value }];
+      const nextSegment = [...currentCapturedSegmentRef.current, { time: point.time, value: point.raw }];
       currentCapturedSegmentRef.current = nextSegment;
       setCurrentCapturedSegment(nextSegment);
 
@@ -324,7 +334,7 @@ export default function App() {
       setHighlightSegment(quality === 'good' ? 'good' : 'bad');
       setTimeout(() => setHighlightSegment(null), 800);
     }
-  }, [currentGesture, isRecording, segmentDurationMs, signalData, threshold]);
+  }, [currentGesture, isRecording, recordingSignalData, segmentDurationMs, threshold]);
 
   // Close preview when clicking outside
   useEffect(() => {
@@ -578,7 +588,7 @@ export default function App() {
   };
 
   const feedback = getFeedbackConfig();
-  const latestSignal = signalData[signalData.length - 1];
+  const latestSignal = recordingSignalData[recordingSignalData.length - 1] ?? signalData[signalData.length - 1];
   const recordingSecondsRemaining = Math.max(
     0,
     (segmentDurationMs - Math.round(recordingProgress * segmentDurationMs)) / 1000
@@ -604,6 +614,95 @@ export default function App() {
       : liveConnectionStatus === 'error'
       ? `Ganglion: ${liveConnectionMessage}`
       : 'Ganglion: Disconnected';
+
+  const buildExportSamplesByLabel = (): Record<GestureName, ExportSample[]> => {
+    const exportedSamples = {} as Record<GestureName, ExportSample[]>;
+
+    for (const gesture of availableGestures) {
+      exportedSamples[gesture] = gestureData[gesture].samples
+        .filter((sample) => sample.status === 'collected' && sample.waveformData && sample.waveformData.length > 0)
+        .map((sample) => {
+          const waveformData = sample.waveformData ?? [];
+          const firstPointTime = waveformData[0]?.time ?? sample.timestamp ?? Date.now();
+          const lastPointTime = waveformData[waveformData.length - 1]?.time ?? firstPointTime;
+          const timestamp = sample.timestamp ?? firstPointTime;
+          const duration = waveformData.length > 1
+            ? Math.max(0, lastPointTime - firstPointTime)
+            : segmentDurationMs;
+
+          return {
+            id: `${gesture.toLowerCase()}-${sample.id}-${timestamp}`,
+            label: gesture,
+            timestamp,
+            data: waveformData.map((point) => point.value),
+            duration
+          };
+        });
+    }
+
+    return exportedSamples;
+  };
+
+  const downloadBlob = (content: BlobPart, fileName: string, mimeType: string) => {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportJson = () => {
+    const exportTimestamp = Date.now();
+    const samplesByLabel = buildExportSamplesByLabel();
+    const payload = {
+      exportedAt: exportTimestamp,
+      samplesByLabel
+    };
+
+    downloadBlob(
+      JSON.stringify(payload, null, 2),
+      `emg_dataset_${exportTimestamp}.json`,
+      'application/json'
+    );
+  };
+
+  const handleExportCsv = async () => {
+    const exportTimestamp = Date.now();
+    const samplesByLabel = buildExportSamplesByLabel();
+    const allSamples = Object.values(samplesByLabel).flat();
+
+    const metadataRows = allSamples.map((sample) => ({
+      sampleId: sample.id,
+      label: sample.label,
+      timestamp: sample.timestamp,
+      duration: sample.duration,
+      sampleLength: sample.data.length
+    }));
+
+    const timeseriesRows = allSamples.flatMap((sample) => {
+      const stepMs = sample.data.length > 1
+        ? sample.duration / Math.max(sample.data.length - 1, 1)
+        : 0;
+
+      return sample.data.map((value, index) => ({
+        sampleId: sample.id,
+        label: sample.label,
+        index,
+        timeOffset: Number((index * stepMs).toFixed(3)),
+        value
+      }));
+    });
+
+    const metadataFrame = new dfd.DataFrame(metadataRows);
+    const timeseriesFrame = new dfd.DataFrame(timeseriesRows);
+    const metadataCsv = await Promise.resolve(dfd.toCSV(metadataFrame, { download: false })) as string;
+    const timeseriesCsv = await Promise.resolve(dfd.toCSV(timeseriesFrame, { download: false })) as string;
+
+    downloadBlob(metadataCsv, `emg_dataset_${exportTimestamp}_metadata.csv`, 'text/csv;charset=utf-8;');
+    downloadBlob(timeseriesCsv, `emg_dataset_${exportTimestamp}_timeseries.csv`, 'text/csv;charset=utf-8;');
+  };
 
   return (
     <div className="size-full bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 flex items-center justify-center p-8">
@@ -835,6 +934,27 @@ export default function App() {
                       className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
                     >
                       +
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div>
+                    <p className="text-sm font-medium text-white/90">Export Dataset</p>
+                    <p className="text-xs text-white/45">Download the current recorded samples as JSON or CSV.</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleExportJson}
+                      className="flex-1 rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-sm text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+                    >
+                      Export JSON
+                    </button>
+                    <button
+                      onClick={() => void handleExportCsv()}
+                      className="flex-1 rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-sm text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+                    >
+                      Export CSV
                     </button>
                   </div>
                 </div>

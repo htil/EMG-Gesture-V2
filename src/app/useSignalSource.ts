@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import Fili from 'fili';
 import { connectGanglion as connectGanglionDevice, isWebBluetoothAvailable, type GanglionConnection } from './ganglion';
 
 export type SignalPoint = {
@@ -15,6 +14,7 @@ export type LiveConnectionStatus = 'disconnected' | 'connecting' | 'connected' |
 
 type UseSignalSourceResult = {
   signalData: SignalPoint[];
+  recordingSignalData: SignalPoint[];
   signalSourceMode: SignalSourceMode;
   connectGanglion: () => Promise<void>;
   useMockSignal: () => Promise<void>;
@@ -25,33 +25,38 @@ type UseSignalSourceResult = {
   isBluetoothAvailable: boolean;
 };
 
-const MAX_SIGNAL_POINTS = 512;
 const EMG_SIGNAL_MULTIPLIER = 10_000_000;
-const LIVE_FILTER_CUTOFF_HZ = 3;
-const LIVE_FILTER_ORDER = 100;
-const LIVE_FILTER_SAMPLE_RATE = 250;
 const LIVE_RENDER_INTERVAL_MS = 100;
-const LIVE_DISPLAY_SCALE = 6000;
+const FEATURE_WINDOW_MS = 75;
+const FEATURE_SIGNAL_SCALE = 30000;
+const MAX_SIGNAL_POINTS = 512;
+const RECORDING_WINDOW_MS = 5000;
 
 const clampSignalValue = (value: number) => Math.max(0, Math.min(1, value));
-const filterCoefficients = new Fili.FirCoeffs().lowpass({
-  order: LIVE_FILTER_ORDER,
-  Fs: LIVE_FILTER_SAMPLE_RATE,
-  Fc: LIVE_FILTER_CUTOFF_HZ,
-});
+const trimPointsToTimeWindow = (points: SignalPoint[], windowMs: number) => {
+  if (points.length === 0) {
+    return points;
+  }
+
+  const newestTime = points[points.length - 1].time;
+  const cutoffTime = newestTime - windowMs;
+  return points.filter((point) => point.time >= cutoffTime);
+};
 
 export function useSignalSource(generateMockSignalValue: () => number): UseSignalSourceResult {
   const [signalData, setSignalData] = useState<SignalPoint[]>([]);
+  const [recordingSignalData, setRecordingSignalData] = useState<SignalPoint[]>([]);
   const [signalSourceMode, setSignalSourceMode] = useState<SignalSourceMode>('mock');
   const [liveConnectionStatus, setLiveConnectionStatus] = useState<LiveConnectionStatus>('disconnected');
   const [liveConnectionMessage, setLiveConnectionMessage] = useState('Mock signal active');
   const [liveDeviceName, setLiveDeviceName] = useState<string | null>(null);
   const [livePacketCount, setLivePacketCount] = useState(0);
   const ganglionRef = useRef<GanglionConnection | null>(null);
-  const liveFilterRef = useRef(new Fili.FirFilter(filterCoefficients));
-  const pendingLivePointsRef = useRef<SignalPoint[]>([]);
+  const featureWindowRef = useRef<{ time: number; value: number }[]>([]);
+  const pendingRecordingPointsRef = useRef<SignalPoint[]>([]);
 
-  const pushSignalPoint = useCallback((point: SignalPoint) => {
+  const pushMockSignalPoint = useCallback((point: SignalPoint) => {
+    setRecordingSignalData(prev => trimPointsToTimeWindow([...prev, point], RECORDING_WINDOW_MS));
     setSignalData(prev => [...prev, point].slice(-MAX_SIGNAL_POINTS));
   }, []);
 
@@ -75,6 +80,8 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
   const useMockSignal = useCallback(async () => {
     await disconnectGanglion();
     setSignalSourceMode('mock');
+    setSignalData([]);
+    setRecordingSignalData([]);
     setLiveConnectionStatus('disconnected');
     setLiveConnectionMessage('Mock signal active');
     setLiveDeviceName(null);
@@ -93,10 +100,11 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
     try {
       setSignalSourceMode('live');
       setSignalData([]);
+      setRecordingSignalData([]);
       setLivePacketCount(0);
       setLiveDeviceName(null);
-      liveFilterRef.current = new Fili.FirFilter(filterCoefficients);
-      pendingLivePointsRef.current = [];
+      featureWindowRef.current = [];
+      pendingRecordingPointsRef.current = [];
       setLiveConnectionStatus('connecting');
       setLiveConnectionMessage('Choose your Ganglion in the Bluetooth prompt.');
 
@@ -108,16 +116,27 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
 
       connection.onSample((sample) => {
         const rawSample = sample.data[0] ?? 0;
-        const rectified = Math.abs(rawSample * EMG_SIGNAL_MULTIPLIER);
-        const filteredValue = Math.max(0, liveFilterRef.current.singleStep(rectified));
-        const normalizedValue = clampSignalValue(filteredValue / LIVE_DISPLAY_SCALE);
+        const scaledRawSample = rawSample * EMG_SIGNAL_MULTIPLIER;
+        featureWindowRef.current.push({
+          time: sample.timestamp,
+          value: scaledRawSample
+        });
+        featureWindowRef.current = featureWindowRef.current.filter((point) => (
+          point.time >= sample.timestamp - FEATURE_WINDOW_MS
+        ));
+
+        const rms = Math.sqrt(
+          featureWindowRef.current.reduce((sum, point) => sum + point.value * point.value, 0) /
+            Math.max(featureWindowRef.current.length, 1)
+        );
+        const featureValue = Math.max(0, rms / FEATURE_SIGNAL_SCALE);
 
         setLivePacketCount(count => count + 1);
-        pendingLivePointsRef.current.push({
+        pendingRecordingPointsRef.current.push({
           time: sample.timestamp,
-          value: normalizedValue,
+          value: featureValue,
           raw: rawSample,
-          envelope: normalizedValue
+          envelope: featureValue,
         });
       });
 
@@ -142,7 +161,7 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
       setLiveConnectionMessage(error instanceof Error ? error.message : 'Unable to connect to Ganglion.');
       setLiveDeviceName(null);
     }
-  }, [disconnectGanglion, pushSignalPoint]);
+  }, [disconnectGanglion]);
 
   useEffect(() => {
     if (signalSourceMode !== 'mock') {
@@ -151,7 +170,7 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
 
     const interval = setInterval(() => {
       const value = clampSignalValue(generateMockSignalValue());
-      pushSignalPoint({
+      pushMockSignalPoint({
         time: Date.now(),
         value,
         raw: value,
@@ -160,21 +179,23 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
     }, 50);
 
     return () => clearInterval(interval);
-  }, [generateMockSignalValue, pushSignalPoint, signalSourceMode]);
+  }, [generateMockSignalValue, pushMockSignalPoint, signalSourceMode]);
 
   useEffect(() => {
     if (signalSourceMode !== 'live') {
-      pendingLivePointsRef.current = [];
+      pendingRecordingPointsRef.current = [];
       return;
     }
 
     const interval = window.setInterval(() => {
-      if (pendingLivePointsRef.current.length === 0) {
+      if (pendingRecordingPointsRef.current.length === 0) {
         return;
       }
 
-      const pending = pendingLivePointsRef.current;
-      pendingLivePointsRef.current = [];
+      const pending = pendingRecordingPointsRef.current;
+      pendingRecordingPointsRef.current = [];
+
+      setRecordingSignalData(prev => trimPointsToTimeWindow([...prev, ...pending], RECORDING_WINDOW_MS));
       setSignalData(prev => [...prev, ...pending].slice(-MAX_SIGNAL_POINTS));
     }, LIVE_RENDER_INTERVAL_MS);
 
@@ -189,6 +210,7 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
 
   return {
     signalData,
+    recordingSignalData,
     signalSourceMode,
     connectGanglion,
     useMockSignal,
