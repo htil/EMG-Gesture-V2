@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { AreaChart, Area, XAxis, YAxis, ReferenceLine, ResponsiveContainer } from 'recharts';
+import { AreaChart, Area, XAxis, YAxis, ReferenceArea, ReferenceLine, ResponsiveContainer } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Settings2, RotateCcw, Trash2, ChevronDown } from 'lucide-react';
 import * as dfd from 'danfojs';
@@ -42,6 +42,7 @@ type SignalSourceLabel = Record<SignalSourceMode, string>;
 
 const DEFAULT_SEGMENT_DURATION_MS = 1200;
 const MIN_SEGMENT_POINTS = 6;
+const CHART_WINDOW_MS = 3000;
 
 export default function App() {
   const [feedbackState, setFeedbackState] = useState<FeedbackState>('ready');
@@ -60,6 +61,7 @@ export default function App() {
   const [currentGesture, setCurrentGesture] = useState<GestureName>('Pinch');
   const [isGestureDropdownOpen, setIsGestureDropdownOpen] = useState(false);
   const [showGestureChangeMessage, setShowGestureChangeMessage] = useState(false);
+  const [showRawSignal, setShowRawSignal] = useState(false);
   const previewPanelRef = useRef<HTMLDivElement>(null);
   const gestureDropdownRef = useRef<HTMLDivElement>(null);
   const recordingStartTimeRef = useRef<number | null>(null);
@@ -596,6 +598,39 @@ export default function App() {
   const progressCircleRadius = 26;
   const progressCircleCircumference = 2 * Math.PI * progressCircleRadius;
   const progressCircleOffset = progressCircleCircumference * (1 - recordingProgress);
+  const chartWindowEnd = Math.max(
+    signalData[signalData.length - 1]?.time ?? 0,
+    recordingSignalData[recordingSignalData.length - 1]?.time ?? 0,
+    Date.now()
+  );
+  const chartWindowStart = chartWindowEnd - CHART_WINDOW_MS;
+  const activityChartData = signalData.filter((point) => point.time >= chartWindowStart);
+  const rawChartData = recordingSignalData.filter((point) => point.time >= chartWindowStart);
+  const activeSegmentEnd = recordingStartTime !== null
+    ? Math.min(recordingStartTime + segmentDurationMs, chartWindowEnd)
+    : null;
+  const rawValues = rawChartData.map((point) => point.raw);
+  const rawMin = rawValues.length > 0 ? Math.min(...rawValues) : -1;
+  const rawMax = rawValues.length > 0 ? Math.max(...rawValues) : 1;
+  const rawRange = Math.max(rawMax - rawMin, 0.0001);
+  const rawDomain: [number, number] = [
+    rawMin - rawRange * 0.15,
+    rawMax + rawRange * 0.15,
+  ];
+  const chartWindowSeconds = CHART_WINDOW_MS / 1000;
+  const activityTickCount = 4;
+  const activityTimeTicks = Array.from({ length: activityTickCount }, (_, index) => {
+    const ratio = index / (activityTickCount - 1);
+    const secondsFromNow = chartWindowSeconds * (1 - ratio);
+    return {
+      key: index,
+      left: `${ratio * 100}%`,
+      label: index === activityTickCount - 1 ? 'now' : `-${secondsFromNow.toFixed(secondsFromNow >= 2 ? 0 : 1)}s`,
+    };
+  });
+  const segmentLabelLeft = recordingStartTime !== null
+    ? Math.max(0, Math.min(84, ((recordingStartTime - chartWindowStart) / CHART_WINDOW_MS) * 100))
+    : null;
   // Determine graph glow based on signal crossing threshold
   const isAboveThreshold = signalSourceMode === 'live'
     ? (latestSignal?.envelope ?? 0) > threshold
@@ -973,9 +1008,34 @@ export default function App() {
             ? 'border-cyan-400/30 shadow-cyan-400/10'
             : 'border-white/5'
         }`}>
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-white/90">Activity / Envelope</p>
+              <p className="text-xs text-white/45">Smoothed activity signal used for thresholding and segmentation.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowRawSignal((prev) => !prev)}
+              className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2 text-xs text-white/75 transition-colors hover:bg-white/10 hover:text-white"
+            >
+              <span>{showRawSignal ? 'Hide Raw Signal' : 'Show Raw Signal'}</span>
+              <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showRawSignal ? 'rotate-180' : ''}`} />
+            </button>
+          </div>
           <div className="h-80 relative">
+            <div className="pointer-events-none absolute left-3 top-2 z-10 rounded-md bg-slate-950/45 px-2 py-1 text-[11px] text-white/55 backdrop-blur-sm">
+              Window: {chartWindowSeconds.toFixed(1)} s
+            </div>
+            {recordingStartTime !== null && activeSegmentEnd !== null && segmentLabelLeft !== null && (
+              <div
+                className="pointer-events-none absolute top-10 z-10 rounded-md bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-200/85 backdrop-blur-sm"
+                style={{ left: `${segmentLabelLeft}%` }}
+              >
+                Segment: {(segmentDurationMs / 1000).toFixed(1)} s
+              </div>
+            )}
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={signalData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+              <AreaChart data={activityChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                 <defs>
                   <linearGradient id="mainSignalGradient" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor={highlightSegment === 'good' ? '#10b981' : highlightSegment === 'bad' ? '#f59e0b' : '#22d3ee'} stopOpacity={0.4} />
@@ -983,13 +1043,24 @@ export default function App() {
                   </linearGradient>
                 </defs>
                 <XAxis 
-                  dataKey="time" 
+                  dataKey="time"
+                  type="number"
+                  domain={[chartWindowStart, chartWindowEnd]}
                   hide 
                 />
                 <YAxis 
                   domain={[0, 1]}
                   hide
                 />
+                {recordingStartTime !== null && activeSegmentEnd !== null && (
+                  <ReferenceArea
+                    x1={recordingStartTime}
+                    x2={activeSegmentEnd}
+                    fill="#22d3ee"
+                    fillOpacity={0.08}
+                    ifOverflow="extendDomain"
+                  />
+                )}
                 {/* Threshold line */}
                 <ReferenceLine 
                   key="main-threshold"
@@ -1017,7 +1088,60 @@ export default function App() {
                 />
               </AreaChart>
             </ResponsiveContainer>
+            <div className="pointer-events-none absolute inset-x-4 bottom-2 z-10 flex items-end justify-between">
+              {activityTimeTicks.map((tick) => (
+                <div
+                  key={tick.key}
+                  className={`flex flex-col items-center ${tick.key === activityTickCount - 1 ? 'items-end' : tick.key === 0 ? 'items-start' : ''}`}
+                  style={{ width: tick.key === 0 || tick.key === activityTickCount - 1 ? 'auto' : undefined }}
+                >
+                  <div className="mb-1 h-2 w-px bg-white/12" />
+                  <span className="text-[10px] text-white/45">{tick.label}</span>
+                </div>
+              ))}
+            </div>
           </div>
+          {showRawSignal && (
+            <div className="mt-4 border-t border-white/10 pt-4">
+              <div className="mb-2">
+                <p className="text-xs font-medium text-white/80">Raw Signal</p>
+                <p className="text-[11px] text-white/45">Unchanged trace for signal quality and timing checks.</p>
+              </div>
+              <div className="h-28">
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={rawChartData} margin={{ top: 6, right: 10, left: -20, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="rawSignalGradient" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#cbd5e1" stopOpacity={0.2} />
+                        <stop offset="95%" stopColor="#475569" stopOpacity={0.03} />
+                      </linearGradient>
+                    </defs>
+                    <XAxis
+                      dataKey="time"
+                      type="number"
+                      domain={[chartWindowStart, chartWindowEnd]}
+                      hide
+                    />
+                    <YAxis domain={rawDomain} hide />
+                    <ReferenceLine
+                      y={0}
+                      stroke="#ffffff"
+                      strokeWidth={1}
+                      opacity={0.16}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="raw"
+                      stroke="#cbd5e1"
+                      strokeWidth={1.5}
+                      fill="url(#rawSignalGradient)"
+                      isAnimationActive={false}
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* 3. Capture Feedback */}

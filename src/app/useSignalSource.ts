@@ -29,7 +29,7 @@ const EMG_SIGNAL_MULTIPLIER = 10_000_000;
 const LIVE_RENDER_INTERVAL_MS = 100;
 const FEATURE_WINDOW_MS = 75;
 const FEATURE_SIGNAL_SCALE = 30000;
-const MAX_SIGNAL_POINTS = 512;
+const DISPLAY_WINDOW_MS = 3000;
 const RECORDING_WINDOW_MS = 5000;
 
 const clampSignalValue = (value: number) => Math.max(0, Math.min(1, value));
@@ -57,7 +57,7 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
 
   const pushMockSignalPoint = useCallback((point: SignalPoint) => {
     setRecordingSignalData(prev => trimPointsToTimeWindow([...prev, point], RECORDING_WINDOW_MS));
-    setSignalData(prev => [...prev, point].slice(-MAX_SIGNAL_POINTS));
+    setSignalData(prev => trimPointsToTimeWindow([...prev, point], DISPLAY_WINDOW_MS));
   }, []);
 
   const disconnectGanglion = useCallback(async () => {
@@ -196,7 +196,7 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
       pendingRecordingPointsRef.current = [];
 
       setRecordingSignalData(prev => trimPointsToTimeWindow([...prev, ...pending], RECORDING_WINDOW_MS));
-      setSignalData(prev => [...prev, ...pending].slice(-MAX_SIGNAL_POINTS));
+      setSignalData(prev => trimPointsToTimeWindow([...prev, ...pending], DISPLAY_WINDOW_MS));
     }, LIVE_RENDER_INTERVAL_MS);
 
     return () => window.clearInterval(interval);
