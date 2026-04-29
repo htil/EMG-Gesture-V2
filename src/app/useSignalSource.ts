@@ -29,7 +29,6 @@ const EMG_SIGNAL_MULTIPLIER = 10_000_000;
 const LIVE_RENDER_INTERVAL_MS = 100;
 const FEATURE_WINDOW_MS = 75;
 const FEATURE_SIGNAL_SCALE = 30000;
-const DISPLAY_WINDOW_MS = 3000;
 const RECORDING_WINDOW_MS = 5000;
 
 const clampSignalValue = (value: number) => Math.max(0, Math.min(1, value));
@@ -43,7 +42,10 @@ const trimPointsToTimeWindow = (points: SignalPoint[], windowMs: number) => {
   return points.filter((point) => point.time >= cutoffTime);
 };
 
-export function useSignalSource(generateMockSignalValue: () => number): UseSignalSourceResult {
+export function useSignalSource(
+  generateMockSignalValue: () => number,
+  displayWindowMs: number = 3000
+): UseSignalSourceResult {
   const [signalData, setSignalData] = useState<SignalPoint[]>([]);
   const [recordingSignalData, setRecordingSignalData] = useState<SignalPoint[]>([]);
   const [signalSourceMode, setSignalSourceMode] = useState<SignalSourceMode>('mock');
@@ -57,8 +59,8 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
 
   const pushMockSignalPoint = useCallback((point: SignalPoint) => {
     setRecordingSignalData(prev => trimPointsToTimeWindow([...prev, point], RECORDING_WINDOW_MS));
-    setSignalData(prev => trimPointsToTimeWindow([...prev, point], DISPLAY_WINDOW_MS));
-  }, []);
+    setSignalData(prev => trimPointsToTimeWindow([...prev, point], displayWindowMs));
+  }, [displayWindowMs]);
 
   const disconnectGanglion = useCallback(async () => {
     const connection = ganglionRef.current;
@@ -196,11 +198,15 @@ export function useSignalSource(generateMockSignalValue: () => number): UseSigna
       pendingRecordingPointsRef.current = [];
 
       setRecordingSignalData(prev => trimPointsToTimeWindow([...prev, ...pending], RECORDING_WINDOW_MS));
-      setSignalData(prev => trimPointsToTimeWindow([...prev, ...pending], DISPLAY_WINDOW_MS));
+      setSignalData(prev => trimPointsToTimeWindow([...prev, ...pending], displayWindowMs));
     }, LIVE_RENDER_INTERVAL_MS);
 
     return () => window.clearInterval(interval);
-  }, [signalSourceMode]);
+  }, [displayWindowMs, signalSourceMode]);
+
+  useEffect(() => {
+    setSignalData(prev => trimPointsToTimeWindow(prev, displayWindowMs));
+  }, [displayWindowMs]);
 
   useEffect(() => {
     return () => {

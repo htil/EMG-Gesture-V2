@@ -42,12 +42,13 @@ type SignalSourceLabel = Record<SignalSourceMode, string>;
 
 const DEFAULT_SEGMENT_DURATION_MS = 1200;
 const MIN_SEGMENT_POINTS = 6;
-const CHART_WINDOW_MS = 3000;
+const DEFAULT_DISPLAY_WINDOW_MS = 3000;
 
 export default function App() {
   const [feedbackState, setFeedbackState] = useState<FeedbackState>('ready');
   const [threshold, setThreshold] = useState(0.6);
   const [segmentDurationMs, setSegmentDurationMs] = useState(DEFAULT_SEGMENT_DURATION_MS);
+  const [displayWindowMs, setDisplayWindowMs] = useState(DEFAULT_DISPLAY_WINDOW_MS);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingStartTime, setRecordingStartTime] = useState<number | null>(null);
   const [recordingProgress, setRecordingProgress] = useState(0);
@@ -57,6 +58,7 @@ export default function App() {
   const [sampleTarget, setSampleTarget] = useState(12);
   const [targetSamplesInputValue, setTargetSamplesInputValue] = useState('12');
   const [segmentDurationInputValue, setSegmentDurationInputValue] = useState(String(DEFAULT_SEGMENT_DURATION_MS));
+  const [displayWindowInputValue, setDisplayWindowInputValue] = useState((DEFAULT_DISPLAY_WINDOW_MS / 1000).toFixed(1));
   const [selectedSampleId, setSelectedSampleId] = useState<number | null>(null);
   const [currentGesture, setCurrentGesture] = useState<GestureName>('Pinch');
   const [isGestureDropdownOpen, setIsGestureDropdownOpen] = useState(false);
@@ -99,7 +101,7 @@ export default function App() {
     liveDeviceName,
     livePacketCount,
     isBluetoothAvailable
-  } = useSignalSource(generateMockSignalValue);
+  } = useSignalSource(generateMockSignalValue, displayWindowMs);
   
   const availableGestures: GestureName[] = ['Pinch', 'Squeeze', 'Relax'];
   
@@ -173,6 +175,10 @@ export default function App() {
   useEffect(() => {
     setSegmentDurationInputValue(String(segmentDurationMs));
   }, [segmentDurationMs]);
+
+  useEffect(() => {
+    setDisplayWindowInputValue((displayWindowMs / 1000).toFixed(1));
+  }, [displayWindowMs]);
 
   // Simulate state changes for demonstration
   useEffect(() => {
@@ -474,6 +480,29 @@ export default function App() {
     applySegmentDurationValue(parsedValue);
   };
 
+  const applyDisplayWindowValue = (nextValueMs: number) => {
+    const clampedValue = Math.max(2000, Math.min(10000, nextValueMs));
+    setDisplayWindowMs(Math.round(clampedValue / 100) * 100);
+  };
+
+  const handleDisplayWindowChange = (deltaSeconds: number) => {
+    applyDisplayWindowValue(displayWindowMs + deltaSeconds * 1000);
+  };
+
+  const handleDisplayWindowInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setDisplayWindowInputValue(e.target.value);
+  };
+
+  const commitDisplayWindowInputValue = () => {
+    const parsedValue = Number.parseFloat(displayWindowInputValue);
+    if (displayWindowInputValue.trim() === '' || Number.isNaN(parsedValue)) {
+      setDisplayWindowInputValue((displayWindowMs / 1000).toFixed(1));
+      return;
+    }
+
+    applyDisplayWindowValue(parsedValue * 1000);
+  };
+
   const handleNumericInputKeyDown = (
     e: React.KeyboardEvent<HTMLInputElement>,
     commitValue: () => void
@@ -603,7 +632,7 @@ export default function App() {
     recordingSignalData[recordingSignalData.length - 1]?.time ?? 0,
     Date.now()
   );
-  const chartWindowStart = chartWindowEnd - CHART_WINDOW_MS;
+  const chartWindowStart = chartWindowEnd - displayWindowMs;
   const activityChartData = signalData.filter((point) => point.time >= chartWindowStart);
   const rawChartData = recordingSignalData.filter((point) => point.time >= chartWindowStart);
   const activeSegmentEnd = recordingStartTime !== null
@@ -617,7 +646,7 @@ export default function App() {
     rawMin - rawRange * 0.15,
     rawMax + rawRange * 0.15,
   ];
-  const chartWindowSeconds = CHART_WINDOW_MS / 1000;
+  const chartWindowSeconds = displayWindowMs / 1000;
   const activityTickCount = 4;
   const activityTimeTicks = Array.from({ length: activityTickCount }, (_, index) => {
     const ratio = index / (activityTickCount - 1);
@@ -629,7 +658,7 @@ export default function App() {
     };
   });
   const segmentLabelLeft = recordingStartTime !== null
-    ? Math.max(0, Math.min(84, ((recordingStartTime - chartWindowStart) / CHART_WINDOW_MS) * 100))
+    ? Math.max(0, Math.min(84, ((recordingStartTime - chartWindowStart) / displayWindowMs) * 100))
     : null;
   // Determine graph glow based on signal crossing threshold
   const isAboveThreshold = signalSourceMode === 'live'
@@ -966,6 +995,41 @@ export default function App() {
                     />
                     <button
                       onClick={() => handleSegmentDurationChange(100)}
+                      className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-white/90">Display Window</p>
+                      <p className="text-xs text-white/45">Set how many seconds are visible in both live charts.</p>
+                    </div>
+                    <span className="text-sm text-white/75">{(displayWindowMs / 1000).toFixed(1)} s</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handleDisplayWindowChange(-0.5)}
+                      className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+                    >
+                      -
+                    </button>
+                    <input
+                      type="number"
+                      min={2}
+                      max={10}
+                      step={0.5}
+                      value={displayWindowInputValue}
+                      onChange={handleDisplayWindowInputChange}
+                      onBlur={commitDisplayWindowInputValue}
+                      onKeyDown={(e) => handleNumericInputKeyDown(e, commitDisplayWindowInputValue)}
+                      className="flex-1 rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-center text-sm text-white/80 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                    />
+                    <button
+                      onClick={() => handleDisplayWindowChange(0.5)}
                       className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
                     >
                       +
