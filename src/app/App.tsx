@@ -43,12 +43,15 @@ type SignalSourceLabel = Record<SignalSourceMode, string>;
 const DEFAULT_SEGMENT_DURATION_MS = 1200;
 const MIN_SEGMENT_POINTS = 6;
 const DEFAULT_DISPLAY_WINDOW_MS = 3000;
+const DEFAULT_ACTIVITY_DISPLAY_SENSITIVITY = 1.0;
 
 export default function App() {
   const [feedbackState, setFeedbackState] = useState<FeedbackState>('ready');
   const [threshold, setThreshold] = useState(0.6);
   const [segmentDurationMs, setSegmentDurationMs] = useState(DEFAULT_SEGMENT_DURATION_MS);
   const [displayWindowMs, setDisplayWindowMs] = useState(DEFAULT_DISPLAY_WINDOW_MS);
+  const [activityDisplaySensitivity, setActivityDisplaySensitivity] = useState(DEFAULT_ACTIVITY_DISPLAY_SENSITIVITY);
+  const [selectedChannelIndex, setSelectedChannelIndex] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingStartTime, setRecordingStartTime] = useState<number | null>(null);
   const [recordingProgress, setRecordingProgress] = useState(0);
@@ -59,6 +62,9 @@ export default function App() {
   const [targetSamplesInputValue, setTargetSamplesInputValue] = useState('12');
   const [segmentDurationInputValue, setSegmentDurationInputValue] = useState(String(DEFAULT_SEGMENT_DURATION_MS));
   const [displayWindowInputValue, setDisplayWindowInputValue] = useState((DEFAULT_DISPLAY_WINDOW_MS / 1000).toFixed(1));
+  const [activityDisplaySensitivityInputValue, setActivityDisplaySensitivityInputValue] = useState(
+    DEFAULT_ACTIVITY_DISPLAY_SENSITIVITY.toFixed(1)
+  );
   const [selectedSampleId, setSelectedSampleId] = useState<number | null>(null);
   const [currentGesture, setCurrentGesture] = useState<GestureName>('Pinch');
   const [isGestureDropdownOpen, setIsGestureDropdownOpen] = useState(false);
@@ -100,8 +106,15 @@ export default function App() {
     liveConnectionMessage,
     liveDeviceName,
     livePacketCount,
+    liveDisplayScale,
+    liveSampleRateHz,
     isBluetoothAvailable
-  } = useSignalSource(generateMockSignalValue, displayWindowMs);
+  } = useSignalSource(
+    generateMockSignalValue,
+    displayWindowMs,
+    selectedChannelIndex,
+    activityDisplaySensitivity
+  );
   
   const availableGestures: GestureName[] = ['Pinch', 'Squeeze', 'Relax'];
   
@@ -179,6 +192,10 @@ export default function App() {
   useEffect(() => {
     setDisplayWindowInputValue((displayWindowMs / 1000).toFixed(1));
   }, [displayWindowMs]);
+
+  useEffect(() => {
+    setActivityDisplaySensitivityInputValue(activityDisplaySensitivity.toFixed(1));
+  }, [activityDisplaySensitivity]);
 
   // Simulate state changes for demonstration
   useEffect(() => {
@@ -503,6 +520,29 @@ export default function App() {
     applyDisplayWindowValue(parsedValue * 1000);
   };
 
+  const applyActivityDisplaySensitivityValue = (nextValue: number) => {
+    const clampedValue = Math.max(0.5, Math.min(1.5, nextValue));
+    setActivityDisplaySensitivity(Math.round(clampedValue * 10) / 10);
+  };
+
+  const handleActivityDisplaySensitivityChange = (delta: number) => {
+    applyActivityDisplaySensitivityValue(activityDisplaySensitivity + delta);
+  };
+
+  const handleActivityDisplaySensitivityInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setActivityDisplaySensitivityInputValue(e.target.value);
+  };
+
+  const commitActivityDisplaySensitivityInputValue = () => {
+    const parsedValue = Number.parseFloat(activityDisplaySensitivityInputValue);
+    if (activityDisplaySensitivityInputValue.trim() === '' || Number.isNaN(parsedValue)) {
+      setActivityDisplaySensitivityInputValue(activityDisplaySensitivity.toFixed(1));
+      return;
+    }
+
+    applyActivityDisplaySensitivityValue(parsedValue);
+  };
+
   const handleNumericInputKeyDown = (
     e: React.KeyboardEvent<HTMLInputElement>,
     commitValue: () => void
@@ -619,7 +659,9 @@ export default function App() {
   };
 
   const feedback = getFeedbackConfig();
-  const latestSignal = recordingSignalData[recordingSignalData.length - 1] ?? signalData[signalData.length - 1];
+  const latestRecordingSignal = recordingSignalData[recordingSignalData.length - 1];
+  const latestDisplaySignal = signalData[signalData.length - 1];
+  const latestSignal = latestRecordingSignal ?? latestDisplaySignal;
   const recordingSecondsRemaining = Math.max(
     0,
     (segmentDurationMs - Math.round(recordingProgress * segmentDurationMs)) / 1000
@@ -678,6 +720,7 @@ export default function App() {
       : liveConnectionStatus === 'error'
       ? `Ganglion: ${liveConnectionMessage}`
       : 'Ganglion: Disconnected';
+  const selectedChannelLabel = `Channel ${selectedChannelIndex + 1}`;
 
   const buildExportSamplesByLabel = (): Record<GestureName, ExportSample[]> => {
     const exportedSamples = {} as Record<GestureName, ExportSample[]>;
@@ -907,9 +950,35 @@ export default function App() {
                     </div>
                     <div>
                       {signalSourceMode === 'live'
-                        ? `Signal ${(latestSignal?.value ?? 0).toFixed(2)}`
+                        ? `${selectedChannelLabel} | Display ${(latestDisplaySignal?.value ?? 0).toFixed(2)}`
                         : `Value ${(latestSignal?.value ?? 0).toFixed(2)}`}
                     </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-white/90">Ganglion Channel</p>
+                      <p className="text-xs text-white/45">Select which decoded Ganglion channel drives live capture and display.</p>
+                    </div>
+                    <span className="text-sm text-white/75">{selectedChannelIndex + 1}</span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-2">
+                    {[0, 1, 2, 3].map((channelIndex) => (
+                      <button
+                        key={channelIndex}
+                        type="button"
+                        onClick={() => setSelectedChannelIndex(channelIndex)}
+                        className={`rounded-lg border px-3 py-2 text-sm transition-colors ${
+                          selectedChannelIndex === channelIndex
+                            ? 'border-cyan-400/30 bg-cyan-400/15 text-cyan-300'
+                            : 'border-white/10 bg-slate-950/50 text-white/70 hover:bg-white/10 hover:text-white'
+                        }`}
+                      >
+                        {channelIndex + 1}
+                      </button>
+                    ))}
                   </div>
                 </div>
 
@@ -1036,6 +1105,73 @@ export default function App() {
                     </button>
                   </div>
                 </div>
+
+                <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-white/90">Activity Display Sensitivity</p>
+                      <p className="text-xs text-white/45">Lower values add headroom. Higher values make weaker signals easier to see.</p>
+                    </div>
+                    <span className="text-sm text-white/75">{activityDisplaySensitivity.toFixed(1)}x</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handleActivityDisplaySensitivityChange(-0.1)}
+                      className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+                    >
+                      -
+                    </button>
+                    <input
+                      type="number"
+                      min={0.5}
+                      max={1.5}
+                      step={0.1}
+                      value={activityDisplaySensitivityInputValue}
+                      onChange={handleActivityDisplaySensitivityInputChange}
+                      onBlur={commitActivityDisplaySensitivityInputValue}
+                      onKeyDown={(e) => handleNumericInputKeyDown(e, commitActivityDisplaySensitivityInputValue)}
+                      className="flex-1 rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-center text-sm text-white/80 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                    />
+                    <button
+                      onClick={() => handleActivityDisplaySensitivityChange(0.1)}
+                      className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+
+                <details className="rounded-xl border border-white/10 bg-white/5 p-4">
+                  <summary className="cursor-pointer list-none text-sm font-medium text-white/90">
+                    Live Diagnostics
+                  </summary>
+                  <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-white/55">
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Channel</div>
+                      <div className="mt-1 text-sm text-white/85">{selectedChannelLabel}</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Sample Rate</div>
+                      <div className="mt-1 text-sm text-white/85">{liveSampleRateHz.toFixed(0)} Hz</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Raw</div>
+                      <div className="mt-1 text-sm text-white/85">{(latestRecordingSignal?.raw ?? 0).toFixed(6)}</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Envelope</div>
+                      <div className="mt-1 text-sm text-white/85">{(latestRecordingSignal?.envelope ?? 0).toFixed(3)}</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Display</div>
+                      <div className="mt-1 text-sm text-white/85">{(latestDisplaySignal?.value ?? 0).toFixed(3)}</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Display Scale</div>
+                      <div className="mt-1 text-sm text-white/85">{liveDisplayScale.toFixed(3)}</div>
+                    </div>
+                  </div>
+                </details>
 
                 <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
                   <div>

@@ -22,6 +22,8 @@ type UseSignalSourceResult = {
   liveConnectionMessage: string;
   liveDeviceName: string | null;
   livePacketCount: number;
+  liveDisplayScale: number;
+  liveSampleRateHz: number;
   isBluetoothAvailable: boolean;
 };
 
@@ -30,6 +32,10 @@ const LIVE_RENDER_INTERVAL_MS = 100;
 const FEATURE_WINDOW_MS = 75;
 const FEATURE_SIGNAL_SCALE = 30000;
 const RECORDING_WINDOW_MS = 5000;
+const DISPLAY_SCALE_PERCENTILE = 0.98;
+const MIN_DISPLAY_SCALE = 0.75;
+const DISPLAY_SCALE_SMOOTHING = 0.18;
+const DISPLAY_HEADROOM = 1.25;
 
 const clampSignalValue = (value: number) => Math.max(0, Math.min(1, value));
 const trimPointsToTimeWindow = (points: SignalPoint[], windowMs: number) => {
@@ -42,9 +48,24 @@ const trimPointsToTimeWindow = (points: SignalPoint[], windowMs: number) => {
   return points.filter((point) => point.time >= cutoffTime);
 };
 
+const getPercentile = (values: number[], percentile: number) => {
+  if (values.length === 0) {
+    return 0;
+  }
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.ceil(sorted.length * percentile) - 1)
+  );
+  return sorted[index];
+};
+
 export function useSignalSource(
   generateMockSignalValue: () => number,
-  displayWindowMs: number = 3000
+  displayWindowMs: number = 3000,
+  selectedChannelIndex: number = 0,
+  displaySensitivity: number = 1
 ): UseSignalSourceResult {
   const [signalData, setSignalData] = useState<SignalPoint[]>([]);
   const [recordingSignalData, setRecordingSignalData] = useState<SignalPoint[]>([]);
@@ -53,9 +74,34 @@ export function useSignalSource(
   const [liveConnectionMessage, setLiveConnectionMessage] = useState('Mock signal active');
   const [liveDeviceName, setLiveDeviceName] = useState<string | null>(null);
   const [livePacketCount, setLivePacketCount] = useState(0);
+  const [liveDisplayScale, setLiveDisplayScale] = useState(MIN_DISPLAY_SCALE);
+  const [liveSampleRateHz, setLiveSampleRateHz] = useState(0);
   const ganglionRef = useRef<GanglionConnection | null>(null);
   const featureWindowRef = useRef<{ time: number; value: number }[]>([]);
   const pendingRecordingPointsRef = useRef<SignalPoint[]>([]);
+  const displayScaleRef = useRef(MIN_DISPLAY_SCALE);
+  const selectedChannelIndexRef = useRef(selectedChannelIndex);
+  const sampleRateTimesRef = useRef<number[]>([]);
+  const displaySensitivityRef = useRef(displaySensitivity);
+
+  useEffect(() => {
+    displaySensitivityRef.current = displaySensitivity;
+  }, [displaySensitivity]);
+
+  useEffect(() => {
+    selectedChannelIndexRef.current = selectedChannelIndex;
+    featureWindowRef.current = [];
+    pendingRecordingPointsRef.current = [];
+    sampleRateTimesRef.current = [];
+    displayScaleRef.current = MIN_DISPLAY_SCALE;
+    setLiveDisplayScale(MIN_DISPLAY_SCALE);
+    setLiveSampleRateHz(0);
+
+    if (signalSourceMode === 'live') {
+      setSignalData([]);
+      setRecordingSignalData([]);
+    }
+  }, [selectedChannelIndex, signalSourceMode]);
 
   const pushMockSignalPoint = useCallback((point: SignalPoint) => {
     setRecordingSignalData(prev => trimPointsToTimeWindow([...prev, point], RECORDING_WINDOW_MS));
@@ -88,6 +134,9 @@ export function useSignalSource(
     setLiveConnectionMessage('Mock signal active');
     setLiveDeviceName(null);
     setLivePacketCount(0);
+    setLiveSampleRateHz(0);
+    displayScaleRef.current = MIN_DISPLAY_SCALE;
+    setLiveDisplayScale(MIN_DISPLAY_SCALE);
   }, [disconnectGanglion]);
 
   const connectGanglion = useCallback(async () => {
@@ -107,6 +156,10 @@ export function useSignalSource(
       setLiveDeviceName(null);
       featureWindowRef.current = [];
       pendingRecordingPointsRef.current = [];
+      sampleRateTimesRef.current = [];
+      displayScaleRef.current = MIN_DISPLAY_SCALE;
+      setLiveDisplayScale(MIN_DISPLAY_SCALE);
+      setLiveSampleRateHz(0);
       setLiveConnectionStatus('connecting');
       setLiveConnectionMessage('Choose your Ganglion in the Bluetooth prompt.');
 
@@ -117,7 +170,7 @@ export function useSignalSource(
       setLiveConnectionMessage('Connected. Starting stream...');
 
       connection.onSample((sample) => {
-        const rawSample = sample.data[0] ?? 0;
+        const rawSample = sample.data[selectedChannelIndexRef.current] ?? 0;
         const scaledRawSample = rawSample * EMG_SIGNAL_MULTIPLIER;
         featureWindowRef.current.push({
           time: sample.timestamp,
@@ -134,6 +187,8 @@ export function useSignalSource(
         const featureValue = Math.max(0, rms / FEATURE_SIGNAL_SCALE);
 
         setLivePacketCount(count => count + 1);
+        sampleRateTimesRef.current.push(sample.timestamp);
+        sampleRateTimesRef.current = sampleRateTimesRef.current.filter((time) => time >= sample.timestamp - 1000);
         pendingRecordingPointsRef.current.push({
           time: sample.timestamp,
           value: featureValue,
@@ -198,14 +253,37 @@ export function useSignalSource(
       pendingRecordingPointsRef.current = [];
 
       setRecordingSignalData(prev => trimPointsToTimeWindow([...prev, ...pending], RECORDING_WINDOW_MS));
-      setSignalData(prev => trimPointsToTimeWindow([...prev, ...pending], displayWindowMs));
+      setSignalData(prev => {
+        const trimmedPreviousPoints = trimPointsToTimeWindow(prev, displayWindowMs);
+        const targetScale = Math.max(
+          getPercentile(
+            [...trimmedPreviousPoints, ...pending].map((point) => point.envelope),
+            DISPLAY_SCALE_PERCENTILE
+          ) * (DISPLAY_HEADROOM / Math.max(displaySensitivityRef.current, 0.1)),
+          MIN_DISPLAY_SCALE
+        );
+        const nextScale = displayScaleRef.current + (targetScale - displayScaleRef.current) * DISPLAY_SCALE_SMOOTHING;
+        displayScaleRef.current = nextScale;
+        setLiveDisplayScale(nextScale);
+        setLiveSampleRateHz(sampleRateTimesRef.current.length);
+
+        const normalizedPending = pending.map((point) => ({
+          ...point,
+          value: clampSignalValue(point.envelope / nextScale),
+        }));
+
+        return trimPointsToTimeWindow([...trimmedPreviousPoints, ...normalizedPending], displayWindowMs);
+      });
     }, LIVE_RENDER_INTERVAL_MS);
 
     return () => window.clearInterval(interval);
   }, [displayWindowMs, signalSourceMode]);
 
   useEffect(() => {
-    setSignalData(prev => trimPointsToTimeWindow(prev, displayWindowMs));
+    setSignalData(prev => {
+      const trimmedPoints = trimPointsToTimeWindow(prev, displayWindowMs);
+      return trimmedPoints;
+    });
   }, [displayWindowMs]);
 
   useEffect(() => {
@@ -224,6 +302,8 @@ export function useSignalSource(
     liveConnectionMessage,
     liveDeviceName,
     livePacketCount,
+    liveDisplayScale,
+    liveSampleRateHz,
     isBluetoothAvailable: isWebBluetoothAvailable()
   };
 }
