@@ -16,11 +16,12 @@ import {
 type FeedbackState = 'ready' | 'recording' | 'good' | 'weak' | 'noisy' | 'short';
 type SampleQuality = 'good' | 'weak' | 'noisy';
 type GestureName = 'Pinch' | 'Squeeze' | 'Relax';
+type SampleStatus = 'empty' | 'collected' | 'flagged' | 'rejected';
 type WaveformPoint = { time: number; value: number };
 
 interface Sample {
   id: number;
-  status: 'collected' | 'empty';
+  status: SampleStatus;
   timestamp?: number;
   waveformData?: WaveformPoint[];
   quality?: SampleQuality;
@@ -44,6 +45,7 @@ const DEFAULT_SEGMENT_DURATION_MS = 1200;
 const MIN_SEGMENT_POINTS = 6;
 const DEFAULT_DISPLAY_WINDOW_MS = 3000;
 const DEFAULT_ACTIVITY_DISPLAY_SENSITIVITY = 1.0;
+const RECORDED_SAMPLE_STATUSES: SampleStatus[] = ['collected', 'flagged', 'rejected'];
 
 export default function App() {
   const [feedbackState, setFeedbackState] = useState<FeedbackState>('ready');
@@ -100,8 +102,10 @@ export default function App() {
     signalData,
     recordingSignalData,
     signalSourceMode,
-    connectGanglion,
-    useMockSignal,
+    isStreaming,
+    selectSignalSourceMode,
+    startStream,
+    stopStream,
     liveConnectionStatus,
     liveConnectionMessage,
     liveDeviceName,
@@ -118,59 +122,20 @@ export default function App() {
   
   const availableGestures: GestureName[] = ['Pinch', 'Squeeze', 'Relax'];
   
-  // Generate mock waveform data for samples
-  const generateMockWaveform = (quality: SampleQuality): WaveformPoint[] => {
-    const data: WaveformPoint[] = [];
-    const baseTime = Date.now();
-    
-    for (let i = 0; i < 60; i++) {
-      const time = baseTime + i * 50;
-      let value = 0;
-      
-      switch (quality) {
-        case 'good':
-          value = 0.7 + Math.sin(i * 0.3) * 0.15 + (Math.random() - 0.5) * 0.05;
-          break;
-        case 'weak':
-          value = 0.35 + Math.sin(i * 0.3) * 0.1 + (Math.random() - 0.5) * 0.08;
-          break;
-        case 'noisy':
-          value = 0.65 + (Math.random() - 0.5) * 0.35 + Math.sin(i * 0.4) * 0.08;
-          break;
-      }
-      
-      data.push({ time, value: Math.max(0, Math.min(1, value)) });
-    }
-    
-    return data;
-  };
-  
-  // Initialize gesture data with different sample counts for each gesture
+  const isRecordedSampleStatus = (status: SampleStatus) => RECORDED_SAMPLE_STATUSES.includes(status);
+
   const initializeGestureData = (): Record<GestureName, GestureData> => {
-    const createSamples = (collectedCount: number, totalCount: number = 12): Sample[] => {
-      return Array.from({ length: totalCount }, (_, i) => {
-        if (i < collectedCount) {
-          const qualities: SampleQuality[] = ['good', 'good', 'weak', 'good', 'noisy', 'good', 'good'];
-          const quality = qualities[i % qualities.length];
-          return {
-            id: i,
-            status: 'collected' as const,
-            timestamp: Date.now() - (collectedCount - 1 - i) * 1000,
-            waveformData: generateMockWaveform(quality),
-            quality
-          };
-        }
-        return {
-          id: i,
-          status: 'empty' as const
-        };
-      });
+    const createSamples = (totalCount: number = 12): Sample[] => {
+      return Array.from({ length: totalCount }, (_, i) => ({
+        id: i,
+        status: 'empty' as const
+      }));
     };
     
     return {
-      Pinch: { samples: createSamples(7) },
-      Squeeze: { samples: createSamples(4) },
-      Relax: { samples: createSamples(10) }
+      Pinch: { samples: createSamples() },
+      Squeeze: { samples: createSamples() },
+      Relax: { samples: createSamples() }
     };
   };
   
@@ -180,10 +145,10 @@ export default function App() {
   const [hoveredSample, setHoveredSample] = useState<number | null>(null);
   const [highlightSegment, setHighlightSegment] = useState<'good' | 'bad' | null>(null);
 
-  const samplesCollected = currentSamples.filter(s => s.status === 'collected').length;
+  const samplesCollected = currentSamples.filter((sample) => isRecordedSampleStatus(sample.status)).length;
   const samplesPerGesture = availableGestures.map((gesture) => ({
     gesture,
-    count: gestureData[gesture].samples.filter((sample) => sample.status === 'collected').length
+    count: gestureData[gesture].samples.filter((sample) => isRecordedSampleStatus(sample.status)).length
   }));
   const totalSamplesCollected = samplesPerGesture.reduce((sum, entry) => sum + entry.count, 0);
   useEffect(() => {
@@ -204,7 +169,7 @@ export default function App() {
 
   // Simulate state changes for demonstration
   useEffect(() => {
-    if (signalSourceMode !== 'mock' || isRecording) {
+    if (signalSourceMode !== 'mock' || !isStreaming || isRecording) {
       return;
     }
 
@@ -227,7 +192,7 @@ export default function App() {
     }, 3000);
 
     return () => clearInterval(stateInterval);
-  }, [isRecording, signalSourceMode]);
+  }, [isRecording, isStreaming, signalSourceMode]);
 
   useEffect(() => {
     if (signalSourceMode === 'mock' || isRecording) {
@@ -266,6 +231,23 @@ export default function App() {
     setCurrentCapturedSegment([]);
     setHighlightSegment(null);
   }, [signalSourceMode]);
+
+  useEffect(() => {
+    if (isStreaming) {
+      return;
+    }
+
+    recordingStartTimeRef.current = null;
+    currentCapturedSegmentRef.current = [];
+    wasAboveThresholdRef.current = false;
+    lastLivePointTimeRef.current = null;
+    setIsRecording(false);
+    setRecordingStartTime(null);
+    setRecordingProgress(0);
+    setCurrentCapturedSegment([]);
+    setHighlightSegment(null);
+    setFeedbackState('ready');
+  }, [isStreaming]);
 
   useEffect(() => {
     if (recordingSignalData.length === 0) {
@@ -411,7 +393,7 @@ export default function App() {
   };
 
   const handleRedoLast = () => {
-    const lastCollectedIndex = currentSamples.map((s, i) => s.status === 'collected' ? i : -1)
+    const lastCollectedIndex = currentSamples.map((s, i) => isRecordedSampleStatus(s.status) ? i : -1)
       .filter(i => i !== -1)
       .pop();
     
@@ -585,19 +567,27 @@ export default function App() {
   };
 
   const handleSignalSourceChange = (mode: SignalSourceMode) => {
-    if (mode === 'live') {
-      void connectGanglion();
+    void selectSignalSourceMode(mode);
+  };
+
+  const handleMainStreamToggle = () => {
+    if (liveConnectionStatus === 'connecting') {
       return;
     }
 
-    void useMockSignal();
+    if (isStreaming) {
+      void stopStream();
+      return;
+    }
+
+    void startStream();
   };
 
   const getFeedbackConfig = () => {
     switch (feedbackState) {
       case 'ready':
         return {
-          text: 'Ready',
+          text: 'Start',
           color: 'text-cyan-400',
           bgColor: 'bg-cyan-400/10',
           borderColor: 'border-cyan-400/30',
@@ -740,7 +730,9 @@ export default function App() {
     live: 'Connect Ganglion'
   };
   const liveStatusText =
-    liveConnectionStatus === 'streaming'
+    !isStreaming && liveConnectionStatus !== 'connecting' && liveConnectionStatus !== 'error'
+      ? `${signalSourceMode === 'live' ? 'Live' : 'Mock'}: Idle`
+      : liveConnectionStatus === 'streaming'
       ? `Ganglion: Streaming${liveDeviceName ? ` (${liveDeviceName})` : ''}`
       : liveConnectionStatus === 'connected'
       ? `Ganglion: Connected${liveDeviceName ? ` (${liveDeviceName})` : ''}`
@@ -750,13 +742,36 @@ export default function App() {
       ? `Ganglion: ${liveConnectionMessage}`
       : 'Ganglion: Disconnected';
   const selectedChannelLabel = `Channel ${selectedChannelIndex + 1}`;
+  const mainStreamControlLabel =
+    liveConnectionStatus === 'connecting'
+      ? 'Connecting...'
+      : isStreaming
+      ? 'Pause'
+      : 'Start';
+  const connectionStatusLabel =
+    !isStreaming && liveConnectionStatus !== 'connecting' && liveConnectionStatus !== 'error'
+      ? 'Idle'
+      : 
+    liveConnectionStatus === 'streaming' || liveConnectionStatus === 'connected'
+      ? 'Connected'
+      : liveConnectionStatus === 'connecting'
+      ? 'Connecting...'
+      : liveConnectionStatus === 'error'
+      ? 'Error'
+      : 'Disconnected';
+  const statusDotClass =
+    liveConnectionStatus === 'streaming' || liveConnectionStatus === 'connected'
+      ? 'bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.35)]'
+      : liveConnectionStatus === 'connecting'
+      ? 'bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.25)]'
+      : 'bg-white/25';
 
   const buildExportSamplesByLabel = (): Record<GestureName, ExportSample[]> => {
     const exportedSamples = {} as Record<GestureName, ExportSample[]>;
 
     for (const gesture of availableGestures) {
       exportedSamples[gesture] = gestureData[gesture].samples
-        .filter((sample) => sample.status === 'collected' && sample.waveformData && sample.waveformData.length > 0)
+        .filter((sample) => isRecordedSampleStatus(sample.status) && sample.waveformData && sample.waveformData.length > 0)
         .map((sample) => {
           const waveformData = sample.waveformData ?? [];
           const firstPointTime = waveformData[0]?.time ?? sample.timestamp ?? Date.now();
@@ -959,22 +974,41 @@ export default function App() {
                     </button>
                     <button
                       onClick={() => handleSignalSourceChange('live')}
-                      disabled={liveConnectionStatus === 'connecting' || liveConnectionStatus === 'streaming'}
                       className={`flex-1 px-3 py-1.5 text-sm rounded-md transition-colors ${
                         signalSourceMode === 'live'
                           ? 'bg-cyan-400/15 text-cyan-300'
                           : 'text-white/60 hover:text-white hover:bg-white/5'
                       }`}
-                      title="Connect OpenBCI Ganglion over browser Bluetooth"
+                      title="Use OpenBCI Ganglion over browser Bluetooth"
                     >
-                      {liveConnectionStatus === 'connecting' ? 'Connecting...' : signalSourceLabels.live}
+                      {signalSourceLabels.live}
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void startStream()}
+                      disabled={isStreaming || liveConnectionStatus === 'connecting'}
+                      className="flex-1 rounded-lg border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-sm text-cyan-200 transition-colors hover:bg-cyan-400/15 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {liveConnectionStatus === 'connecting' ? 'Connecting...' : 'Start Stream'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void stopStream()}
+                      disabled={!isStreaming && liveConnectionStatus !== 'connecting'}
+                      className="flex-1 rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-sm text-white/75 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Stop Stream
                     </button>
                   </div>
                   <div className="space-y-1 text-xs text-white/45">
-                    <div>{signalSourceMode === 'live' ? liveStatusText : 'Mock: Local'}</div>
+                    <div>{signalSourceMode === 'live' ? liveStatusText : isStreaming ? 'Mock: Running' : 'Mock: Idle'}</div>
                     <div>
                       {signalSourceMode === 'live'
                         ? `Samples: ${livePacketCount}`
+                        : isStreaming
+                        ? 'Mock stream running'
                         : `Browser BLE: ${isBluetoothAvailable ? 'Available' : 'Unavailable'}`}
                     </div>
                     <div>
@@ -983,6 +1017,36 @@ export default function App() {
                         : `Value ${(latestSignal?.value ?? 0).toFixed(2)}`}
                     </div>
                   </div>
+                </div>
+
+                <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div className="flex items-center gap-2">
+                    <span className={`h-2.5 w-2.5 rounded-full ${statusDotClass}`} />
+                    <p className="text-sm font-medium text-white/90">Connection Status</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 text-xs text-white/55">
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Signal Mode</div>
+                      <div className="mt-1 text-sm text-white/85">{signalSourceMode === 'live' ? 'Live' : 'Mock'}</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Status</div>
+                      <div className="mt-1 text-sm text-white/85">{connectionStatusLabel}</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Ganglion Channel</div>
+                      <div className="mt-1 text-sm text-white/85">{selectedChannelLabel}</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Device</div>
+                      <div className="mt-1 text-sm text-white/85">
+                        {signalSourceMode === 'live' ? (liveDeviceName ?? 'Not connected') : 'Mock source'}
+                      </div>
+                    </div>
+                  </div>
+                  {liveConnectionStatus === 'error' && (
+                    <p className="text-xs text-amber-300/85">{liveConnectionMessage}</p>
+                  )}
                 </div>
 
                 <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
@@ -1436,11 +1500,16 @@ export default function App() {
             className="flex flex-col gap-3 items-center"
           >
             <div className="flex items-center gap-4">
-              <div className={`px-8 py-4 rounded-xl border ${feedback.borderColor} ${feedback.bgColor} backdrop-blur-sm`}>
+              <button
+                type="button"
+                onClick={handleMainStreamToggle}
+                disabled={liveConnectionStatus === 'connecting'}
+                className={`px-8 py-4 rounded-xl border ${feedback.borderColor} ${feedback.bgColor} backdrop-blur-sm transition-colors disabled:cursor-not-allowed disabled:opacity-70 hover:bg-white/10`}
+              >
                 <p className={`text-2xl font-medium ${feedback.color}`}>
-                  {feedback.text}
+                  {mainStreamControlLabel}
                 </p>
-              </div>
+              </button>
               <div className="flex h-20 w-20 items-center justify-center rounded-xl border border-white/10 bg-slate-900/50 backdrop-blur-sm">
                 <div
                   className={`relative flex h-16 w-16 items-center justify-center rounded-full border bg-slate-900/60 transition-opacity ${
@@ -1491,7 +1560,7 @@ export default function App() {
         <div className="flex flex-col gap-4">
           {/* Sample Preview Panel - appears above sample row */}
           <AnimatePresence>
-            {selectedSampleId !== null && currentSamples[selectedSampleId]?.status === 'collected' && (
+            {selectedSampleId !== null && currentSamples[selectedSampleId] && isRecordedSampleStatus(currentSamples[selectedSampleId].status) && (
               <motion.div
                 ref={previewPanelRef}
                 initial={{ opacity: 0, y: 10, scale: 0.95 }}
@@ -1570,15 +1639,15 @@ export default function App() {
                 initial={{ scale: 0.8, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
                 transition={{ delay: sample.id * 0.03 }}
-                onMouseEnter={() => sample.status === 'collected' && setHoveredSample(sample.id)}
+                onMouseEnter={() => isRecordedSampleStatus(sample.status) && setHoveredSample(sample.id)}
                 onMouseLeave={() => setHoveredSample(null)}
-                onClick={() => sample.status === 'collected' && setSelectedSampleId(selectedSampleId === sample.id ? null : sample.id)}
+                onClick={() => isRecordedSampleStatus(sample.status) && setSelectedSampleId(selectedSampleId === sample.id ? null : sample.id)}
                 className="relative group"
               >
                 <button
                   disabled={sample.status === 'empty'}
                   className={`h-3 w-12 rounded-full transition-all duration-300 ${
-                    sample.status === 'collected'
+                    isRecordedSampleStatus(sample.status)
                       ? `${
                           sample.quality === 'weak' 
                             ? 'bg-amber-400 shadow-lg shadow-amber-400/30'

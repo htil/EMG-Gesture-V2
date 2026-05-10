@@ -16,8 +16,10 @@ type UseSignalSourceResult = {
   signalData: SignalPoint[];
   recordingSignalData: SignalPoint[];
   signalSourceMode: SignalSourceMode;
-  connectGanglion: () => Promise<void>;
-  useMockSignal: () => Promise<void>;
+  isStreaming: boolean;
+  selectSignalSourceMode: (mode: SignalSourceMode) => Promise<void>;
+  startStream: () => Promise<void>;
+  stopStream: () => Promise<void>;
   liveConnectionStatus: LiveConnectionStatus;
   liveConnectionMessage: string;
   liveDeviceName: string | null;
@@ -70,8 +72,9 @@ export function useSignalSource(
   const [signalData, setSignalData] = useState<SignalPoint[]>([]);
   const [recordingSignalData, setRecordingSignalData] = useState<SignalPoint[]>([]);
   const [signalSourceMode, setSignalSourceMode] = useState<SignalSourceMode>('mock');
+  const [isStreaming, setIsStreaming] = useState(false);
   const [liveConnectionStatus, setLiveConnectionStatus] = useState<LiveConnectionStatus>('disconnected');
-  const [liveConnectionMessage, setLiveConnectionMessage] = useState('Mock signal active');
+  const [liveConnectionMessage, setLiveConnectionMessage] = useState('Idle. Select a source and start stream.');
   const [liveDeviceName, setLiveDeviceName] = useState<string | null>(null);
   const [livePacketCount, setLivePacketCount] = useState(0);
   const [liveDisplayScale, setLiveDisplayScale] = useState(MIN_DISPLAY_SCALE);
@@ -125,19 +128,41 @@ export function useSignalSource(
     connection.disconnect();
   }, []);
 
-  const useMockSignal = useCallback(async () => {
-    await disconnectGanglion();
-    setSignalSourceMode('mock');
+  const resetDisplayState = useCallback(() => {
     setSignalData([]);
     setRecordingSignalData([]);
-    setLiveConnectionStatus('disconnected');
-    setLiveConnectionMessage('Mock signal active');
-    setLiveDeviceName(null);
     setLivePacketCount(0);
     setLiveSampleRateHz(0);
     displayScaleRef.current = MIN_DISPLAY_SCALE;
     setLiveDisplayScale(MIN_DISPLAY_SCALE);
-  }, [disconnectGanglion]);
+    featureWindowRef.current = [];
+    pendingRecordingPointsRef.current = [];
+    sampleRateTimesRef.current = [];
+  }, []);
+
+  const selectSignalSourceMode = useCallback(async (mode: SignalSourceMode) => {
+    await disconnectGanglion();
+    setIsStreaming(false);
+    setSignalSourceMode(mode);
+    resetDisplayState();
+    setLiveConnectionStatus('disconnected');
+    setLiveDeviceName(null);
+    setLiveConnectionMessage(
+      mode === 'mock'
+        ? 'Mock selected. Click Start Stream to begin.'
+        : 'Live selected. Click Start Stream to connect.'
+    );
+  }, [disconnectGanglion, resetDisplayState]);
+
+  const startMockStream = useCallback(async () => {
+    await disconnectGanglion();
+    resetDisplayState();
+    setSignalSourceMode('mock');
+    setIsStreaming(true);
+    setLiveConnectionStatus('disconnected');
+    setLiveConnectionMessage('Mock signal active');
+    setLiveDeviceName(null);
+  }, [disconnectGanglion, resetDisplayState]);
 
   const connectGanglion = useCallback(async () => {
     if (!isWebBluetoothAvailable()) {
@@ -150,16 +175,8 @@ export function useSignalSource(
 
     try {
       setSignalSourceMode('live');
-      setSignalData([]);
-      setRecordingSignalData([]);
-      setLivePacketCount(0);
+      resetDisplayState();
       setLiveDeviceName(null);
-      featureWindowRef.current = [];
-      pendingRecordingPointsRef.current = [];
-      sampleRateTimesRef.current = [];
-      displayScaleRef.current = MIN_DISPLAY_SCALE;
-      setLiveDisplayScale(MIN_DISPLAY_SCALE);
-      setLiveSampleRateHz(0);
       setLiveConnectionStatus('connecting');
       setLiveConnectionMessage('Choose your Ganglion in the Bluetooth prompt.');
 
@@ -202,26 +219,49 @@ export function useSignalSource(
           ganglionRef.current = null;
         }
 
-        setSignalSourceMode('mock');
+        setIsStreaming(false);
         setLiveConnectionStatus('disconnected');
-        setLiveConnectionMessage('Ganglion disconnected. Mock signal resumed.');
+        setLiveConnectionMessage('Ganglion disconnected.');
         setLiveDeviceName(null);
       });
 
       await connection.startStreaming();
+      setIsStreaming(true);
       setLiveConnectionStatus('streaming');
       setLiveConnectionMessage('Live Ganglion stream active.');
     } catch (error) {
       await disconnectGanglion();
-      setSignalSourceMode('mock');
+      setIsStreaming(false);
       setLiveConnectionStatus('error');
       setLiveConnectionMessage(error instanceof Error ? error.message : 'Unable to connect to Ganglion.');
       setLiveDeviceName(null);
     }
-  }, [disconnectGanglion]);
+  }, [disconnectGanglion, resetDisplayState]);
+
+  const startStream = useCallback(async () => {
+    if (signalSourceMode === 'live') {
+      await connectGanglion();
+      return;
+    }
+
+    await startMockStream();
+  }, [connectGanglion, signalSourceMode, startMockStream]);
+
+  const stopStream = useCallback(async () => {
+    await disconnectGanglion();
+    setIsStreaming(false);
+    resetDisplayState();
+    setLiveConnectionStatus('disconnected');
+    setLiveDeviceName(null);
+    setLiveConnectionMessage(
+      signalSourceMode === 'live'
+        ? 'Live stream stopped.'
+        : 'Mock stream stopped.'
+    );
+  }, [disconnectGanglion, resetDisplayState, signalSourceMode]);
 
   useEffect(() => {
-    if (signalSourceMode !== 'mock') {
+    if (signalSourceMode !== 'mock' || !isStreaming) {
       return;
     }
 
@@ -236,10 +276,10 @@ export function useSignalSource(
     }, 50);
 
     return () => clearInterval(interval);
-  }, [generateMockSignalValue, pushMockSignalPoint, signalSourceMode]);
+  }, [generateMockSignalValue, isStreaming, pushMockSignalPoint, signalSourceMode]);
 
   useEffect(() => {
-    if (signalSourceMode !== 'live') {
+    if (signalSourceMode !== 'live' || !isStreaming) {
       pendingRecordingPointsRef.current = [];
       return;
     }
@@ -277,7 +317,7 @@ export function useSignalSource(
     }, LIVE_RENDER_INTERVAL_MS);
 
     return () => window.clearInterval(interval);
-  }, [displayWindowMs, signalSourceMode]);
+  }, [displayWindowMs, isStreaming, signalSourceMode]);
 
   useEffect(() => {
     setSignalData(prev => {
@@ -296,8 +336,10 @@ export function useSignalSource(
     signalData,
     recordingSignalData,
     signalSourceMode,
-    connectGanglion,
-    useMockSignal,
+    isStreaming,
+    selectSignalSourceMode,
+    startStream,
+    stopStream,
     liveConnectionStatus,
     liveConnectionMessage,
     liveDeviceName,
