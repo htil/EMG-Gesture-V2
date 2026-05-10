@@ -181,6 +181,11 @@ export default function App() {
   const [highlightSegment, setHighlightSegment] = useState<'good' | 'bad' | null>(null);
 
   const samplesCollected = currentSamples.filter(s => s.status === 'collected').length;
+  const samplesPerGesture = availableGestures.map((gesture) => ({
+    gesture,
+    count: gestureData[gesture].samples.filter((sample) => sample.status === 'collected').length
+  }));
+  const totalSamplesCollected = samplesPerGesture.reduce((sum, entry) => sum + entry.count, 0);
   useEffect(() => {
     setTargetSamplesInputValue(String(sampleTarget));
   }, [sampleTarget]);
@@ -413,6 +418,30 @@ export default function App() {
     if (lastCollectedIndex !== undefined) {
       handleRemoveSample(lastCollectedIndex);
     }
+  };
+
+  const handleClearDataset = () => {
+    const confirmed = window.confirm('Clear all recorded samples across every gesture? This cannot be undone.');
+    if (!confirmed) {
+      return;
+    }
+
+    setGestureData(prev => {
+      const nextGestureData = { ...prev };
+
+      for (const gesture of availableGestures) {
+        nextGestureData[gesture] = {
+          samples: prev[gesture].samples.map((sample) => ({
+            id: sample.id,
+            status: 'empty' as const
+          }))
+        };
+      }
+
+      return nextGestureData;
+    });
+
+    setSelectedSampleId(null);
   };
 
   const handleThresholdChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1175,6 +1204,44 @@ export default function App() {
 
                 <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
                   <div>
+                    <p className="text-sm font-medium text-white/90">Dataset Summary</p>
+                    <p className="text-xs text-white/45">Quick overview of collected samples and current session settings.</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-[11px] text-white/40">Total Samples</div>
+                      <div className="mt-1 text-lg text-white/90">{totalSamplesCollected}</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-[11px] text-white/40">{currentGesture} Samples</div>
+                      <div className="mt-1 text-lg text-white/90">{samplesCollected}</div>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {samplesPerGesture.map(({ gesture, count }) => (
+                      <div
+                        key={gesture}
+                        className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2 text-center"
+                      >
+                        <div className="text-[11px] text-white/40">{gesture}</div>
+                        <div className="mt-1 text-sm text-white/85">{count}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 text-xs text-white/55">
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Segment Duration</div>
+                      <div className="mt-1 text-sm text-white/85">{(segmentDurationMs / 1000).toFixed(1)} s</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Display Window</div>
+                      <div className="mt-1 text-sm text-white/85">{(displayWindowMs / 1000).toFixed(1)} s</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div>
                     <p className="text-sm font-medium text-white/90">Export Dataset</p>
                     <p className="text-xs text-white/45">Download the current recorded samples as JSON or CSV.</p>
                   </div>
@@ -1192,6 +1259,20 @@ export default function App() {
                       Export CSV
                     </button>
                   </div>
+                </div>
+
+                <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div>
+                    <p className="text-sm font-medium text-white/90">Clear Dataset</p>
+                    <p className="text-xs text-white/45">Remove all recorded samples for demos, resets, or a fresh study session.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleClearDataset}
+                    className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300 transition-colors hover:bg-red-500/20 hover:text-red-200"
+                  >
+                    Clear Dataset
+                  </button>
                 </div>
               </div>
             </SheetContent>
