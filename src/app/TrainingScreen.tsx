@@ -1,3 +1,5 @@
+import React from 'react';
+
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { AreaChart, Area, XAxis, YAxis, ReferenceArea, ReferenceLine, ResponsiveContainer } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
@@ -12,10 +14,21 @@ import {
   SheetTitle,
   SheetTrigger
 } from './components/ui/sheet';
+import ResultScreen from './ResultScreen';
+import TestingScreen from './TestingScreen';
+import {
+  DEFAULT_GESTURES,
+  buildTrainingSession,
+  createGesture,
+  type Gesture,
+  type TestingSessionData,
+  type TrainingSessionData,
+} from './pipeline';
+
+type AppScreen = 'training' | 'testing' | 'results';
 
 type FeedbackState = 'ready' | 'recording' | 'good' | 'weak' | 'noisy' | 'short';
 type SampleQuality = 'good' | 'weak' | 'noisy';
-type GestureName = 'Pinch' | 'Squeeze' | 'Relax';
 type SampleStatus = 'empty' | 'collected' | 'flagged' | 'rejected';
 type WaveformPoint = { time: number; value: number };
 
@@ -33,7 +46,7 @@ interface GestureData {
 
 interface ExportSample {
   id: string;
-  label: GestureName;
+  label: string;
   timestamp: number;
   data: number[];
   duration: number;
@@ -47,7 +60,7 @@ const DEFAULT_DISPLAY_WINDOW_MS = 3000;
 const DEFAULT_ACTIVITY_DISPLAY_SENSITIVITY = 1.0;
 const RECORDED_SAMPLE_STATUSES: SampleStatus[] = ['collected', 'flagged', 'rejected'];
 
-export default function App() {
+export default function TrainingScreen() {
   const [feedbackState, setFeedbackState] = useState<FeedbackState>('ready');
   const [threshold, setThreshold] = useState(0.6);
   const [segmentDurationMs, setSegmentDurationMs] = useState(DEFAULT_SEGMENT_DURATION_MS);
@@ -68,10 +81,15 @@ export default function App() {
     DEFAULT_ACTIVITY_DISPLAY_SENSITIVITY.toFixed(1)
   );
   const [selectedSampleId, setSelectedSampleId] = useState<number | null>(null);
-  const [currentGesture, setCurrentGesture] = useState<GestureName>('Pinch');
+  const [gestures, setGestures] = useState<Gesture[]>(DEFAULT_GESTURES);
+  const [currentGestureId, setCurrentGestureId] = useState<string>(DEFAULT_GESTURES[0].id);
+  const [newGestureName, setNewGestureName] = useState('');
   const [isGestureDropdownOpen, setIsGestureDropdownOpen] = useState(false);
   const [showGestureChangeMessage, setShowGestureChangeMessage] = useState(false);
   const [showRawSignal, setShowRawSignal] = useState(false);
+  const [activeScreen, setActiveScreen] = useState<AppScreen>('training');
+  const [trainingSession, setTrainingSession] = useState<TrainingSessionData | null>(null);
+  const [testingSession, setTestingSession] = useState<TestingSessionData | null>(null);
   const previewPanelRef = useRef<HTMLDivElement>(null);
   const gestureDropdownRef = useRef<HTMLDivElement>(null);
   const recordingStartTimeRef = useRef<number | null>(null);
@@ -120,37 +138,36 @@ export default function App() {
     activityDisplaySensitivity
   );
   
-  const availableGestures: GestureName[] = ['Pinch', 'Squeeze', 'Relax'];
-  
   const isRecordedSampleStatus = (status: SampleStatus) => RECORDED_SAMPLE_STATUSES.includes(status);
 
-  const initializeGestureData = (): Record<GestureName, GestureData> => {
-    const createSamples = (totalCount: number = 12): Sample[] => {
-      return Array.from({ length: totalCount }, (_, i) => ({
-        id: i,
-        status: 'empty' as const
-      }));
-    };
-    
-    return {
-      Pinch: { samples: createSamples() },
-      Squeeze: { samples: createSamples() },
-      Relax: { samples: createSamples() }
-    };
-  };
-  
-  const [gestureData, setGestureData] = useState<Record<GestureName, GestureData>>(initializeGestureData());
-  
-  const currentSamples = gestureData[currentGesture].samples;
+  const createEmptySamples = (totalCount: number = 12): Sample[] =>
+    Array.from({ length: totalCount }, (_, i) => ({
+      id: i,
+      status: 'empty' as const,
+    }));
+
+  const initializeGestureData = (gestureList: Gesture[]): Record<string, GestureData> =>
+    Object.fromEntries(gestureList.map((gesture) => [gesture.id, { samples: createEmptySamples() }]));
+
+  const [gestureData, setGestureData] = useState<Record<string, GestureData>>(() =>
+    initializeGestureData(DEFAULT_GESTURES),
+  );
+
+  const currentGesture = gestures.find((gesture) => gesture.id === currentGestureId) ?? gestures[0];
+  const currentSamples = gestureData[currentGesture?.id ?? '']?.samples ?? [];
   const [hoveredSample, setHoveredSample] = useState<number | null>(null);
   const [highlightSegment, setHighlightSegment] = useState<'good' | 'bad' | null>(null);
 
   const samplesCollected = currentSamples.filter((sample) => isRecordedSampleStatus(sample.status)).length;
-  const samplesPerGesture = availableGestures.map((gesture) => ({
-    gesture,
-    count: gestureData[gesture].samples.filter((sample) => isRecordedSampleStatus(sample.status)).length
+  const samplesPerGesture = gestures.map((gesture) => ({
+    gesture: gesture.name,
+    gestureId: gesture.id,
+    count: gestureData[gesture.id]?.samples.filter((sample) => isRecordedSampleStatus(sample.status)).length ?? 0,
   }));
   const totalSamplesCollected = samplesPerGesture.reduce((sum, entry) => sum + entry.count, 0);
+  const isAllSamplesCollected = gestures.every(
+    (gesture) => gestureData[gesture.id]?.samples.every((sample) => sample.status !== 'empty') ?? false,
+  );
   useEffect(() => {
     setTargetSamplesInputValue(String(sampleTarget));
   }, [sampleTarget]);
@@ -316,7 +333,10 @@ export default function App() {
       const waveformData = nextSegment;
 
       setGestureData((prev) => {
-        const gesture = prev[currentGesture];
+        const gesture = prev[currentGestureId];
+        if (!gesture) {
+          return prev;
+        }
         const targetIndex = gesture.samples.findIndex((sample) => sample.status === 'empty');
 
         if (targetIndex === -1) {
@@ -325,7 +345,7 @@ export default function App() {
 
         return {
           ...prev,
-          [currentGesture]: {
+          [currentGestureId]: {
             samples: gesture.samples.map((sample, index) =>
               index === targetIndex
                 ? {
@@ -346,7 +366,7 @@ export default function App() {
       setHighlightSegment(quality === 'good' ? 'good' : 'bad');
       setTimeout(() => setHighlightSegment(null), 800);
     }
-  }, [currentGesture, isRecording, recordingSignalData, segmentDurationMs, threshold]);
+  }, [currentGestureId, isRecording, recordingSignalData, segmentDurationMs, threshold]);
 
   // Close preview when clicking outside
   useEffect(() => {
@@ -383,8 +403,8 @@ export default function App() {
   const handleRemoveSample = (sampleId: number) => {
     setGestureData(prev => ({
       ...prev,
-      [currentGesture]: {
-        samples: prev[currentGesture].samples.map(s => 
+      [currentGestureId]: {
+        samples: prev[currentGestureId]?.samples.map(s =>
           s.id === sampleId ? { ...s, status: 'empty', timestamp: undefined, waveformData: undefined, quality: undefined } : s
         )
       }
@@ -411,9 +431,9 @@ export default function App() {
     setGestureData(prev => {
       const nextGestureData = { ...prev };
 
-      for (const gesture of availableGestures) {
-        nextGestureData[gesture] = {
-          samples: prev[gesture].samples.map((sample) => ({
+      for (const gesture of gestures) {
+        nextGestureData[gesture.id] = {
+          samples: prev[gesture.id]?.samples.map((sample) => ({
             id: sample.id,
             status: 'empty' as const
           }))
@@ -438,11 +458,11 @@ export default function App() {
     setGestureData(prev => {
       const nextGestureData = { ...prev };
 
-      for (const gesture of availableGestures) {
-        const existingSamples = prev[gesture].samples;
+      for (const gesture of gestures) {
+        const existingSamples = prev[gesture.id]?.samples ?? createEmptySamples();
 
         if (clampedValue > existingSamples.length) {
-          nextGestureData[gesture] = {
+          nextGestureData[gesture.id] = {
             samples: [
               ...existingSamples,
               ...Array.from({ length: clampedValue - existingSamples.length }, (_, i) => ({
@@ -455,13 +475,13 @@ export default function App() {
         }
 
         if (clampedValue < existingSamples.length) {
-          nextGestureData[gesture] = {
+          nextGestureData[gesture.id] = {
             samples: existingSamples.slice(0, clampedValue)
           };
           continue;
         }
 
-        nextGestureData[gesture] = prev[gesture];
+        nextGestureData[gesture.id] = prev[gesture.id] ?? { samples: createEmptySamples() };
       }
 
       return nextGestureData;
@@ -766,11 +786,11 @@ export default function App() {
       ? 'bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.25)]'
       : 'bg-white/25';
 
-  const buildExportSamplesByLabel = (): Record<GestureName, ExportSample[]> => {
-    const exportedSamples = {} as Record<GestureName, ExportSample[]>;
+  const buildExportSamplesByLabel = (): Record<string, ExportSample[]> => {
+    const exportedSamples: Record<string, ExportSample[]> = {};
 
-    for (const gesture of availableGestures) {
-      exportedSamples[gesture] = gestureData[gesture].samples
+    for (const gesture of gestures) {
+      exportedSamples[gesture.name] = (gestureData[gesture.id]?.samples ?? [])
         .filter((sample) => isRecordedSampleStatus(sample.status) && sample.waveformData && sample.waveformData.length > 0)
         .map((sample) => {
           const waveformData = sample.waveformData ?? [];
@@ -782,8 +802,8 @@ export default function App() {
             : segmentDurationMs;
 
           return {
-            id: `${gesture.toLowerCase()}-${sample.id}-${timestamp}`,
-            label: gesture,
+            id: `${gesture.id}-${sample.id}-${timestamp}`,
+            label: gesture.name,
             timestamp,
             data: waveformData.map((point) => point.value),
             duration
@@ -792,6 +812,68 @@ export default function App() {
     }
 
     return exportedSamples;
+  };
+
+  const handleStartTesting = () => {
+    const session = buildTrainingSession({
+      gestures,
+      gestureSamples: Object.fromEntries(
+        gestures.map((gesture) => [gesture.id, gestureData[gesture.id]?.samples ?? []]),
+      ),
+      sampleTarget,
+      segmentDurationMs,
+    });
+    setTrainingSession(session);
+    setTestingSession(null);
+    setActiveScreen('testing');
+  };
+
+  const handleAddGesture = () => {
+    const trimmedName = newGestureName.trim();
+    if (!trimmedName) {
+      return;
+    }
+
+    const duplicate = gestures.some(
+      (gesture) => gesture.name.toLowerCase() === trimmedName.toLowerCase(),
+    );
+    if (duplicate) {
+      return;
+    }
+
+    const nextGesture = createGesture(trimmedName);
+    setGestures((prev) => [...prev, nextGesture]);
+    setGestureData((prev) => ({
+      ...prev,
+      [nextGesture.id]: { samples: createEmptySamples(sampleTarget) },
+    }));
+    setNewGestureName('');
+  };
+
+  const handleRemoveGesture = (gestureId: string) => {
+    if (gestures.length <= 1) {
+      return;
+    }
+
+    const hasRecordedSamples = (gestureData[gestureId]?.samples ?? []).some((sample) =>
+      isRecordedSampleStatus(sample.status),
+    );
+    if (hasRecordedSamples) {
+      return;
+    }
+
+    const nextGestures = gestures.filter((gesture) => gesture.id !== gestureId);
+    setGestures(nextGestures);
+    setGestureData((prev) => {
+      const next = { ...prev };
+      delete next[gestureId];
+      return next;
+    });
+
+    if (currentGestureId === gestureId) {
+      setCurrentGestureId(nextGestures[0]?.id ?? '');
+      setSelectedSampleId(null);
+    }
   };
 
   const downloadBlob = (content: BlobPart, fileName: string, mimeType: string) => {
@@ -855,6 +937,26 @@ export default function App() {
     downloadBlob(timeseriesCsv, `emg_dataset_${exportTimestamp}_timeseries.csv`, 'text/csv;charset=utf-8;');
   };
 
+  if (activeScreen === 'testing' && trainingSession) {
+    return (
+      <TestingScreen
+        trainingSession={trainingSession}
+        onSessionComplete={setTestingSession}
+        onShowResults={() => setActiveScreen('results')}
+      />
+    );
+  }
+
+  if (activeScreen === 'results' && testingSession) {
+    return (
+      <ResultScreen
+        testingSession={testingSession}
+        onRetrain={() => setActiveScreen('training')}
+        onTestAgain={() => setActiveScreen('testing')}
+      />
+    );
+  }
+
   return (
     <div className="size-full bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 flex items-center justify-center p-8">
       <div className="w-full max-w-5xl flex flex-col gap-8">
@@ -872,7 +974,7 @@ export default function App() {
                   onClick={() => setIsGestureDropdownOpen(!isGestureDropdownOpen)}
                   className="flex items-center gap-2 px-4 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg transition-colors group"
                 >
-                  <span className="text-2xl font-medium text-white">{currentGesture}</span>
+                  <span className="text-2xl font-medium text-white">{currentGesture?.name}</span>
                   <ChevronDown className={`w-5 h-5 text-white/60 transition-transform ${isGestureDropdownOpen ? 'rotate-180' : ''}`} />
                 </button>
                 
@@ -885,12 +987,12 @@ export default function App() {
                       transition={{ duration: 0.15 }}
                       className="absolute top-full mt-2 left-0 min-w-[140px] bg-slate-800/95 backdrop-blur-sm border border-white/10 rounded-lg shadow-2xl overflow-hidden z-10"
                     >
-                      {availableGestures.map((gesture) => (
+                      {gestures.map((gesture) => (
                         <button
-                          key={gesture}
+                          key={gesture.id}
                           onClick={() => {
-                            if (gesture !== currentGesture) {
-                              setCurrentGesture(gesture);
+                            if (gesture.id !== currentGestureId) {
+                              setCurrentGestureId(gesture.id);
                               setSelectedSampleId(null);
                               setShowGestureChangeMessage(true);
                               setTimeout(() => setShowGestureChangeMessage(false), 2000);
@@ -898,12 +1000,12 @@ export default function App() {
                             setIsGestureDropdownOpen(false);
                           }}
                           className={`w-full px-4 py-2.5 text-left text-sm transition-colors ${
-                            gesture === currentGesture
+                            gesture.id === currentGestureId
                               ? 'bg-cyan-400/10 text-cyan-400'
                               : 'text-white/70 hover:bg-white/10 hover:text-white'
                           }`}
                         >
-                          {gesture}
+                          {gesture.name}
                         </button>
                       ))}
                     </motion.div>
@@ -921,7 +1023,7 @@ export default function App() {
                     transition={{ duration: 0.2 }}
                     className="px-3 py-1 bg-cyan-400/10 border border-cyan-400/30 rounded-lg text-sm text-cyan-400"
                   >
-                    Now training: {currentGesture}
+                    Now training: {currentGesture?.name}
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -1072,6 +1174,60 @@ export default function App() {
                         {channelIndex + 1}
                       </button>
                     ))}
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div>
+                    <p className="text-sm font-medium text-white/90">Gesture Classes</p>
+                    <p className="text-xs text-white/45">Add or remove gestures used for training and testing.</p>
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    {gestures.map((gesture) => {
+                      const recordedCount =
+                        gestureData[gesture.id]?.samples.filter((sample) =>
+                          isRecordedSampleStatus(sample.status),
+                        ).length ?? 0;
+                      const canRemove = gestures.length > 1 && recordedCount === 0;
+
+                      return (
+                        <div
+                          key={gesture.id}
+                          className="flex items-center justify-between rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2"
+                        >
+                          <span className="text-sm text-white/85">{gesture.name}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveGesture(gesture.id)}
+                            disabled={!canRemove}
+                            className="rounded-md border border-white/10 px-2 py-1 text-xs text-white/60 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={newGestureName}
+                      onChange={(event) => setNewGestureName(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          handleAddGesture();
+                        }
+                      }}
+                      placeholder="New gesture name"
+                      className="flex-1 rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-sm text-white/80"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAddGesture}
+                      className="rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-sm text-cyan-300 transition-colors hover:bg-cyan-400/15"
+                    >
+                      Add
+                    </button>
                   </div>
                 </div>
 
@@ -1277,7 +1433,7 @@ export default function App() {
                       <div className="mt-1 text-lg text-white/90">{totalSamplesCollected}</div>
                     </div>
                     <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
-                      <div className="text-[11px] text-white/40">{currentGesture} Samples</div>
+                      <div className="text-[11px] text-white/40">{currentGesture?.name} Samples</div>
                       <div className="mt-1 text-lg text-white/90">{samplesCollected}</div>
                     </div>
                   </div>
@@ -1549,6 +1705,15 @@ export default function App() {
                   </div>
                 </div>
               </div>
+              {isAllSamplesCollected && (
+                <button
+                  type="button"
+                  onClick={handleStartTesting}
+                  className="px-8 py-4 rounded-xl border border-cyan-400/30 bg-cyan-400/10 backdrop-blur-sm transition-colors hover:bg-cyan-400/15"
+                >
+                  <p className="text-2xl font-medium text-cyan-400">Test</p>
+                </button>
+              )}
             </div>
             <p className="text-lg text-white/60 font-light">
               {feedback.instruction}
