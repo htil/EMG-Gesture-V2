@@ -3,6 +3,14 @@ export interface Gesture {
   name: string;
 }
 
+export interface EmgFeatures {
+  rms: number;
+  mav: number;
+  std: number;
+  peak: number;
+  waveformLength: number;
+}
+
 export interface EmgSample {
   id: string;
   gestureId: string;
@@ -11,6 +19,7 @@ export interface EmgSample {
   data: number[];
   duration: number;
   quality?: 'good' | 'weak' | 'noisy';
+  features?: EmgFeatures;
 }
 
 export interface TrainingGestureData {

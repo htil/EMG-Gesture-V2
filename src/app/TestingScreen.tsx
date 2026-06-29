@@ -10,22 +10,41 @@ import {
 import {
   buildGestureColorMap,
   calculateOverallConfidence,
-  createMockPredictionEngine,
+  createPredictionEngine,
   createPredictionRecord,
   findGesture,
+  generateChannelMockEmgSample,
+  generateNoiseMockEmgSample,
   type PredictionRecord,
   type TestingSessionData,
   type TrainingSessionData,
 } from "./pipeline";
+import { generateMockEmgSample } from "./pipeline";
   
   type SessionState =
     | "idle"
     | "countdown"
     | "active"
     | "complete";
+
+  type TestingInputMode =
+    | "replay"
+    | "channel-1"
+    | "channel-2"
+    | "channel-3"
+    | "channel-4"
+    | "noise";
   
   const SESSION_DURATION = 60;
   const TARGET_INTERVAL = 4;
+  const TESTING_INPUT_OPTIONS: Array<{ value: TestingInputMode; label: string }> = [
+    { value: "replay", label: "Replay Training" },
+    { value: "channel-1", label: "Channel 1" },
+    { value: "channel-2", label: "Channel 2" },
+    { value: "channel-3", label: "Channel 3" },
+    { value: "channel-4", label: "Channel 4" },
+    { value: "noise", label: "Noise" },
+  ];
   
   function CircularProgress({
     progress,
@@ -156,7 +175,14 @@ import {
     const gestures = trainingSession.gestures;
     const gestureColors = useMemo(() => buildGestureColorMap(gestures), [gestures]);
     const predictionEngine = useMemo(
-      () => createMockPredictionEngine(trainingSession),
+      () => createPredictionEngine(trainingSession),
+      [trainingSession],
+    );
+    const trainingSamplesByGesture = useMemo(
+      () =>
+        Object.fromEntries(
+          trainingSession.gestureData.map((entry) => [entry.gesture.id, entry.samples]),
+        ) as Record<string, typeof trainingSession.gestureData[number]["samples"]>,
       [trainingSession],
     );
 
@@ -174,6 +200,8 @@ import {
     const [confidence, setConfidence] = useState(94.0);
     const [history, setHistory] =
       useState<PredictionRecord[]>([]);
+    const [testingInputMode, setTestingInputMode] =
+      useState<TestingInputMode>("replay");
 
     const predictionsRef = useRef<PredictionRecord[]>([]);
     const sessionStartedAtRef = useRef<number | null>(null);
@@ -187,6 +215,42 @@ import {
     const countdownRef = useRef<ReturnType<
       typeof setInterval
     > | null>(null);
+
+    const buildTestingSample = useCallback(
+      (expectedGesture: Gesture, counter: number) => {
+        if (testingInputMode === "noise") {
+          return generateNoiseMockEmgSample(trainingSession.segmentDurationMs);
+        }
+
+        if (testingInputMode.startsWith("channel-")) {
+          const channelIndex = Number.parseInt(testingInputMode.split("-")[1], 10) - 1;
+          return generateChannelMockEmgSample(
+            Number.isNaN(channelIndex) ? 0 : channelIndex,
+            trainingSession.segmentDurationMs,
+          );
+        }
+
+        const recordedSamples = trainingSamplesByGesture[expectedGesture.id] ?? [];
+        const recordedSample = recordedSamples.length > 0
+          ? recordedSamples[(counter - 1) % recordedSamples.length]
+          : null;
+
+        if (recordedSample) {
+          return {
+            ...recordedSample,
+            id: `${recordedSample.id}-replay-${counter}`,
+            timestamp: Date.now(),
+          };
+        }
+
+        return generateMockEmgSample(
+          expectedGesture.id,
+          expectedGesture.name,
+          trainingSession.segmentDurationMs,
+        );
+      },
+      [testingInputMode, trainingSamplesByGesture, trainingSession.segmentDurationMs],
+    );
   
     const stopSession = useCallback(() => {
       if (sessionRef.current) clearInterval(sessionRef.current);
@@ -256,7 +320,8 @@ import {
         }
 
         counter++;
-        const result = predictionEngine.predict(expectedGesture, counter);
+        const emgSample = buildTestingSample(expectedGesture, counter);
+        const result = predictionEngine.predict(expectedGesture, emgSample);
         const entry = createPredictionRecord(result, counter, counter - 1);
 
         setPredictedGestureId(entry.predictedGestureId);
@@ -267,7 +332,7 @@ import {
           return next;
         });
       }, 300);
-    }, [gestures, onSessionComplete, predictionEngine, stopSession, trainingSession.id]);
+    }, [buildTestingSample, gestures, onSessionComplete, predictionEngine, stopSession, trainingSession.id]);
   
     const startSession = useCallback(() => {
       setCountdown(3);
@@ -420,6 +485,33 @@ import {
                   </div>
                 ))}
               </div>
+
+              <div className="w-full max-w-3xl rounded-xl border border-white/10 bg-white/5 p-4">
+                <div className="mb-3 text-center">
+                  <div className="text-xs font-semibold tracking-[0.25em] uppercase text-white/50">
+                    Testing Input
+                  </div>
+                  <div className="mt-1 text-sm text-white/55">
+                    Choose whether testing replays recorded mock samples or probes the model with a different mock waveform.
+                  </div>
+                </div>
+                <div className="flex flex-wrap justify-center gap-2">
+                  {TESTING_INPUT_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      onClick={() => setTestingInputMode(option.value)}
+                      className="rounded-lg border px-3 py-2 text-sm transition-colors"
+                      style={{
+                        borderColor: testingInputMode === option.value ? "rgba(0,212,255,0.35)" : "rgba(255,255,255,0.1)",
+                        background: testingInputMode === option.value ? "rgba(0,212,255,0.12)" : "rgba(255,255,255,0.04)",
+                        color: testingInputMode === option.value ? "#00d4ff" : "rgba(255,255,255,0.72)",
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
   
               <button
                 onClick={startSession}
@@ -567,6 +659,9 @@ import {
                     </div>
                     <div className="font-mono text-sm text-white/50">
                       {history.length} predictions captured
+                    </div>
+                    <div className="mt-2 text-xs text-white/45">
+                      Input: {TESTING_INPUT_OPTIONS.find((option) => option.value === testingInputMode)?.label ?? "Replay Training"}
                     </div>
                   </div>
                 </div>
