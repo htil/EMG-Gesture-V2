@@ -9,6 +9,47 @@ export interface EmgFeatures {
   std: number;
   peak: number;
   waveformLength: number;
+  zeroCrossings: number;
+  slopeSignChanges: number;
+  willisonAmplitude: number;
+  hjorthMobility: number;
+  hjorthComplexity: number;
+}
+
+export interface FeatureStats {
+  min: number;
+  mean: number;
+  max: number;
+}
+
+export interface ModelClassDebugSummary {
+  gestureId: string;
+  gestureName: string;
+  sampleCount: number;
+  featureStats: Record<string, FeatureStats>;
+}
+
+export interface NeighborDebug {
+  gestureId: string;
+  gestureName: string;
+  distance: number;
+  support: number;
+}
+
+export interface ClassSupportDebug {
+  gestureId: string;
+  gestureName: string;
+  support: number;
+}
+
+export interface PredictionDebug {
+  features: EmgFeatures;
+  normalizedVector: number[];
+  nearestNeighbors: NeighborDebug[];
+  classSupports: ClassSupportDebug[];
+  supportMargin: number;
+  nearestDistance: number;
+  status: 'accepted' | 'unknown';
 }
 
 export interface EmgSample {
@@ -51,6 +92,7 @@ export interface PredictionRecord {
   matchStatus: PredictionMatchStatus;
   confidenceStatus: PredictionConfidenceStatus;
   emgSample?: EmgSample;
+  debug?: PredictionDebug;
 }
 
 export interface TestingSessionData {

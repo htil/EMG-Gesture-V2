@@ -1,10 +1,19 @@
-import type { EmgFeatures, Gesture, PredictionConfidenceStatus, TrainingSessionData } from './types';
+import type {
+  ClassSupportDebug,
+  EmgFeatures,
+  FeatureStats,
+  Gesture,
+  ModelClassDebugSummary,
+  PredictionConfidenceStatus,
+  PredictionDebug,
+  TrainingSessionData,
+} from './types';
 import { getConfidenceStatus, getMatchStatus } from './confidence';
 import { extractEmgFeatures } from './featureExtraction';
 import { formatPredictionTimestamp } from './formatTimestamp';
 import type { EmgSample, PredictionRecord } from './types';
 
-export type FeatureVector = [number, number, number, number, number];
+export type FeatureVector = number[];
 
 interface NormalizationStats {
   means: FeatureVector;
@@ -21,6 +30,8 @@ interface BuiltKnnModel {
   gestures: Gesture[];
   trainingSamples: KnnTrainingSample[];
   normalization: NormalizationStats;
+  featureKeys: string[];
+  classDebugSummary: ModelClassDebugSummary[];
   isReady: boolean;
 }
 
@@ -31,21 +42,30 @@ export interface PredictionEngineResult {
 
 const KNN_K = 3;
 const MIN_LABELS = 2;
+const FEATURE_KEYS: Array<keyof EmgFeatures> = [
+  'rms',
+  'mav',
+  'std',
+  'peak',
+  'waveformLength',
+  'zeroCrossings',
+  'slopeSignChanges',
+  'willisonAmplitude',
+  'hjorthMobility',
+  'hjorthComplexity',
+];
+const MIN_SUPPORT_THRESHOLD = 0.56;
+const MIN_SUPPORT_MARGIN = 0.1;
+const MAX_NEAREST_DISTANCE = 5.2;
 
 function featureVectorFromEmgFeatures(features: EmgFeatures): FeatureVector {
-  return [
-    features.rms,
-    features.mav,
-    features.std,
-    features.peak,
-    features.waveformLength,
-  ];
+  return FEATURE_KEYS.map((key) => features[key]);
 }
 
 function computeNormalizationStats(vectors: FeatureVector[]): NormalizationStats {
   const means = vectors[0].map((_, index) => (
     vectors.reduce((sum, vector) => sum + vector[index], 0) / Math.max(vectors.length, 1)
-  )) as FeatureVector;
+  ));
 
   const stdDevs = vectors[0].map((_, index) => {
     const variance = vectors.reduce((sum, vector) => {
@@ -54,7 +74,7 @@ function computeNormalizationStats(vectors: FeatureVector[]): NormalizationStats
     }, 0) / Math.max(vectors.length, 1);
 
     return Math.max(Math.sqrt(variance), 1e-6);
-  }) as FeatureVector;
+  });
 
   return { means, stdDevs };
 }
@@ -62,7 +82,7 @@ function computeNormalizationStats(vectors: FeatureVector[]): NormalizationStats
 function normalizeVector(vector: FeatureVector, normalization: NormalizationStats): FeatureVector {
   return vector.map((value, index) => (
     (value - normalization.means[index]) / normalization.stdDevs[index]
-  )) as FeatureVector;
+  ));
 }
 
 function euclideanDistance(left: FeatureVector, right: FeatureVector) {
@@ -71,18 +91,52 @@ function euclideanDistance(left: FeatureVector, right: FeatureVector) {
   );
 }
 
+function computeFeatureStats(values: number[]): FeatureStats {
+  if (values.length === 0) {
+    return { min: 0, mean: 0, max: 0 };
+  }
+
+  return {
+    min: Number(Math.min(...values).toFixed(4)),
+    mean: Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(4)),
+    max: Number(Math.max(...values).toFixed(4)),
+  };
+}
+
+function buildClassDebugSummary(trainingSession: TrainingSessionData): ModelClassDebugSummary[] {
+  return trainingSession.gestureData.map((entry) => {
+    const features = entry.samples.map((sample) => sample.features ?? extractEmgFeatures(sample.data));
+    const featureStats = Object.fromEntries(
+      FEATURE_KEYS.map((key) => [
+        key,
+        computeFeatureStats(features.map((feature) => feature[key])),
+      ]),
+    ) as Record<string, FeatureStats>;
+
+    return {
+      gestureId: entry.gesture.id,
+      gestureName: entry.gesture.name,
+      sampleCount: entry.samples.length,
+      featureStats,
+    };
+  });
+}
+
 function buildKnnModel(trainingSession: TrainingSessionData): BuiltKnnModel {
   const collectedSamples = trainingSession.gestureData.flatMap((entry) => entry.samples);
   const labelsWithSamples = new Set(collectedSamples.map((sample) => sample.gestureId));
+  const classDebugSummary = buildClassDebugSummary(trainingSession);
 
   if (collectedSamples.length === 0 || labelsWithSamples.size < MIN_LABELS) {
     return {
       gestures: trainingSession.gestures,
       trainingSamples: [],
       normalization: {
-        means: [0, 0, 0, 0, 0],
-        stdDevs: [1, 1, 1, 1, 1],
+        means: Array(FEATURE_KEYS.length).fill(0),
+        stdDevs: Array(FEATURE_KEYS.length).fill(1),
       },
+      featureKeys: FEATURE_KEYS,
+      classDebugSummary,
       isReady: false,
     };
   }
@@ -101,6 +155,8 @@ function buildKnnModel(trainingSession: TrainingSessionData): BuiltKnnModel {
     gestures: trainingSession.gestures,
     trainingSamples,
     normalization,
+    featureKeys: FEATURE_KEYS,
+    classDebugSummary,
     isReady: true,
   };
 }
@@ -137,12 +193,50 @@ function predictKnn(model: BuiltKnnModel, values: number[]) {
   }
 
   const totalVotes = sortedVotes.reduce((sum, [, value]) => sum + value, 0);
-  const confidence = Number(Math.max(0, Math.min(99, (winningVotes / Math.max(totalVotes, 1)) * 100)).toFixed(1));
-  const predictedGesture = model.gestures.find((gesture) => gesture.id === winningGestureId) ?? model.gestures[0];
+  const winningSupport = winningVotes / Math.max(totalVotes, 1);
+  const runnerUpVotes = sortedVotes[1]?.[1] ?? 0;
+  const supportMargin = winningSupport - runnerUpVotes / Math.max(totalVotes, 1);
+  const nearestDistance = nearestNeighbors[0]?.distance ?? Number.POSITIVE_INFINITY;
+  const isUnknown =
+    winningSupport < MIN_SUPPORT_THRESHOLD ||
+    supportMargin < MIN_SUPPORT_MARGIN ||
+    nearestDistance > MAX_NEAREST_DISTANCE;
+  const predictedGesture = isUnknown
+    ? null
+    : model.gestures.find((gesture) => gesture.id === winningGestureId) ?? model.gestures[0];
+  const confidenceBase =
+    winningSupport * 0.6 +
+    Math.max(0, supportMargin) * 0.3 +
+    Math.max(0, 1 - nearestDistance / MAX_NEAREST_DISTANCE) * 0.1;
+  const confidence = Number(Math.max(0, Math.min(99, confidenceBase * 100)).toFixed(1));
+  const classSupports: ClassSupportDebug[] = sortedVotes.map(([gestureId, votes]) => ({
+    gestureId,
+    gestureName: model.gestures.find((gesture) => gesture.id === gestureId)?.name ?? gestureId,
+    support: Number(((votes / Math.max(totalVotes, 1)) * 100).toFixed(1)),
+  }));
+  const neighborWeightTotal = nearestNeighbors.reduce((sum, sample) => sum + 1 / Math.max(sample.distance, 1e-6), 0);
+  const debug: PredictionDebug = {
+    features: liveFeatures,
+    normalizedVector: liveVector.map((value) => Number(value.toFixed(4))),
+    nearestNeighbors: nearestNeighbors.map((sample) => {
+      const weight = 1 / Math.max(sample.distance, 1e-6);
+      return {
+        gestureId: sample.label,
+        gestureName: model.gestures.find((gesture) => gesture.id === sample.label)?.name ?? sample.label,
+        distance: Number(sample.distance.toFixed(4)),
+        support: Number(((weight / Math.max(neighborWeightTotal, 1e-6)) * 100).toFixed(1)),
+      };
+    }),
+    classSupports,
+    supportMargin: Number((supportMargin * 100).toFixed(1)),
+    nearestDistance: Number(nearestDistance.toFixed(4)),
+    status: isUnknown ? 'unknown' : 'accepted',
+  };
 
   return {
     gesture: predictedGesture,
     confidence,
+    debug,
   };
 }
 
@@ -167,6 +261,15 @@ function fallbackPrediction(
       matchStatus: getMatchStatus(expectedGesture.id, predictedGesture.id),
       confidenceStatus: getConfidenceStatus(confidence) as PredictionConfidenceStatus,
       emgSample,
+      debug: {
+        features: emgSample.features ?? extractEmgFeatures(emgSample.data),
+        normalizedVector: [],
+        nearestNeighbors: [],
+        classSupports: [],
+        supportMargin: 0,
+        nearestDistance: Number.POSITIVE_INFINITY,
+        status: 'unknown',
+      },
     },
     emgSample,
   };
@@ -176,6 +279,14 @@ export function createPredictionEngine(trainingSession: TrainingSessionData) {
   const model = buildKnnModel(trainingSession);
 
   return {
+    getModelDebugSummary() {
+      return {
+        featureKeys: model.featureKeys,
+        classDebugSummary: model.classDebugSummary,
+        isReady: model.isReady,
+        trainingSampleCount: model.trainingSamples.length,
+      };
+    },
     predict(expectedGesture: Gesture, emgSample: EmgSample): PredictionEngineResult {
       const prediction = predictKnn(model, emgSample.data);
 
@@ -183,7 +294,24 @@ export function createPredictionEngine(trainingSession: TrainingSessionData) {
         return fallbackPrediction(trainingSession, expectedGesture, emgSample);
       }
 
-      const { gesture, confidence } = prediction;
+      const { gesture, confidence, debug } = prediction;
+      if (!gesture) {
+        return {
+          emgSample,
+          record: {
+            expectedGestureId: expectedGesture.id,
+            expectedGestureName: expectedGesture.name,
+            predictedGestureId: 'unknown',
+            predictedGestureName: 'Unknown',
+            confidence,
+            matchStatus: 'mismatch',
+            confidenceStatus: getConfidenceStatus(confidence) as PredictionConfidenceStatus,
+            emgSample,
+            debug,
+          },
+        };
+      }
+
       return {
         emgSample,
         record: {
@@ -195,6 +323,7 @@ export function createPredictionEngine(trainingSession: TrainingSessionData) {
           matchStatus: getMatchStatus(expectedGesture.id, gesture.id),
           confidenceStatus: getConfidenceStatus(confidence) as PredictionConfidenceStatus,
           emgSample,
+          debug,
         },
       };
     },

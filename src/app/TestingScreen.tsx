@@ -178,6 +178,7 @@ import { generateMockEmgSample } from "./pipeline";
       () => createPredictionEngine(trainingSession),
       [trainingSession],
     );
+    const modelDebugSummary = useMemo(() => predictionEngine.getModelDebugSummary(), [predictionEngine]);
     const trainingSamplesByGesture = useMemo(
       () =>
         Object.fromEntries(
@@ -202,6 +203,7 @@ import { generateMockEmgSample } from "./pipeline";
       useState<PredictionRecord[]>([]);
     const [testingInputMode, setTestingInputMode] =
       useState<TestingInputMode>("replay");
+    const [latestDebug, setLatestDebug] = useState<PredictionRecord["debug"] | undefined>(undefined);
 
     const predictionsRef = useRef<PredictionRecord[]>([]);
     const sessionStartedAtRef = useRef<number | null>(null);
@@ -326,6 +328,7 @@ import { generateMockEmgSample } from "./pipeline";
 
         setPredictedGestureId(entry.predictedGestureId);
         setConfidence(entry.confidence);
+        setLatestDebug(entry.debug);
         setHistory((prev) => {
           const next = [entry, ...prev];
           predictionsRef.current = [...predictionsRef.current, entry];
@@ -360,7 +363,7 @@ import { generateMockEmgSample } from "./pipeline";
     const sessionProgress = timeLeft / SESSION_DURATION;
     const gestureProgress = gestureTimer / TARGET_INTERVAL;
     const targetGesture = findGesture(gestures, targetGestureId) ?? gestures[0];
-    const predictedGesture = findGesture(gestures, predictedGestureId) ?? gestures[0];
+    const predictedGesture = findGesture(gestures, predictedGestureId);
     const gc = gestureColors[targetGesture?.id ?? ""] ?? { ring: "#00d4ff", bar: "#00d4ff" };
     const latestPrediction = history[0];
     const isMatch = latestPrediction?.matchStatus === "match";
@@ -783,10 +786,12 @@ import { generateMockEmgSample } from "./pipeline";
                         <div
                           className="text-2xl font-semibold"
                           style={{
-                            color: gestureColors[predictedGestureId]?.ring ?? "#00d4ff",
+                            color: predictedGesture
+                              ? gestureColors[predictedGestureId]?.ring ?? "#00d4ff"
+                              : "#f5a623",
                           }}
                         >
-                          {predictedGesture?.name}
+                          {predictedGesture?.name ?? "Unknown"}
                         </div>
                       </div>
                     </div>
@@ -860,6 +865,71 @@ import { generateMockEmgSample } from "./pipeline";
                         </div>
                       </div>
                     ))}
+                  </div>
+
+                  <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+                    <div className="mb-3 flex items-center justify-between">
+                      <span className="text-xs font-semibold tracking-[0.25em] uppercase text-white/50">
+                        Model Debug
+                      </span>
+                      <span className="text-xs text-white/45">
+                        {modelDebugSummary.trainingSampleCount} samples
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 text-xs text-white/55">
+                      <div>
+                        <div className="text-white/40">Prediction Status</div>
+                        <div className="mt-1 text-sm text-white/85">
+                          {latestDebug?.status === "accepted" ? "Accepted" : "Unknown / gated"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Nearest Distance</div>
+                        <div className="mt-1 text-sm text-white/85">
+                          {latestDebug ? latestDebug.nearestDistance.toFixed(3) : "—"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Support Margin</div>
+                        <div className="mt-1 text-sm text-white/85">
+                          {latestDebug ? `${latestDebug.supportMargin.toFixed(1)}%` : "—"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Supports</div>
+                        <div className="mt-1 text-sm text-white/85">
+                          {latestDebug?.classSupports.slice(0, 2).map((support) => `${support.gestureName} ${support.support.toFixed(1)}%`).join(" / ") ?? "—"}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-3 space-y-2 text-xs text-white/55">
+                      <div>
+                        <div className="text-white/40">Class Feature Means</div>
+                        <div className="mt-1 text-white/75">
+                          {modelDebugSummary.classDebugSummary.map((entry) => (
+                            `${entry.gestureName}: ZC ${entry.featureStats.zeroCrossings.mean.toFixed(1)}, SSC ${entry.featureStats.slopeSignChanges.mean.toFixed(1)}, WAMP ${entry.featureStats.willisonAmplitude.mean.toFixed(1)}`
+                          )).join(" | ")}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Nearest Neighbors</div>
+                        <div className="mt-1 text-white/75">
+                          {latestDebug?.nearestNeighbors.length
+                            ? latestDebug.nearestNeighbors
+                                .map((neighbor) => `${neighbor.gestureName} d=${neighbor.distance.toFixed(2)} s=${neighbor.support.toFixed(1)}%`)
+                                .join(" | ")
+                            : "—"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Feature Snapshot</div>
+                        <div className="mt-1 text-white/75">
+                          {latestDebug
+                            ? `ZC ${latestDebug.features.zeroCrossings}, SSC ${latestDebug.features.slopeSignChanges}, WAMP ${latestDebug.features.willisonAmplitude}, HM ${latestDebug.features.hjorthMobility.toFixed(2)}, HC ${latestDebug.features.hjorthComplexity.toFixed(2)}`
+                            : "—"}
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>

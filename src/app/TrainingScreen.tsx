@@ -20,6 +20,7 @@ import {
   DEFAULT_GESTURES,
   buildTrainingSession,
   createGesture,
+  getChannelMockSignalValue,
   type Gesture,
   type TestingSessionData,
   type TrainingSessionData,
@@ -98,38 +99,23 @@ export default function TrainingScreen() {
   const lastLivePointTimeRef = useRef<number | null>(null);
 
   const generateMockSignalValue = useCallback(() => {
-    const time = Date.now();
-    const baseNoise = (Math.random() - 0.5) * 0.1;
-    const phase = time * 0.01;
-    const channelWaveform = (() => {
-      switch (selectedChannelIndex) {
-        case 1:
-          return Math.sin(phase * 0.7) * 0.65 + Math.sin(phase * 1.6) * 0.35;
-        case 2:
-          return (2 / Math.PI) * Math.asin(Math.sin(phase * 1.15));
-        case 3:
-          return 2 * (((phase * 0.22) % 1)) - 1;
-        default:
-          return Math.sin(phase);
-      }
-    })();
-
-    const clampMockValue = (value: number) => Math.max(0, Math.min(1, value));
+    const cycleDurationMs = Math.max(segmentDurationMs, 1);
+    const progress = (Date.now() % cycleDurationMs) / cycleDurationMs;
 
     switch (feedbackState) {
       case 'recording':
       case 'good':
-        return clampMockValue(0.68 + channelWaveform * 0.18 + baseNoise * 0.25);
+        return getChannelMockSignalValue(selectedChannelIndex, progress, 'active');
       case 'weak':
-        return clampMockValue(0.32 + channelWaveform * 0.11 + baseNoise * 0.35);
+        return getChannelMockSignalValue(selectedChannelIndex, progress, 'weak');
       case 'noisy':
-        return clampMockValue(0.62 + channelWaveform * 0.14 + (Math.random() - 0.5) * 0.3);
+        return getChannelMockSignalValue(selectedChannelIndex, progress, 'noisy');
       case 'short':
-        return clampMockValue(0.78 + channelWaveform * 0.08 + baseNoise * 0.15);
+        return getChannelMockSignalValue(selectedChannelIndex, progress, 'short');
       default:
-        return clampMockValue(0.14 + channelWaveform * 0.03 + baseNoise * 0.4);
+        return getChannelMockSignalValue(selectedChannelIndex, progress, 'idle');
     }
-  }, [feedbackState, selectedChannelIndex]);
+  }, [feedbackState, segmentDurationMs, selectedChannelIndex]);
 
   const {
     signalData,
