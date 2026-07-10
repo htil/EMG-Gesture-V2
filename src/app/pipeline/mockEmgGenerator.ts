@@ -1,3 +1,5 @@
+// Generates mock EMG samples for a gesture
+
 import type { EmgSample } from './types';
 
 function hashGestureId(gestureId: string): number {

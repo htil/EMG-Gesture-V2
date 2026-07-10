@@ -1,4 +1,5 @@
 import React from "react";
+import { ChevronLeft, LogOut, Settings2 } from "lucide-react";
 
 import {
     useState,
@@ -8,13 +9,30 @@ import {
     useMemo,
   } from "react";
 import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from "./components/ui/sheet";
+import {
   buildGestureColorMap,
+  buildSessionTimeline,
+  buildTrialSchedule,
   calculateOverallConfidence,
+  calculateSessionDurationMs,
+  clampSetting,
   createMockPredictionEngine,
   createPredictionRecord,
   findGesture,
+  formatSessionLength,
+  TESTING_SESSION_LIMITS,
   type PredictionRecord,
   type TestingSessionData,
+  type TestingSessionSettings,
+  type TrialPhase,
+  type TrialSegment,
   type TrainingSessionData,
 } from "./pipeline";
   
@@ -22,10 +40,8 @@ import {
     | "idle"
     | "countdown"
     | "active"
+    | "paused"
     | "complete";
-  
-  const SESSION_DURATION = 60;
-  const TARGET_INTERVAL = 4;
   
   function CircularProgress({
     progress,
@@ -144,14 +160,84 @@ import {
     );
   }
   
+  function NumericSettingField({
+    title,
+    description,
+    displayValue,
+    inputValue,
+    bounds,
+    onStep,
+    onInputChange,
+    onCommit,
+  }: {
+    title: string;
+    description: string;
+    displayValue: string;
+    inputValue: string;
+    bounds: { min: number; max: number; step: number };
+    onStep: (delta: number) => void;
+    onInputChange: (value: string) => void;
+    onCommit: () => void;
+  }) {
+    return (
+      <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium text-white/90">{title}</p>
+            <p className="text-xs text-white/45">{description}</p>
+          </div>
+          <span className="text-sm text-white/75">{displayValue}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onStep(-bounds.step)}
+            className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+          >
+            -
+          </button>
+          <input
+            type="number"
+            min={bounds.min}
+            max={bounds.max}
+            step={bounds.step}
+            value={inputValue}
+            onChange={(event) => onInputChange(event.target.value)}
+            onBlur={onCommit}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                onCommit();
+                event.currentTarget.blur();
+              }
+            }}
+            className="flex-1 rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-center text-sm text-white/80 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+          />
+          <button
+            type="button"
+            onClick={() => onStep(bounds.step)}
+            className="rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+          >
+            +
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   export default function TestingScreen({
     trainingSession,
     onSessionComplete,
     onShowResults,
+    onExit,
+    settings,
+    onSettingsChange,
   }: {
     trainingSession: TrainingSessionData;
     onSessionComplete?: (session: TestingSessionData) => void;
     onShowResults?: () => void;
+    onExit?: () => void;
+    settings: TestingSessionSettings;
+    onSettingsChange: React.Dispatch<React.SetStateAction<TestingSessionSettings>>;
   }) {
     const gestures = trainingSession.gestures;
     const gestureColors = useMemo(() => buildGestureColorMap(gestures), [gestures]);
@@ -160,14 +246,42 @@ import {
       [trainingSession],
     );
 
+    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+    const [isExitDialogOpen, setIsExitDialogOpen] = useState(false);
+    const [trialPeriodInput, setTrialPeriodInput] = useState(
+      String(settings.trialPeriodMs),
+    );
+    const [restPeriodInput, setRestPeriodInput] = useState(
+      String(settings.restPeriodMs),
+    );
+    const [numberOfTrialsInput, setNumberOfTrialsInput] = useState(
+      String(settings.numberOfTrials),
+    );
+    const [predictionFrequencyInput, setPredictionFrequencyInput] = useState(
+      String(settings.predictionFrequencyMs),
+    );
+
+    const sessionDurationMs = useMemo(
+      () => calculateSessionDurationMs(settings),
+      [settings],
+    );
+
     const [sessionState, setSessionState] =
       useState<SessionState>("idle");
     const [countdown, setCountdown] = useState(3);
-    const [timeLeft, setTimeLeft] = useState(SESSION_DURATION);
+    const [timeLeft, setTimeLeft] = useState(sessionDurationMs / 1000);
+    const [sessionTotalSeconds, setSessionTotalSeconds] = useState(
+      sessionDurationMs / 1000,
+    );
+    const [sessionPhase, setSessionPhase] = useState<TrialPhase>("trial");
     const [targetGestureId, setTargetGestureId] =
       useState<string>(gestures[0]?.id ?? "");
-    const [gestureTimer, setGestureTimer] =
-      useState(TARGET_INTERVAL);
+    const [segmentTimer, setSegmentTimer] = useState(
+      settings.trialPeriodMs / 1000,
+    );
+    const [segmentDuration, setSegmentDuration] = useState(
+      settings.trialPeriodMs / 1000,
+    );
     const [predictedGestureId, setPredictedGestureId] = useState<string>(
       gestures[0]?.id ?? "",
     );
@@ -177,6 +291,41 @@ import {
 
     const predictionsRef = useRef<PredictionRecord[]>([]);
     const sessionStartedAtRef = useRef<number | null>(null);
+
+    // Mutable runtime state kept in refs so the session can be paused and resumed
+    // without losing progress.
+    const timelineRef = useRef<TrialSegment[]>([]);
+    const totalMsRef = useRef(0);
+    const elapsedMsRef = useRef(0);
+    const counterRef = useRef(0);
+    const currentTargetIdRef = useRef<string>("");
+    const currentPhaseRef = useRef<TrialPhase>("trial");
+
+    useEffect(() => {
+      setTrialPeriodInput(String(settings.trialPeriodMs));
+    }, [settings.trialPeriodMs]);
+
+    useEffect(() => {
+      setRestPeriodInput(String(settings.restPeriodMs));
+    }, [settings.restPeriodMs]);
+
+    useEffect(() => {
+      setNumberOfTrialsInput(String(settings.numberOfTrials));
+    }, [settings.numberOfTrials]);
+
+    useEffect(() => {
+      setPredictionFrequencyInput(String(settings.predictionFrequencyMs));
+    }, [settings.predictionFrequencyMs]);
+
+    useEffect(() => {
+      if (sessionState !== "idle") {
+        return;
+      }
+      setTimeLeft(sessionDurationMs / 1000);
+      setSessionTotalSeconds(sessionDurationMs / 1000);
+      setSegmentTimer(settings.trialPeriodMs / 1000);
+      setSegmentDuration(settings.trialPeriodMs / 1000);
+    }, [sessionDurationMs, sessionState, settings.trialPeriodMs]);
   
     const sessionRef = useRef<ReturnType<
       typeof setInterval
@@ -195,67 +344,104 @@ import {
       if (countdownRef.current)
         clearInterval(countdownRef.current);
     }, []);
-  
-    const beginSession = useCallback(() => {
-      const startedAt = Date.now();
-      sessionStartedAtRef.current = startedAt;
-      setSessionState("active");
-      setTimeLeft(SESSION_DURATION);
-      setGestureTimer(TARGET_INTERVAL);
-      setTargetGestureId(gestures[0]?.id ?? "");
-      setPredictedGestureId(gestures[0]?.id ?? "");
-      setConfidence(94.0);
-      predictionsRef.current = [];
-  
-      let tLeft = SESSION_DURATION;
-      let gTimer = TARGET_INTERVAL;
-      let currentTargetId = gestures[0]?.id ?? "";
-      let counter = 0;
-  
-      sessionRef.current = setInterval(() => {
-        tLeft -= 0.1;
-        gTimer -= 0.1;
-  
-        if (gTimer <= 0) {
-          gTimer = TARGET_INTERVAL;
-          const currentIndex = gestures.findIndex((gesture) => gesture.id === currentTargetId);
-          const nextGesture = gestures[(currentIndex + 1) % gestures.length];
-          currentTargetId = nextGesture?.id ?? currentTargetId;
-          setTargetGestureId(currentTargetId);
+
+    const applySettingValue = useCallback(
+      (key: keyof TestingSessionSettings, nextValue: number) => {
+        onSettingsChange((prev) => ({ ...prev, [key]: clampSetting(nextValue, key) }));
+      },
+      [onSettingsChange],
+    );
+
+    const commitSettingInput = useCallback(
+      (
+        key: keyof TestingSessionSettings,
+        rawValue: string,
+        resetInput: (value: string) => void,
+      ) => {
+        const parsedValue = Number.parseInt(rawValue, 10);
+        if (rawValue.trim() === "" || Number.isNaN(parsedValue)) {
+          resetInput(String(settings[key]));
+          return;
         }
-  
-        setTimeLeft(parseFloat(tLeft.toFixed(1)));
-        setGestureTimer(
-          parseFloat(Math.max(0, gTimer).toFixed(1)),
-        );
-  
-        if (tLeft <= 0) {
+        applySettingValue(key, parsedValue);
+      },
+      [applySettingValue, settings],
+    );
+
+    const buildSessionData = useCallback(
+      (completedAt: number): TestingSessionData => {
+        const predictions = predictionsRef.current;
+        return {
+          id: `testing-${completedAt}`,
+          startedAt: sessionStartedAtRef.current ?? completedAt,
+          completedAt,
+          trainingSessionId: trainingSession.id,
+          gestures,
+          predictions,
+          overallConfidence: calculateOverallConfidence(predictions),
+          sessionDurationSeconds: parseFloat((elapsedMsRef.current / 1000).toFixed(1)),
+        };
+      },
+      [gestures, trainingSession.id],
+    );
+
+    // Starts (or restarts, after a pause) the timing + prediction intervals,
+    // reading all runtime state from refs so it can resume mid-session.
+    const startTicking = useCallback(() => {
+      sessionRef.current = setInterval(() => {
+        elapsedMsRef.current += 100;
+        const elapsedMs = elapsedMsRef.current;
+        const totalMs = totalMsRef.current;
+        const timeline = timelineRef.current;
+        const remainingMs = Math.max(0, totalMs - elapsedMs);
+
+        const segment =
+          timeline.find((entry) => elapsedMs < entry.endMs) ??
+          timeline[timeline.length - 1];
+
+        if (segment) {
+          currentPhaseRef.current = segment.phase;
+          currentTargetIdRef.current = segment.gestureId;
+
+          // During rest, surface the gesture from the upcoming trial so the UI
+          // can preview (muted) what comes next.
+          let displayGestureId = segment.gestureId;
+          if (segment.phase === "rest") {
+            const upcomingTrial = timeline.find(
+              (entry) => entry.phase === "trial" && entry.startMs >= segment.endMs,
+            );
+            displayGestureId = upcomingTrial?.gestureId ?? segment.gestureId;
+          }
+
+          const segmentRemainingMs = Math.max(0, segment.endMs - elapsedMs);
+          setSessionPhase(segment.phase);
+          setTargetGestureId(displayGestureId);
+          setSegmentDuration(segment.durationMs / 1000);
+          setSegmentTimer(parseFloat((segmentRemainingMs / 1000).toFixed(1)));
+        }
+
+        setTimeLeft(parseFloat((remainingMs / 1000).toFixed(1)));
+
+        if (elapsedMs >= totalMs) {
           stopSession();
           const completedAt = Date.now();
           setSessionState("complete");
-
-          const predictions = predictionsRef.current;
-          const testingSession: TestingSessionData = {
-            id: `testing-${completedAt}`,
-            startedAt: sessionStartedAtRef.current ?? completedAt,
-            completedAt,
-            trainingSessionId: trainingSession.id,
-            gestures,
-            predictions,
-            overallConfidence: calculateOverallConfidence(predictions),
-            sessionDurationSeconds: SESSION_DURATION,
-          };
-          onSessionComplete?.(testingSession);
+          onSessionComplete?.(buildSessionData(completedAt));
         }
       }, 100);
-  
+
       predictionRef.current = setInterval(() => {
-        const expectedGesture = findGesture(gestures, currentTargetId) ?? gestures[0];
+        if (currentPhaseRef.current !== "trial") {
+          return;
+        }
+
+        const expectedGesture = findGesture(gestures, currentTargetIdRef.current) ?? gestures[0];
         if (!expectedGesture) {
           return;
         }
 
-        counter++;
+        counterRef.current++;
+        const counter = counterRef.current;
         const result = predictionEngine.predict(expectedGesture, counter);
         const entry = createPredictionRecord(result, counter, counter - 1);
 
@@ -266,8 +452,71 @@ import {
           predictionsRef.current = [...predictionsRef.current, entry];
           return next;
         });
-      }, 300);
-    }, [gestures, onSessionComplete, predictionEngine, stopSession, trainingSession.id]);
+      }, settings.predictionFrequencyMs);
+    }, [
+      buildSessionData,
+      gestures,
+      onSessionComplete,
+      predictionEngine,
+      settings.predictionFrequencyMs,
+      stopSession,
+    ]);
+
+    const beginSession = useCallback(() => {
+      const startedAt = Date.now();
+      sessionStartedAtRef.current = startedAt;
+
+      const schedule = buildTrialSchedule(gestures, settings.numberOfTrials);
+      const timeline = buildSessionTimeline(schedule, settings);
+      const totalMs = calculateSessionDurationMs(settings);
+      const totalSeconds = totalMs / 1000;
+      const firstSegment = timeline[0];
+      const firstTargetId = firstSegment?.gestureId ?? gestures[0]?.id ?? "";
+
+      timelineRef.current = timeline;
+      totalMsRef.current = totalMs;
+      elapsedMsRef.current = 0;
+      counterRef.current = 0;
+      currentTargetIdRef.current = firstTargetId;
+      currentPhaseRef.current = firstSegment?.phase ?? "trial";
+
+      setSessionState("active");
+      setSessionTotalSeconds(totalSeconds);
+      setTimeLeft(totalSeconds);
+      setSessionPhase(firstSegment?.phase ?? "trial");
+      setTargetGestureId(firstTargetId);
+      setSegmentDuration((firstSegment?.durationMs ?? settings.trialPeriodMs) / 1000);
+      setSegmentTimer((firstSegment?.durationMs ?? settings.trialPeriodMs) / 1000);
+      setPredictedGestureId(gestures[0]?.id ?? "");
+      setConfidence(94.0);
+      predictionsRef.current = [];
+
+      startTicking();
+    }, [gestures, settings, startTicking]);
+
+    const pauseSession = useCallback(() => {
+      stopSession();
+      setSessionState("paused");
+    }, [stopSession]);
+
+    const resumeSession = useCallback(() => {
+      setSessionState("active");
+      startTicking();
+    }, [startTicking]);
+
+    const finishSession = useCallback(() => {
+      stopSession();
+      const completedAt = Date.now();
+      setSessionState("complete");
+      onSessionComplete?.(buildSessionData(completedAt));
+      onShowResults?.();
+    }, [buildSessionData, onSessionComplete, onShowResults, stopSession]);
+
+    const handleExitConfirm = useCallback(() => {
+      stopSession();
+      setIsExitDialogOpen(false);
+      onExit?.();
+    }, [onExit, stopSession]);
   
     const startSession = useCallback(() => {
       setCountdown(3);
@@ -292,8 +541,17 @@ import {
     const sessionSecs = (timeLeft % 60)
       .toFixed(1)
       .padStart(4, "0");
-    const sessionProgress = timeLeft / SESSION_DURATION;
-    const gestureProgress = gestureTimer / TARGET_INTERVAL;
+    const sessionProgress = sessionTotalSeconds > 0 ? timeLeft / sessionTotalSeconds : 0;
+    const gestureProgress = segmentDuration > 0 ? segmentTimer / segmentDuration : 0;
+    const isResting = sessionPhase === "rest";
+    const isPaused = sessionState === "paused";
+    const sessionStatusColor =
+      isPaused || sessionState === "complete" ? "#f5a623" : "#4ade80";
+    const sessionStatusLabel = isPaused
+      ? "Session Paused"
+      : sessionState === "complete"
+        ? "Session Complete"
+        : "Session Active";
     const targetGesture = findGesture(gestures, targetGestureId) ?? gestures[0];
     const predictedGesture = findGesture(gestures, predictedGestureId) ?? gestures[0];
     const gc = gestureColors[targetGesture?.id ?? ""] ?? { ring: "#00d4ff", bar: "#00d4ff" };
@@ -305,26 +563,47 @@ import {
         {/* Header */}
         <div className="border-b border-white/10 bg-slate-950/95 backdrop-blur-md px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div
-              className="w-2 h-2 rounded-full animate-pulse"
-              style={{
-                background:
-                  sessionState === "active"
-                    ? "#4ade80"
-                    : sessionState === "complete"
-                      ? "#f5a623"
-                      : sessionState === "countdown"
-                        ? "#00d4ff"
-                        : "#5a7a99",
-              }}
-            />
-            <span className="text-xs font-semibold tracking-[0.2em] uppercase text-white/50">
-              EMG Gesture Recognition
-            </span>
-            <span className="mx-2 text-white/20">/</span>
-            <span className="text-sm font-medium text-white/90">
-              Testing Session
-            </span>
+            {sessionState === "idle" ? (
+              <button
+                onClick={() => onExit?.()}
+                className="flex items-center gap-1 text-xs font-medium text-white/45 transition-colors hover:text-white/80"
+                title="Back to training"
+              >
+                <ChevronLeft className="w-4 h-4" />
+                Back
+              </button>
+            ) : (
+              <button
+                onClick={() => setIsExitDialogOpen(true)}
+                className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold tracking-wider uppercase text-white/60 transition-colors hover:bg-white/10 hover:text-white"
+                title="Exit testing session"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                Exit
+              </button>
+            )}
+            {sessionState !== "idle" && (
+              <div
+                className="w-2 h-2 rounded-full animate-pulse"
+                style={{
+                  background:
+                    sessionState === "active"
+                      ? "#4ade80"
+                      : sessionState === "paused"
+                        ? "#f5a623"
+                        : sessionState === "complete"
+                          ? "#f5a623"
+                          : sessionState === "countdown"
+                            ? "#00d4ff"
+                            : "#5a7a99",
+                }}
+              />
+            )}
+            {sessionState !== "idle" && (
+              <span className="text-xs font-semibold tracking-[0.2em] uppercase text-white/50">
+                EMG Gesture Recognition
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-3">
             {sessionState === "countdown" && (
@@ -340,16 +619,43 @@ import {
               </span>
             )}
             {sessionState === "active" && (
-              <span
-                className="text-xs px-2.5 py-1 rounded-full font-semibold tracking-wider uppercase"
+              <button
+                onClick={pauseSession}
+                className="px-4 py-1.5 rounded-lg text-xs font-semibold tracking-wider uppercase transition-all hover:brightness-110 active:scale-95"
                 style={{
-                  background: "rgba(74,222,128,0.12)",
-                  color: "#4ade80",
-                  border: "1px solid rgba(74,222,128,0.25)",
+                  background: "rgba(245,166,35,0.15)",
+                  color: "#f5a623",
+                  border: "1px solid rgba(245,166,35,0.35)",
                 }}
               >
-                ● Live
-              </span>
+                ❚❚ Pause
+              </button>
+            )}
+            {sessionState === "paused" && (
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={resumeSession}
+                  className="px-4 py-1.5 rounded-lg text-xs font-semibold tracking-wider uppercase transition-all hover:brightness-110 active:scale-95"
+                  style={{
+                    background: "rgba(74,222,128,0.15)",
+                    color: "#4ade80",
+                    border: "1px solid rgba(74,222,128,0.35)",
+                  }}
+                >
+                  ▶ Resume
+                </button>
+                <button
+                  onClick={finishSession}
+                  className="px-4 py-1.5 rounded-lg text-xs font-semibold tracking-wider uppercase transition-all hover:brightness-110 active:scale-95"
+                  style={{
+                    background: "rgba(0,212,255,0.15)",
+                    color: "#00d4ff",
+                    border: "1px solid rgba(0,212,255,0.35)",
+                  }}
+                >
+                  Finish
+                </button>
+              </div>
             )}
             {sessionState === "complete" && (
               <button
@@ -363,6 +669,109 @@ import {
               >
                 Results
               </button>
+            )}
+            {sessionState === "idle" && (
+              <Sheet open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
+                <SheetTrigger asChild>
+                  <button
+                    className="flex items-center justify-center rounded-lg border border-white/10 bg-white/5 p-2 text-white/60 transition-colors hover:bg-white/10 hover:text-white"
+                    title="Open testing settings"
+                  >
+                    <Settings2 className="w-4 h-4" />
+                  </button>
+                </SheetTrigger>
+                <SheetContent side="right" className="border-white/10 bg-slate-900 text-white sm:max-w-md">
+                  <SheetHeader className="border-b border-white/10 pb-4">
+                    <SheetTitle className="text-white">Testing Settings</SheetTitle>
+                    <SheetDescription className="text-white/50">
+                      Configure how the testing session presents target gestures.
+                    </SheetDescription>
+                  </SheetHeader>
+
+                  <div className="flex flex-col gap-6 overflow-y-auto px-4 pb-6">
+                    <NumericSettingField
+                      title="Trial Period"
+                      description="How long each target gesture remains displayed."
+                      displayValue={`${settings.trialPeriodMs} ms`}
+                      inputValue={trialPeriodInput}
+                      bounds={TESTING_SESSION_LIMITS.trialPeriodMs}
+                      onStep={(delta) => applySettingValue("trialPeriodMs", settings.trialPeriodMs + delta)}
+                      onInputChange={setTrialPeriodInput}
+                      onCommit={() =>
+                        commitSettingInput("trialPeriodMs", trialPeriodInput, setTrialPeriodInput)
+                      }
+                    />
+
+                    <NumericSettingField
+                      title="Rest Period"
+                      description="Pause inserted after each target gesture before the next one."
+                      displayValue={`${settings.restPeriodMs} ms`}
+                      inputValue={restPeriodInput}
+                      bounds={TESTING_SESSION_LIMITS.restPeriodMs}
+                      onStep={(delta) => applySettingValue("restPeriodMs", settings.restPeriodMs + delta)}
+                      onInputChange={setRestPeriodInput}
+                      onCommit={() =>
+                        commitSettingInput("restPeriodMs", restPeriodInput, setRestPeriodInput)
+                      }
+                    />
+
+                    <NumericSettingField
+                      title="Number of Trials"
+                      description="Total target gestures shown, split evenly across gesture classes."
+                      displayValue={String(settings.numberOfTrials)}
+                      inputValue={numberOfTrialsInput}
+                      bounds={TESTING_SESSION_LIMITS.numberOfTrials}
+                      onStep={(delta) => applySettingValue("numberOfTrials", settings.numberOfTrials + delta)}
+                      onInputChange={setNumberOfTrialsInput}
+                      onCommit={() =>
+                        commitSettingInput("numberOfTrials", numberOfTrialsInput, setNumberOfTrialsInput)
+                      }
+                    />
+
+                    <NumericSettingField
+                      title="Prediction Frequency"
+                      description="How often a new gesture prediction is made during the session."
+                      displayValue={`${settings.predictionFrequencyMs} ms`}
+                      inputValue={predictionFrequencyInput}
+                      bounds={TESTING_SESSION_LIMITS.predictionFrequencyMs}
+                      onStep={(delta) =>
+                        applySettingValue("predictionFrequencyMs", settings.predictionFrequencyMs + delta)
+                      }
+                      onInputChange={setPredictionFrequencyInput}
+                      onCommit={() =>
+                        commitSettingInput(
+                          "predictionFrequencyMs",
+                          predictionFrequencyInput,
+                          setPredictionFrequencyInput,
+                        )
+                      }
+                    />
+
+                    <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
+                      <div>
+                        <p className="text-sm font-medium text-white/90">Session Summary</p>
+                        <p className="text-xs text-white/45">Derived from the settings above.</p>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 text-xs text-white/55">
+                        <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                          <div className="text-white/40">Session Length</div>
+                          <div className="mt-1 text-sm text-white/85">{formatSessionLength(sessionDurationMs)}</div>
+                        </div>
+                        <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                          <div className="text-white/40">Trials / Gesture</div>
+                          <div className="mt-1 text-sm text-white/85">
+                            {gestures.length > 0
+                              ? (settings.numberOfTrials / gestures.length).toFixed(
+                                  settings.numberOfTrials % gestures.length === 0 ? 0 : 1,
+                                )
+                              : "—"}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </SheetContent>
+              </Sheet>
             )}
             <span className="text-xs font-mono text-white/50">
               v2.4.1
@@ -379,8 +788,8 @@ import {
                   AI Gesture Testing
                 </h1>
                 <p className="text-base max-w-md text-white/50">
-                  A one-minute session evaluating real-time
-                  gesture recognition accuracy across{" "}
+                  A {formatSessionLength(sessionDurationMs)} session evaluating
+                  real-time gesture recognition accuracy across{" "}
                   {gestures.length} gesture classes.
                 </p>
               </div>
@@ -390,7 +799,7 @@ import {
                 {[
                   {
                     label: "Session Length",
-                    value: "60 s",
+                    value: formatSessionLength(sessionDurationMs),
                     icon: "⏱",
                   },
                   {
@@ -399,8 +808,8 @@ import {
                     icon: "◈",
                   },
                   {
-                    label: "Target Interval",
-                    value: "4 s",
+                    label: "Trial Count",
+                    value: String(settings.numberOfTrials),
                     icon: "↻",
                   },
                 ].map((item) => (
@@ -519,8 +928,9 @@ import {
             </div>
           )}
   
-          {/* ACTIVE / COMPLETE STATE */}
+          {/* ACTIVE / PAUSED / COMPLETE STATE */}
           {(sessionState === "active" ||
+            sessionState === "paused" ||
             sessionState === "complete") && (
             <div className="space-y-5">
               {/* Top row: session timer + status */}
@@ -555,14 +965,14 @@ import {
                   <div className="text-center">
                     <div className="flex items-center justify-center gap-2 mb-2">
                       <div
-                        className="w-2 h-2 rounded-full animate-pulse"
-                        style={{ background: "#4ade80" }}
+                        className={`w-2 h-2 rounded-full ${isPaused ? "" : "animate-pulse"}`}
+                        style={{ background: sessionStatusColor }}
                       />
                       <span
                         className="text-xs font-semibold tracking-widest uppercase"
-                        style={{ color: "#4ade80" }}
+                        style={{ color: sessionStatusColor }}
                       >
-                        Session Active
+                        {sessionStatusLabel}
                       </span>
                     </div>
                     <div className="font-mono text-sm text-white/50">
@@ -571,30 +981,30 @@ import {
                   </div>
                 </div>
   
-                {/* Gesture Progress */}
+                {/* Gesture / Rest Progress */}
                 <div className="rounded-xl border border-white/10 bg-white/5 p-5 flex items-center gap-5">
                   <CircularProgress
                     progress={gestureProgress}
                     size={72}
                     stroke={5}
-                    color={gc.ring}
+                    color={isResting ? "#94a3b8" : gc.ring}
                   >
                     <span
                       className="font-mono text-sm font-bold"
-                      style={{ color: gc.ring }}
+                      style={{ color: isResting ? "#94a3b8" : gc.ring }}
                     >
-                      {gestureTimer.toFixed(1)}
+                      {segmentTimer.toFixed(1)}
                     </span>
                   </CircularProgress>
                   <div>
                     <div className="text-xs font-semibold tracking-widest uppercase mb-1 text-white/50">
-                      Next Target In
+                      {isResting ? "Rest Ends In" : "Trial Ends In"}
                     </div>
                     <div
                       className="text-3xl font-mono font-light"
-                      style={{ color: gc.ring }}
+                      style={{ color: isResting ? "#94a3b8" : gc.ring }}
                     >
-                      {gestureTimer.toFixed(1)}
+                      {segmentTimer.toFixed(1)}
                       <span className="text-lg ml-1">s</span>
                     </div>
                   </div>
@@ -607,20 +1017,23 @@ import {
                 <div
                   className={`col-span-3 rounded-xl border p-8 flex flex-col items-center justify-center text-center`}
                   style={{
-                    background: `linear-gradient(135deg, ${gc.ring}0a, ${gc.ring}04)`,
-                    borderColor: `${gc.ring}40`,
-                    boxShadow: `0 0 40px ${gc.ring}59`,
+                    background: isResting
+                      ? "linear-gradient(135deg, rgba(148,163,184,0.06), rgba(148,163,184,0.02))"
+                      : `linear-gradient(135deg, ${gc.ring}0a, ${gc.ring}04)`,
+                    borderColor: isResting ? "rgba(148,163,184,0.25)" : `${gc.ring}40`,
+                    boxShadow: isResting ? "none" : `0 0 40px ${gc.ring}59`,
                   }}
                 >
                   <div className="text-xs font-semibold tracking-[0.3em] uppercase mb-6 text-white/50">
-                    Target Gesture
+                    {isResting ? "Rest" : "Target Gesture"}
                   </div>
   
                   <div
                     className="text-5xl font-semibold tracking-wide mb-6 transition-all duration-300"
                     style={{
-                      color: gc.ring,
-                      textShadow: `0 0 30px ${gc.ring}66`,
+                      color: isResting ? "#94a3b8" : gc.ring,
+                      textShadow: isResting ? "none" : `0 0 30px ${gc.ring}66`,
+                      opacity: isResting ? 0.5 : 1,
                     }}
                   >
                     {targetGesture?.name}
@@ -664,9 +1077,11 @@ import {
                       <div
                         className="h-full rounded-full transition-all duration-100"
                         style={{
-                          width: `${(gestureTimer / TARGET_INTERVAL) * 100}%`,
-                          background: `linear-gradient(90deg, ${gc.ring}88, ${gc.ring})`,
-                          boxShadow: `0 0 8px ${gc.ring}`,
+                          width: `${gestureProgress * 100}%`,
+                          background: isResting
+                            ? "linear-gradient(90deg, rgba(148,163,184,0.5), #94a3b8)"
+                            : `linear-gradient(90deg, ${gc.ring}88, ${gc.ring})`,
+                          boxShadow: isResting ? "none" : `0 0 8px ${gc.ring}`,
                         }}
                       />
                     </div>
@@ -871,6 +1286,46 @@ import {
             </div>
           )}
         </div>
+
+        {/* Exit confirmation dialog */}
+        {isExitDialogOpen && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+            onClick={() => setIsExitDialogOpen(false)}
+          >
+            <div
+              className="w-full max-w-sm rounded-xl border border-white/10 bg-slate-900 p-6 shadow-2xl"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <h2 className="text-lg font-semibold text-white/90">
+                Exit Testing Session?
+              </h2>
+              <p className="mt-2 text-sm text-white/50">
+                Leaving now discards this session's progress and returns you to the
+                training screen.
+              </p>
+              <div className="mt-6 flex justify-end gap-3">
+                <button
+                  onClick={() => setIsExitDialogOpen(false)}
+                  className="rounded-lg border border-white/10 bg-white/5 px-5 py-2 text-sm font-semibold text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+                >
+                  No
+                </button>
+                <button
+                  onClick={handleExitConfirm}
+                  className="rounded-lg px-5 py-2 text-sm font-semibold transition-all hover:brightness-110 active:scale-95"
+                  style={{
+                    background: "rgba(255,77,109,0.15)",
+                    color: "#ff4d6d",
+                    border: "1px solid rgba(255,77,109,0.35)",
+                  }}
+                >
+                  Yes
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }

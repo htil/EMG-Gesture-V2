@@ -1,3 +1,5 @@
+// Utility functions for gestures
+
 import type { Gesture } from './types';
 
 export const DEFAULT_GESTURES: Gesture[] = [

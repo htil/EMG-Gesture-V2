@@ -1,3 +1,5 @@
+// Defines the data types for the pipeline
+
 export interface Gesture {
   id: string;
   name: string;

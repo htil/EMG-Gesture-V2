@@ -1,3 +1,5 @@
+// Packages mock training data for testing
+
 import type { EmgSample, Gesture, TrainingGestureData, TrainingSessionData } from './types';
 
 export interface CapturedTrainingSample {

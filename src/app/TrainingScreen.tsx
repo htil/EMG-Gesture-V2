@@ -18,10 +18,12 @@ import ResultScreen from './ResultScreen';
 import TestingScreen from './TestingScreen';
 import {
   DEFAULT_GESTURES,
+  DEFAULT_TESTING_SESSION_SETTINGS,
   buildTrainingSession,
   createGesture,
   type Gesture,
   type TestingSessionData,
+  type TestingSessionSettings,
   type TrainingSessionData,
 } from './pipeline';
 
@@ -90,6 +92,9 @@ export default function TrainingScreen() {
   const [activeScreen, setActiveScreen] = useState<AppScreen>('training');
   const [trainingSession, setTrainingSession] = useState<TrainingSessionData | null>(null);
   const [testingSession, setTestingSession] = useState<TestingSessionData | null>(null);
+  const [testingSettings, setTestingSettings] = useState<TestingSessionSettings>(
+    DEFAULT_TESTING_SESSION_SETTINGS,
+  );
   const previewPanelRef = useRef<HTMLDivElement>(null);
   const gestureDropdownRef = useRef<HTMLDivElement>(null);
   const recordingStartTimeRef = useRef<number | null>(null);
@@ -943,6 +948,9 @@ export default function TrainingScreen() {
         trainingSession={trainingSession}
         onSessionComplete={setTestingSession}
         onShowResults={() => setActiveScreen('results')}
+        onExit={() => setActiveScreen('training')}
+        settings={testingSettings}
+        onSettingsChange={setTestingSettings}
       />
     );
   }

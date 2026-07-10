@@ -1,3 +1,5 @@
+// Mock prediction engine for testing
+
 import { getConfidenceStatus, getMatchStatus } from './confidence';
 import { formatPredictionTimestamp } from './formatTimestamp';
 import { generateMockEmgSample } from './mockEmgGenerator';

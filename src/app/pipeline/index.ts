@@ -6,3 +6,4 @@ export * from './mockEmgGenerator';
 export * from './mockTrainingData';
 export * from './mockPredictionEngine';
 export * from './resultStatsCalculator';
+export * from './testingSessionConfig';
