@@ -767,8 +767,19 @@ export default function TrainingScreen() {
     liveConnectionStatus === 'connecting'
       ? 'Connecting...'
       : isStreaming
-      ? 'Pause'
+      ? signalSourceMode === 'live'
+        ? 'Stop Live'
+        : 'Pause'
+      : signalSourceMode === 'live'
+      ? 'Connect'
       : 'Start';
+  const sourceModeLabel = signalSourceMode === 'live' ? 'Live Training' : 'Mock Training';
+  const sourceModeDescription =
+    signalSourceMode === 'live'
+      ? liveDeviceName
+        ? `Ganglion ready: ${liveDeviceName}`
+        : 'Use Ganglion for real EMG sample collection'
+      : 'Use synthetic signal for development and UI checks';
   const connectionStatusLabel =
     !isStreaming && liveConnectionStatus !== 'connecting' && liveConnectionStatus !== 'error'
       ? 'Idle'
@@ -1656,6 +1667,42 @@ export default function TrainingScreen() {
             transition={{ duration: 0.3 }}
             className="flex flex-col gap-3 items-center"
           >
+            <div className="flex flex-col items-center gap-3">
+              <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-slate-900/50 px-3 py-2 backdrop-blur-sm">
+                <button
+                  type="button"
+                  onClick={() => handleSignalSourceChange('mock')}
+                  disabled={signalSourceMode === 'mock'}
+                  className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-default ${
+                    signalSourceMode === 'mock'
+                      ? 'border-cyan-400/30 bg-cyan-400/10 text-cyan-300'
+                      : 'border-white/10 bg-transparent text-white/65 hover:bg-white/10 hover:text-white'
+                  }`}
+                >
+                  Mock Data
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSignalSourceChange('live')}
+                  disabled={!isBluetoothAvailable || signalSourceMode === 'live'}
+                  className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                    signalSourceMode === 'live'
+                      ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'
+                      : 'border-white/10 bg-transparent text-white/65 hover:bg-white/10 hover:text-white'
+                  }`}
+                >
+                  Live Ganglion
+                </button>
+                <div className="ml-1 flex items-center gap-2 text-xs text-white/55">
+                  <span className={`h-2 w-2 rounded-full ${statusDotClass}`} />
+                  <span>{connectionStatusLabel}</span>
+                </div>
+              </div>
+              <div className="text-center">
+                <p className="text-sm font-medium text-white/85">{sourceModeLabel}</p>
+                <p className="text-xs text-white/45">{sourceModeDescription}</p>
+              </div>
+            </div>
             <div className="flex items-center gap-4">
               <button
                 type="button"
