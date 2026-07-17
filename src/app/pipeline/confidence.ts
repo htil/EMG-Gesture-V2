@@ -1,3 +1,5 @@
+// Buckets confidence scores into high and low and determines if the prediction is a match or mismatch
+
 import type { PredictionConfidenceStatus } from './types';
 
 export const LOW_CONFIDENCE_THRESHOLD = 75;

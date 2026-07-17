@@ -1,3 +1,5 @@
+// Formats the timestamp of a prediction or session
+
 export function formatPredictionTimestamp(date: Date): string {
   return (
     date.toTimeString().slice(0, 8) +

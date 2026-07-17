@@ -1,3 +1,5 @@
+// Calculates the result stats for a testing session
+
 import { formatSessionLabel } from './formatTimestamp';
 import type { Gesture, PredictionRecord, ResultStats, TestingSessionData } from './types';
 

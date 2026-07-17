@@ -1,3 +1,5 @@
+// Generates mock EMG samples for a gesture
+
 import type { EmgSample } from './types';
 
 const MOCK_SAMPLE_INTERVAL_MS = 50;

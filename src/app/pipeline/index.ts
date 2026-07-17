@@ -7,3 +7,4 @@ export * from './knnModel';
 export * from './mockEmgGenerator';
 export * from './mockTrainingData';
 export * from './resultStatsCalculator';
+export * from './testingSessionConfig';
