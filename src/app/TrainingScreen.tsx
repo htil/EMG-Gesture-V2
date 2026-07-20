@@ -6,6 +6,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { X, Settings2, RotateCcw, Trash2, ChevronDown } from 'lucide-react';
 import * as dfd from 'danfojs';
 import { useSignalSource, type SignalSourceMode } from './useSignalSource';
+import { useGestureRecorder } from './useGestureRecorder';
 import {
   Sheet,
   SheetContent,
@@ -70,10 +71,6 @@ export default function TrainingScreen() {
   const [displayWindowMs, setDisplayWindowMs] = useState(DEFAULT_DISPLAY_WINDOW_MS);
   const [activityDisplaySensitivity, setActivityDisplaySensitivity] = useState(DEFAULT_ACTIVITY_DISPLAY_SENSITIVITY);
   const [selectedChannelIndex, setSelectedChannelIndex] = useState(0);
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordingStartTime, setRecordingStartTime] = useState<number | null>(null);
-  const [recordingProgress, setRecordingProgress] = useState(0);
-  const [currentCapturedSegment, setCurrentCapturedSegment] = useState<WaveformPoint[]>([]);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [minRequired, setMinRequired] = useState(8);
   const [sampleTarget, setSampleTarget] = useState(12);
@@ -98,10 +95,6 @@ export default function TrainingScreen() {
   );
   const previewPanelRef = useRef<HTMLDivElement>(null);
   const gestureDropdownRef = useRef<HTMLDivElement>(null);
-  const recordingStartTimeRef = useRef<number | null>(null);
-  const currentCapturedSegmentRef = useRef<WaveformPoint[]>([]);
-  const wasAboveThresholdRef = useRef(false);
-  const lastLivePointTimeRef = useRef<number | null>(null);
 
   const generateMockSignalValue = useCallback(() => {
     const cycleDurationMs = Math.max(segmentDurationMs, 1);
@@ -144,6 +137,24 @@ export default function TrainingScreen() {
     selectedChannelIndex,
     activityDisplaySensitivity
   );
+
+  const {
+    recorderState,
+    isRecording,
+    recordingStartTime,
+    recordingProgress,
+    currentCapturedSegment,
+    completedSegment,
+    acknowledgeCompletedSegment,
+    diagnostics: recorderDiagnostics,
+  } = useGestureRecorder({
+    signalPoints: recordingSignalData,
+    threshold,
+    segmentDurationMs,
+    isStreaming,
+    resetKey: `${signalSourceMode}:${selectedChannelIndex}`,
+    minSegmentPoints: MIN_SEGMENT_POINTS,
+  });
   
   const isRecordedSampleStatus = (status: SampleStatus) => RECORDED_SAMPLE_STATUSES.includes(status);
 
@@ -219,21 +230,23 @@ export default function TrainingScreen() {
   }, [isRecording, isStreaming, signalSourceMode]);
 
   useEffect(() => {
-    if (signalSourceMode === 'mock' || isRecording) {
+    if (signalSourceMode === 'mock') {
       return;
     }
 
-    const latestEnvelope = recordingSignalData.at(-1)?.normalizedActivity ?? 0;
-
-    if (latestEnvelope > threshold) {
+    if (recorderState === 'recording') {
       setFeedbackState('recording');
       setHighlightSegment('good');
       return;
     }
 
+    if (recorderState === 'cooldown') {
+      return;
+    }
+
     setFeedbackState('ready');
     setHighlightSegment(null);
-  }, [isRecording, recordingSignalData, signalSourceMode, threshold]);
+  }, [recorderState, signalSourceMode]);
 
   useEffect(() => {
     if (!isRecording) {
@@ -245,135 +258,55 @@ export default function TrainingScreen() {
   }, [isRecording]);
 
   useEffect(() => {
-    recordingStartTimeRef.current = null;
-    currentCapturedSegmentRef.current = [];
-    wasAboveThresholdRef.current = false;
-    lastLivePointTimeRef.current = null;
-    setIsRecording(false);
-    setRecordingStartTime(null);
-    setRecordingProgress(0);
-    setCurrentCapturedSegment([]);
-    setHighlightSegment(null);
-  }, [signalSourceMode]);
-
-  useEffect(() => {
-    if (isStreaming) {
+    if (!completedSegment) {
       return;
     }
 
-    recordingStartTimeRef.current = null;
-    currentCapturedSegmentRef.current = [];
-    wasAboveThresholdRef.current = false;
-    lastLivePointTimeRef.current = null;
-    setIsRecording(false);
-    setRecordingStartTime(null);
-    setRecordingProgress(0);
-    setCurrentCapturedSegment([]);
-    setHighlightSegment(null);
-    setFeedbackState('ready');
-  }, [isStreaming]);
-
-  useEffect(() => {
-    if (recordingSignalData.length === 0) {
+    const waveformData = completedSegment.points;
+    if (waveformData.length < MIN_SEGMENT_POINTS) {
+      setFeedbackState('short');
+      setHighlightSegment(null);
+      acknowledgeCompletedSegment();
       return;
     }
 
-    const lastProcessedTime = lastLivePointTimeRef.current;
-    const newPoints = lastProcessedTime === null
-      ? recordingSignalData
-      : recordingSignalData.filter((point) => point.time > lastProcessedTime);
+    const peak = waveformData.reduce((max, samplePoint) => Math.max(max, samplePoint.value), 0);
+    const quality: SampleQuality = peak >= threshold + 0.08 ? 'good' : 'weak';
 
-    if (newPoints.length === 0) {
-      return;
-    }
-    for (const point of newPoints) {
-      lastLivePointTimeRef.current = point.time;
-      const isActive = point.normalizedActivity > threshold;
-      const crossedThreshold = !wasAboveThresholdRef.current && isActive;
-      wasAboveThresholdRef.current = isActive;
+    setGestureData((prev) => {
+      const gesture = prev[currentGestureId];
+      if (!gesture) {
+        return prev;
+      }
+      const targetIndex = gesture.samples.findIndex((sample) => sample.status === 'empty');
 
-      if (!isRecording) {
-        if (!crossedThreshold) {
-          continue;
-        }
-
-        const seededSegment = [{ time: point.time, value: point.raw }];
-        recordingStartTimeRef.current = point.time;
-        currentCapturedSegmentRef.current = seededSegment;
-        setIsRecording(true);
-        setRecordingStartTime(point.time);
-        setRecordingProgress(0);
-        setCurrentCapturedSegment(seededSegment);
-        setFeedbackState('recording');
-        setHighlightSegment('good');
-        continue;
+      if (targetIndex === -1) {
+        return prev;
       }
 
-      const startedAt = recordingStartTimeRef.current ?? point.time;
-      const nextSegment = [...currentCapturedSegmentRef.current, { time: point.time, value: point.raw }];
-      currentCapturedSegmentRef.current = nextSegment;
-      setCurrentCapturedSegment(nextSegment);
+      return {
+        ...prev,
+        [currentGestureId]: {
+          samples: gesture.samples.map((sample, index) =>
+            index === targetIndex
+              ? {
+                  ...sample,
+                  status: 'collected',
+                  timestamp: completedSegment.completedAt,
+                  waveformData,
+                  quality,
+                }
+              : sample
+          ),
+        },
+      };
+    });
 
-      const elapsedMs = point.time - startedAt;
-      const progress = Math.max(0, Math.min(1, elapsedMs / Math.max(segmentDurationMs, 1)));
-      setRecordingProgress(progress);
-
-      if (elapsedMs < segmentDurationMs) {
-        continue;
-      }
-
-      recordingStartTimeRef.current = null;
-      setIsRecording(false);
-      setRecordingStartTime(null);
-      setRecordingProgress(0);
-
-      if (nextSegment.length < MIN_SEGMENT_POINTS) {
-        currentCapturedSegmentRef.current = [];
-        setCurrentCapturedSegment([]);
-        setFeedbackState('ready');
-        setHighlightSegment(null);
-        continue;
-      }
-
-      const peak = nextSegment.reduce((max, samplePoint) => Math.max(max, samplePoint.value), 0);
-      const quality: SampleQuality = peak >= threshold + 0.08 ? 'good' : 'weak';
-      const waveformData = nextSegment;
-
-      setGestureData((prev) => {
-        const gesture = prev[currentGestureId];
-        if (!gesture) {
-          return prev;
-        }
-        const targetIndex = gesture.samples.findIndex((sample) => sample.status === 'empty');
-
-        if (targetIndex === -1) {
-          return prev;
-        }
-
-        return {
-          ...prev,
-          [currentGestureId]: {
-            samples: gesture.samples.map((sample, index) =>
-              index === targetIndex
-                ? {
-                    ...sample,
-                    status: 'collected',
-                    timestamp: Date.now(),
-                    waveformData,
-                    quality,
-                  }
-                : sample
-            ),
-          },
-        };
-      });
-
-      currentCapturedSegmentRef.current = [];
-      setCurrentCapturedSegment([]);
-      setHighlightSegment(quality === 'good' ? 'good' : 'bad');
-      setTimeout(() => setHighlightSegment(null), 800);
-    }
-  }, [currentGestureId, isRecording, recordingSignalData, segmentDurationMs, threshold]);
+    setFeedbackState(quality);
+    setHighlightSegment(quality === 'good' ? 'good' : 'bad');
+    setTimeout(() => setHighlightSegment(null), 800);
+    acknowledgeCompletedSegment();
+  }, [acknowledgeCompletedSegment, completedSegment, currentGestureId, threshold]);
 
   // Close preview when clicking outside
   useEffect(() => {
@@ -1448,6 +1381,30 @@ export default function TrainingScreen() {
                     <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
                       <div className="text-white/40">Active Reference</div>
                       <div className="mt-1 text-sm text-white/85">{liveDisplayScale.toFixed(3)}</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Recorder State</div>
+                      <div className="mt-1 text-sm text-white/85">{recorderState.toUpperCase()}</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Trigger Threshold</div>
+                      <div className="mt-1 text-sm text-white/85">{recorderDiagnostics.threshold.toFixed(2)}</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Crossing Detected</div>
+                      <div className="mt-1 text-sm text-white/85">{recorderDiagnostics.thresholdCrossingDetected ? 'Yes' : 'No'}</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Captured Raw Points</div>
+                      <div className="mt-1 text-sm text-white/85">{recorderDiagnostics.capturedRawPointCount}</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Capture Elapsed</div>
+                      <div className="mt-1 text-sm text-white/85">{recorderDiagnostics.elapsedCaptureDurationMs.toFixed(0)} ms</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
+                      <div className="text-white/40">Pre-trigger Points</div>
+                      <div className="mt-1 text-sm text-white/85">{recorderDiagnostics.preTriggerPointCount}</div>
                     </div>
                   </div>
                 </details>

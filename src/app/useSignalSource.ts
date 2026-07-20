@@ -309,46 +309,47 @@ export function useSignalSource(
       const pending = pendingRecordingPointsRef.current;
       pendingRecordingPointsRef.current = [];
 
-      setRecordingSignalData(prev => trimPointsToTimeWindow([...prev, ...pending], RECORDING_WINDOW_MS));
+      activityReferenceWindowRef.current = trimPointsToTimeWindow(
+        [...activityReferenceWindowRef.current, ...pending.map((point) => ({
+          time: point.time,
+          value: point.activityEnvelope,
+        }))],
+        ACTIVITY_REFERENCE_WINDOW_MS,
+      );
+
+      const recentEnvelopeValues = activityReferenceWindowRef.current.map((point) => point.value);
+      const targetBaseline = getPercentile(recentEnvelopeValues, BASELINE_PERCENTILE);
+      const baseline = activityBaselineRef.current + (targetBaseline - activityBaselineRef.current) * BASELINE_SMOOTHING;
+      activityBaselineRef.current = baseline;
+
+      const targetUpperReference = Math.max(
+        getPercentile(recentEnvelopeValues, ACTIVE_REFERENCE_PERCENTILE) *
+          (ACTIVE_REFERENCE_HEADROOM / Math.max(displaySensitivityRef.current, 0.1)),
+        baseline + MIN_ACTIVITY_RANGE,
+      );
+      const upperReference =
+        activityUpperReferenceRef.current +
+        (targetUpperReference - activityUpperReferenceRef.current) * ACTIVE_REFERENCE_SMOOTHING;
+      activityUpperReferenceRef.current = Math.max(upperReference, baseline + MIN_ACTIVITY_RANGE);
+      setLiveDisplayScale(activityUpperReferenceRef.current);
+      setLiveSampleRateHz(sampleRateTimesRef.current.length);
+
+      const normalizedPending = pending.map((point) => {
+        const normalizedActivity = clampSignalValue(
+          (point.activityEnvelope - activityBaselineRef.current) /
+            Math.max(activityUpperReferenceRef.current - activityBaselineRef.current, MIN_ACTIVITY_RANGE),
+        );
+
+        return {
+          ...point,
+          normalizedActivity,
+          value: normalizedActivity,
+        };
+      });
+
+      setRecordingSignalData(prev => trimPointsToTimeWindow([...prev, ...normalizedPending], RECORDING_WINDOW_MS));
       setSignalData(prev => {
         const trimmedPreviousPoints = trimPointsToTimeWindow(prev, displayWindowMs);
-        activityReferenceWindowRef.current = trimPointsToTimeWindow(
-          [...activityReferenceWindowRef.current, ...pending.map((point) => ({
-            time: point.time,
-            value: point.activityEnvelope,
-          }))],
-          ACTIVITY_REFERENCE_WINDOW_MS,
-        );
-
-        const recentEnvelopeValues = activityReferenceWindowRef.current.map((point) => point.value);
-        const targetBaseline = getPercentile(recentEnvelopeValues, BASELINE_PERCENTILE);
-        const baseline = activityBaselineRef.current + (targetBaseline - activityBaselineRef.current) * BASELINE_SMOOTHING;
-        activityBaselineRef.current = baseline;
-
-        const targetUpperReference = Math.max(
-          getPercentile(recentEnvelopeValues, ACTIVE_REFERENCE_PERCENTILE) *
-            (ACTIVE_REFERENCE_HEADROOM / Math.max(displaySensitivityRef.current, 0.1)),
-          baseline + MIN_ACTIVITY_RANGE,
-        );
-        const upperReference =
-          activityUpperReferenceRef.current +
-          (targetUpperReference - activityUpperReferenceRef.current) * ACTIVE_REFERENCE_SMOOTHING;
-        activityUpperReferenceRef.current = Math.max(upperReference, baseline + MIN_ACTIVITY_RANGE);
-        setLiveDisplayScale(activityUpperReferenceRef.current);
-        setLiveSampleRateHz(sampleRateTimesRef.current.length);
-
-        const normalizedPending = pending.map((point) => ({
-          ...point,
-          normalizedActivity: clampSignalValue(
-            (point.activityEnvelope - activityBaselineRef.current) /
-              Math.max(activityUpperReferenceRef.current - activityBaselineRef.current, MIN_ACTIVITY_RANGE),
-          ),
-          value: clampSignalValue(
-            (point.activityEnvelope - activityBaselineRef.current) /
-              Math.max(activityUpperReferenceRef.current - activityBaselineRef.current, MIN_ACTIVITY_RANGE),
-          ),
-        }));
-
         return trimPointsToTimeWindow([...trimmedPreviousPoints, ...normalizedPending], displayWindowMs);
       });
     }, LIVE_RENDER_INTERVAL_MS);
