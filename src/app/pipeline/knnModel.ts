@@ -36,8 +36,12 @@ interface BuiltKnnModel {
 }
 
 export interface PredictionEngineResult {
-  record: Omit<PredictionRecord, 'id' | 'index' | 'timestamp'>;
+  predictedGestureId: string;
+  predictedGestureName: string;
+  confidence: number;
+  confidenceStatus: PredictionConfidenceStatus;
   emgSample: EmgSample;
+  debug?: PredictionDebug;
 }
 
 const KNN_K = 3;
@@ -240,38 +244,28 @@ function predictKnn(model: BuiltKnnModel, values: number[]) {
   };
 }
 
-function fallbackPrediction(
-  trainingSession: TrainingSessionData,
-  expectedGesture: Gesture,
-  emgSample: EmgSample,
-) {
+function fallbackPrediction(trainingSession: TrainingSessionData, emgSample: EmgSample): PredictionEngineResult {
   const gestureWithMostSamples = [...trainingSession.gestureData].sort(
     (left, right) => right.samples.length - left.samples.length,
-  )[0]?.gesture ?? expectedGesture;
+  )[0]?.gesture ?? trainingSession.gestures[0];
   const predictedGesture = gestureWithMostSamples;
-  const confidence = predictedGesture.id === expectedGesture.id ? 75 : 55;
+  const confidence = 55;
 
   return {
-    record: {
-      expectedGestureId: expectedGesture.id,
-      expectedGestureName: expectedGesture.name,
-      predictedGestureId: predictedGesture.id,
-      predictedGestureName: predictedGesture.name,
-      confidence,
-      matchStatus: getMatchStatus(expectedGesture.id, predictedGesture.id),
-      confidenceStatus: getConfidenceStatus(confidence) as PredictionConfidenceStatus,
-      emgSample,
-      debug: {
-        features: emgSample.features ?? extractEmgFeatures(emgSample.data),
-        normalizedVector: [],
-        nearestNeighbors: [],
-        classSupports: [],
-        supportMargin: 0,
-        nearestDistance: Number.POSITIVE_INFINITY,
-        status: 'unknown',
-      },
-    },
+    predictedGestureId: predictedGesture.id,
+    predictedGestureName: predictedGesture.name,
+    confidence,
+    confidenceStatus: getConfidenceStatus(confidence) as PredictionConfidenceStatus,
     emgSample,
+    debug: {
+      features: emgSample.features ?? extractEmgFeatures(emgSample.data),
+      normalizedVector: [],
+      nearestNeighbors: [],
+      classSupports: [],
+      supportMargin: 0,
+      nearestDistance: Number.POSITIVE_INFINITY,
+      status: 'unknown',
+    },
   };
 }
 
@@ -287,44 +281,32 @@ export function createPredictionEngine(trainingSession: TrainingSessionData) {
         trainingSampleCount: model.trainingSamples.length,
       };
     },
-    predict(expectedGesture: Gesture, emgSample: EmgSample): PredictionEngineResult {
+    predict(emgSample: EmgSample): PredictionEngineResult {
       const prediction = predictKnn(model, emgSample.data);
 
       if (!prediction) {
-        return fallbackPrediction(trainingSession, expectedGesture, emgSample);
+        return fallbackPrediction(trainingSession, emgSample);
       }
 
       const { gesture, confidence, debug } = prediction;
       if (!gesture) {
         return {
           emgSample,
-          record: {
-            expectedGestureId: expectedGesture.id,
-            expectedGestureName: expectedGesture.name,
-            predictedGestureId: 'unknown',
-            predictedGestureName: 'Unknown',
-            confidence,
-            matchStatus: 'mismatch',
-            confidenceStatus: getConfidenceStatus(confidence) as PredictionConfidenceStatus,
-            emgSample,
-            debug,
-          },
+          predictedGestureId: 'unknown',
+          predictedGestureName: 'Unknown',
+          confidence,
+          confidenceStatus: getConfidenceStatus(confidence) as PredictionConfidenceStatus,
+          debug,
         };
       }
 
       return {
         emgSample,
-        record: {
-          expectedGestureId: expectedGesture.id,
-          expectedGestureName: expectedGesture.name,
-          predictedGestureId: gesture.id,
-          predictedGestureName: gesture.name,
-          confidence,
-          matchStatus: getMatchStatus(expectedGesture.id, gesture.id),
-          confidenceStatus: getConfidenceStatus(confidence) as PredictionConfidenceStatus,
-          emgSample,
-          debug,
-        },
+        predictedGestureId: gesture.id,
+        predictedGestureName: gesture.name,
+        confidence,
+        confidenceStatus: getConfidenceStatus(confidence) as PredictionConfidenceStatus,
+        debug,
       };
     },
   };
@@ -332,6 +314,7 @@ export function createPredictionEngine(trainingSession: TrainingSessionData) {
 
 export function createPredictionRecord(
   result: PredictionEngineResult,
+  expectedGesture: Gesture,
   id: number,
   index: number,
 ): PredictionRecord {
@@ -339,7 +322,15 @@ export function createPredictionRecord(
     id,
     index,
     timestamp: formatPredictionTimestamp(new Date()),
-    ...result.record,
+    expectedGestureId: expectedGesture.id,
+    expectedGestureName: expectedGesture.name,
+    predictedGestureId: result.predictedGestureId,
+    predictedGestureName: result.predictedGestureName,
+    confidence: result.confidence,
+    matchStatus: getMatchStatus(expectedGesture.id, result.predictedGestureId),
+    confidenceStatus: result.confidenceStatus,
+    emgSample: result.emgSample,
+    debug: result.debug,
   };
 }
 

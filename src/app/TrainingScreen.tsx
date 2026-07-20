@@ -129,6 +129,7 @@ export default function TrainingScreen() {
     isStreaming,
     selectSignalSourceMode,
     startStream,
+    startStreamForMode,
     stopStream,
     liveConnectionStatus,
     liveConnectionMessage,
@@ -222,7 +223,7 @@ export default function TrainingScreen() {
       return;
     }
 
-    const latestEnvelope = recordingSignalData.at(-1)?.envelope ?? 0;
+    const latestEnvelope = recordingSignalData.at(-1)?.normalizedActivity ?? 0;
 
     if (latestEnvelope > threshold) {
       setFeedbackState('recording');
@@ -287,7 +288,7 @@ export default function TrainingScreen() {
     }
     for (const point of newPoints) {
       lastLivePointTimeRef.current = point.time;
-      const isActive = point.envelope > threshold;
+      const isActive = point.normalizedActivity > threshold;
       const crossedThreshold = !wasAboveThresholdRef.current && isActive;
       wasAboveThresholdRef.current = isActive;
 
@@ -749,7 +750,7 @@ export default function TrainingScreen() {
     : null;
   // Determine graph glow based on signal crossing threshold
   const isAboveThreshold = signalSourceMode === 'live'
-    ? (latestSignal?.envelope ?? 0) > threshold
+    ? (latestSignal?.normalizedActivity ?? 0) > threshold
     : (latestSignal?.value ?? 0) > threshold;
   const signalSourceLabels: SignalSourceLabel = {
     mock: 'Mock',
@@ -958,6 +959,15 @@ export default function TrainingScreen() {
     return (
       <TestingScreen
         trainingSession={trainingSession}
+        recordingSignalData={recordingSignalData}
+        signalSourceMode={signalSourceMode}
+        isStreaming={isStreaming}
+        startStreamForMode={startStreamForMode}
+        liveConnectionStatus={liveConnectionStatus}
+        liveConnectionMessage={liveConnectionMessage}
+        liveDeviceName={liveDeviceName}
+        selectedChannelIndex={selectedChannelIndex}
+        isBluetoothAvailable={isBluetoothAvailable}
         onSessionComplete={setTestingSession}
         onShowResults={() => setActiveScreen('results')}
         onExit={() => setActiveScreen('training')}
@@ -1428,15 +1438,15 @@ export default function TrainingScreen() {
                       <div className="mt-1 text-sm text-white/85">{(latestRecordingSignal?.raw ?? 0).toFixed(6)}</div>
                     </div>
                     <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
-                      <div className="text-white/40">Envelope</div>
-                      <div className="mt-1 text-sm text-white/85">{(latestRecordingSignal?.envelope ?? 0).toFixed(3)}</div>
+                      <div className="text-white/40">Activity Envelope</div>
+                      <div className="mt-1 text-sm text-white/85">{(latestRecordingSignal?.activityEnvelope ?? 0).toFixed(3)}</div>
                     </div>
                     <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
-                      <div className="text-white/40">Display</div>
+                      <div className="text-white/40">Normalized Activity</div>
                       <div className="mt-1 text-sm text-white/85">{(latestDisplaySignal?.value ?? 0).toFixed(3)}</div>
                     </div>
                     <div className="rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
-                      <div className="text-white/40">Display Scale</div>
+                      <div className="text-white/40">Active Reference</div>
                       <div className="mt-1 text-sm text-white/85">{liveDisplayScale.toFixed(3)}</div>
                     </div>
                   </div>

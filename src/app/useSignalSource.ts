@@ -5,7 +5,8 @@ export type SignalPoint = {
   time: number;
   value: number;
   raw: number;
-  envelope: number;
+  activityEnvelope: number;
+  normalizedActivity: number;
 };
 
 export type SignalSourceMode = 'mock' | 'live';
@@ -19,6 +20,7 @@ type UseSignalSourceResult = {
   isStreaming: boolean;
   selectSignalSourceMode: (mode: SignalSourceMode) => Promise<void>;
   startStream: () => Promise<void>;
+  startStreamForMode: (mode: SignalSourceMode) => Promise<void>;
   stopStream: () => Promise<void>;
   liveConnectionStatus: LiveConnectionStatus;
   liveConnectionMessage: string;
@@ -34,10 +36,13 @@ const LIVE_RENDER_INTERVAL_MS = 100;
 const FEATURE_WINDOW_MS = 75;
 const FEATURE_SIGNAL_SCALE = 30000;
 const RECORDING_WINDOW_MS = 5000;
-const DISPLAY_SCALE_PERCENTILE = 0.98;
-const MIN_DISPLAY_SCALE = 0.75;
-const DISPLAY_SCALE_SMOOTHING = 0.18;
-const DISPLAY_HEADROOM = 1.25;
+const ACTIVITY_REFERENCE_WINDOW_MS = 8000;
+const BASELINE_PERCENTILE = 0.2;
+const ACTIVE_REFERENCE_PERCENTILE = 0.98;
+const MIN_ACTIVITY_RANGE = 0.12;
+const BASELINE_SMOOTHING = 0.15;
+const ACTIVE_REFERENCE_SMOOTHING = 0.18;
+const ACTIVE_REFERENCE_HEADROOM = 1.1;
 
 const clampSignalValue = (value: number) => Math.max(0, Math.min(1, value));
 const trimPointsToTimeWindow = (points: SignalPoint[], windowMs: number) => {
@@ -77,12 +82,14 @@ export function useSignalSource(
   const [liveConnectionMessage, setLiveConnectionMessage] = useState('Idle. Select a source and start stream.');
   const [liveDeviceName, setLiveDeviceName] = useState<string | null>(null);
   const [livePacketCount, setLivePacketCount] = useState(0);
-  const [liveDisplayScale, setLiveDisplayScale] = useState(MIN_DISPLAY_SCALE);
+  const [liveDisplayScale, setLiveDisplayScale] = useState(1);
   const [liveSampleRateHz, setLiveSampleRateHz] = useState(0);
   const ganglionRef = useRef<GanglionConnection | null>(null);
   const featureWindowRef = useRef<{ time: number; value: number }[]>([]);
+  const activityReferenceWindowRef = useRef<{ time: number; value: number }[]>([]);
   const pendingRecordingPointsRef = useRef<SignalPoint[]>([]);
-  const displayScaleRef = useRef(MIN_DISPLAY_SCALE);
+  const activityBaselineRef = useRef(0);
+  const activityUpperReferenceRef = useRef(MIN_ACTIVITY_RANGE);
   const selectedChannelIndexRef = useRef(selectedChannelIndex);
   const sampleRateTimesRef = useRef<number[]>([]);
   const displaySensitivityRef = useRef(displaySensitivity);
@@ -94,10 +101,12 @@ export function useSignalSource(
   useEffect(() => {
     selectedChannelIndexRef.current = selectedChannelIndex;
     featureWindowRef.current = [];
+    activityReferenceWindowRef.current = [];
     pendingRecordingPointsRef.current = [];
     sampleRateTimesRef.current = [];
-    displayScaleRef.current = MIN_DISPLAY_SCALE;
-    setLiveDisplayScale(MIN_DISPLAY_SCALE);
+    activityBaselineRef.current = 0;
+    activityUpperReferenceRef.current = MIN_ACTIVITY_RANGE;
+    setLiveDisplayScale(1);
     setLiveSampleRateHz(0);
 
     if (signalSourceMode === 'live') {
@@ -133,9 +142,11 @@ export function useSignalSource(
     setRecordingSignalData([]);
     setLivePacketCount(0);
     setLiveSampleRateHz(0);
-    displayScaleRef.current = MIN_DISPLAY_SCALE;
-    setLiveDisplayScale(MIN_DISPLAY_SCALE);
+    activityBaselineRef.current = 0;
+    activityUpperReferenceRef.current = MIN_ACTIVITY_RANGE;
+    setLiveDisplayScale(1);
     featureWindowRef.current = [];
+    activityReferenceWindowRef.current = [];
     pendingRecordingPointsRef.current = [];
     sampleRateTimesRef.current = [];
   }, []);
@@ -201,16 +212,17 @@ export function useSignalSource(
           featureWindowRef.current.reduce((sum, point) => sum + point.value * point.value, 0) /
             Math.max(featureWindowRef.current.length, 1)
         );
-        const featureValue = Math.max(0, rms / FEATURE_SIGNAL_SCALE);
+        const activityEnvelope = Math.max(0, rms / FEATURE_SIGNAL_SCALE);
 
         setLivePacketCount(count => count + 1);
         sampleRateTimesRef.current.push(sample.timestamp);
         sampleRateTimesRef.current = sampleRateTimesRef.current.filter((time) => time >= sample.timestamp - 1000);
         pendingRecordingPointsRef.current.push({
           time: sample.timestamp,
-          value: featureValue,
+          value: activityEnvelope,
           raw: rawSample,
-          envelope: featureValue,
+          activityEnvelope,
+          normalizedActivity: 0,
         });
       });
 
@@ -238,14 +250,18 @@ export function useSignalSource(
     }
   }, [disconnectGanglion, resetDisplayState]);
 
-  const startStream = useCallback(async () => {
-    if (signalSourceMode === 'live') {
+  const startStreamForMode = useCallback(async (mode: SignalSourceMode) => {
+    if (mode === 'live') {
       await connectGanglion();
       return;
     }
 
     await startMockStream();
-  }, [connectGanglion, signalSourceMode, startMockStream]);
+  }, [connectGanglion, startMockStream]);
+
+  const startStream = useCallback(async () => {
+    await startStreamForMode(signalSourceMode);
+  }, [signalSourceMode, startStreamForMode]);
 
   const stopStream = useCallback(async () => {
     await disconnectGanglion();
@@ -271,7 +287,8 @@ export function useSignalSource(
         time: Date.now(),
         value,
         raw: value,
-        envelope: value,
+        activityEnvelope: value,
+        normalizedActivity: value,
       });
     }, 50);
 
@@ -295,21 +312,41 @@ export function useSignalSource(
       setRecordingSignalData(prev => trimPointsToTimeWindow([...prev, ...pending], RECORDING_WINDOW_MS));
       setSignalData(prev => {
         const trimmedPreviousPoints = trimPointsToTimeWindow(prev, displayWindowMs);
-        const targetScale = Math.max(
-          getPercentile(
-            [...trimmedPreviousPoints, ...pending].map((point) => point.envelope),
-            DISPLAY_SCALE_PERCENTILE
-          ) * (DISPLAY_HEADROOM / Math.max(displaySensitivityRef.current, 0.1)),
-          MIN_DISPLAY_SCALE
+        activityReferenceWindowRef.current = trimPointsToTimeWindow(
+          [...activityReferenceWindowRef.current, ...pending.map((point) => ({
+            time: point.time,
+            value: point.activityEnvelope,
+          }))],
+          ACTIVITY_REFERENCE_WINDOW_MS,
         );
-        const nextScale = displayScaleRef.current + (targetScale - displayScaleRef.current) * DISPLAY_SCALE_SMOOTHING;
-        displayScaleRef.current = nextScale;
-        setLiveDisplayScale(nextScale);
+
+        const recentEnvelopeValues = activityReferenceWindowRef.current.map((point) => point.value);
+        const targetBaseline = getPercentile(recentEnvelopeValues, BASELINE_PERCENTILE);
+        const baseline = activityBaselineRef.current + (targetBaseline - activityBaselineRef.current) * BASELINE_SMOOTHING;
+        activityBaselineRef.current = baseline;
+
+        const targetUpperReference = Math.max(
+          getPercentile(recentEnvelopeValues, ACTIVE_REFERENCE_PERCENTILE) *
+            (ACTIVE_REFERENCE_HEADROOM / Math.max(displaySensitivityRef.current, 0.1)),
+          baseline + MIN_ACTIVITY_RANGE,
+        );
+        const upperReference =
+          activityUpperReferenceRef.current +
+          (targetUpperReference - activityUpperReferenceRef.current) * ACTIVE_REFERENCE_SMOOTHING;
+        activityUpperReferenceRef.current = Math.max(upperReference, baseline + MIN_ACTIVITY_RANGE);
+        setLiveDisplayScale(activityUpperReferenceRef.current);
         setLiveSampleRateHz(sampleRateTimesRef.current.length);
 
         const normalizedPending = pending.map((point) => ({
           ...point,
-          value: clampSignalValue(point.envelope / nextScale),
+          normalizedActivity: clampSignalValue(
+            (point.activityEnvelope - activityBaselineRef.current) /
+              Math.max(activityUpperReferenceRef.current - activityBaselineRef.current, MIN_ACTIVITY_RANGE),
+          ),
+          value: clampSignalValue(
+            (point.activityEnvelope - activityBaselineRef.current) /
+              Math.max(activityUpperReferenceRef.current - activityBaselineRef.current, MIN_ACTIVITY_RANGE),
+          ),
         }));
 
         return trimPointsToTimeWindow([...trimmedPreviousPoints, ...normalizedPending], displayWindowMs);
@@ -339,6 +376,7 @@ export function useSignalSource(
     isStreaming,
     selectSignalSourceMode,
     startStream,
+    startStreamForMode,
     stopStream,
     liveConnectionStatus,
     liveConnectionMessage,

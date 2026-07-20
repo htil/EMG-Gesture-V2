@@ -17,6 +17,7 @@ import {
   SheetTrigger,
 } from "./components/ui/sheet";
 import {
+  buildInferenceSample,
   buildGestureColorMap,
   buildSessionTimeline,
   buildTrialSchedule,
@@ -30,6 +31,7 @@ import {
   generateChannelMockEmgSample,
   generateNoiseMockEmgSample,
   TESTING_SESSION_LIMITS,
+  type Gesture,
   type PredictionRecord,
   type TestingSessionData,
   type TestingSessionSettings,
@@ -38,6 +40,7 @@ import {
   type TrainingSessionData,
 } from "./pipeline";
 import { generateMockEmgSample } from "./pipeline";
+import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useSignalSource";
   
   type SessionState =
     | "idle"
@@ -48,6 +51,8 @@ import { generateMockEmgSample } from "./pipeline";
 
   type TestingInputMode =
     | "replay"
+    | "mock-live"
+    | "live-ganglion"
     | "channel-1"
     | "channel-2"
     | "channel-3"
@@ -56,8 +61,12 @@ import { generateMockEmgSample } from "./pipeline";
   
   const SESSION_DURATION = 60;
   const TARGET_INTERVAL = 4;
+  const ROLLING_WINDOW_READY_RATIO = 0.8;
+  const ROLLING_WINDOW_MIN_POINTS = 8;
   const TESTING_INPUT_OPTIONS: Array<{ value: TestingInputMode; label: string }> = [
     { value: "replay", label: "Replay Training" },
+    { value: "mock-live", label: "Mock Live" },
+    { value: "live-ganglion", label: "Live Ganglion" },
     { value: "channel-1", label: "Channel 1" },
     { value: "channel-2", label: "Channel 2" },
     { value: "channel-3", label: "Channel 3" },
@@ -247,6 +256,15 @@ import { generateMockEmgSample } from "./pipeline";
 
   export default function TestingScreen({
     trainingSession,
+    recordingSignalData,
+    signalSourceMode,
+    isStreaming,
+    startStreamForMode,
+    liveConnectionStatus,
+    liveConnectionMessage,
+    liveDeviceName,
+    selectedChannelIndex,
+    isBluetoothAvailable,
     onSessionComplete,
     onShowResults,
     onExit,
@@ -254,6 +272,15 @@ import { generateMockEmgSample } from "./pipeline";
     onSettingsChange,
   }: {
     trainingSession: TrainingSessionData;
+    recordingSignalData: SignalPoint[];
+    signalSourceMode: SignalSourceMode;
+    isStreaming: boolean;
+    startStreamForMode: (mode: SignalSourceMode) => Promise<void>;
+    liveConnectionStatus: LiveConnectionStatus;
+    liveConnectionMessage: string;
+    liveDeviceName: string | null;
+    selectedChannelIndex: number;
+    isBluetoothAvailable: boolean;
     onSessionComplete?: (session: TestingSessionData) => void;
     onShowResults?: () => void;
     onExit?: () => void;
@@ -320,6 +347,7 @@ import { generateMockEmgSample } from "./pipeline";
     const [testingInputMode, setTestingInputMode] =
       useState<TestingInputMode>("replay");
     const [latestDebug, setLatestDebug] = useState<PredictionRecord["debug"] | undefined>(undefined);
+    const [windowSkipReason, setWindowSkipReason] = useState<string>("Idle");
 
     const predictionsRef = useRef<PredictionRecord[]>([]);
     const sessionStartedAtRef = useRef<number | null>(null);
@@ -332,6 +360,8 @@ import { generateMockEmgSample } from "./pipeline";
     const counterRef = useRef(0);
     const currentTargetIdRef = useRef<string>("");
     const currentPhaseRef = useRef<TrialPhase>("trial");
+    const streamSessionCutoffTimeRef = useRef<number>(0);
+    const lastPredictedPointTimeRef = useRef<number | null>(null);
 
     useEffect(() => {
       setTrialPeriodInput(String(settings.trialPeriodMs));
@@ -369,8 +399,99 @@ import { generateMockEmgSample } from "./pipeline";
       typeof setInterval
     > | null>(null);
 
+    const streamBackedMode = useMemo(() => {
+      if (testingInputMode === "mock-live") {
+        return "mock" as SignalSourceMode;
+      }
+
+      if (testingInputMode === "live-ganglion") {
+        return "live" as SignalSourceMode;
+      }
+
+      return null;
+    }, [testingInputMode]);
+
+    const buildRollingWindowSample = useCallback(() => {
+      if (!streamBackedMode) {
+        return { sample: null, skipReason: "Not a stream-backed mode" };
+      }
+
+      if (!isStreaming) {
+        return { sample: null, skipReason: "Stream inactive" };
+      }
+
+      if (signalSourceMode !== streamBackedMode) {
+        return { sample: null, skipReason: "Waiting for selected source mode" };
+      }
+
+      if (recordingSignalData.length === 0) {
+        return { sample: null, skipReason: "No streamed points yet" };
+      }
+
+      const sessionEligiblePoints = recordingSignalData.filter(
+        (point) => point.time >= streamSessionCutoffTimeRef.current,
+      );
+      if (sessionEligiblePoints.length === 0) {
+        return { sample: null, skipReason: "Waiting for fresh session samples" };
+      }
+
+      const windowDurationMs = trainingSession.segmentDurationMs;
+      const latestTime = sessionEligiblePoints[sessionEligiblePoints.length - 1]?.time;
+      if (!latestTime) {
+        return { sample: null, skipReason: "Missing newest point timestamp" };
+      }
+
+      if (
+        lastPredictedPointTimeRef.current !== null &&
+        latestTime <= lastPredictedPointTimeRef.current
+      ) {
+        return { sample: null, skipReason: "No fresh samples since last prediction" };
+      }
+
+      const windowStart = latestTime - windowDurationMs;
+      const windowPoints = sessionEligiblePoints.filter((point) => point.time >= windowStart);
+      if (windowPoints.length < ROLLING_WINDOW_MIN_POINTS) {
+        return { sample: null, skipReason: `Need at least ${ROLLING_WINDOW_MIN_POINTS} points` };
+      }
+
+      const coverageMs = (windowPoints[windowPoints.length - 1]?.time ?? latestTime) - (windowPoints[0]?.time ?? latestTime);
+      if (coverageMs < windowDurationMs * ROLLING_WINDOW_READY_RATIO) {
+        return { sample: null, skipReason: `Window coverage ${coverageMs.toFixed(0)} ms is not ready` };
+      }
+
+      return {
+        sample: buildInferenceSample(windowPoints, windowDurationMs),
+        skipReason: null,
+      };
+    }, [isStreaming, recordingSignalData, signalSourceMode, streamBackedMode, trainingSession.segmentDurationMs]);
+
+    const ensureTestingSignalStream = useCallback(async () => {
+      if (!streamBackedMode) {
+        return true;
+      }
+
+      if (streamBackedMode === "live" && !isBluetoothAvailable) {
+        return false;
+      }
+
+      if (signalSourceMode === streamBackedMode && isStreaming) {
+        return true;
+      }
+
+      try {
+        await startStreamForMode(streamBackedMode);
+        return true;
+      } catch {
+        return false;
+      }
+    }, [isBluetoothAvailable, isStreaming, signalSourceMode, startStreamForMode, streamBackedMode]);
+
     const buildTestingSample = useCallback(
       (expectedGesture: Gesture, counter: number) => {
+        if (streamBackedMode) {
+          return buildRollingWindowSample().sample;
+        }
+
         if (testingInputMode === "noise") {
           return generateNoiseMockEmgSample(trainingSession.segmentDurationMs);
         }
@@ -402,7 +523,7 @@ import { generateMockEmgSample } from "./pipeline";
           trainingSession.segmentDurationMs,
         );
       },
-      [testingInputMode, trainingSamplesByGesture, trainingSession.segmentDurationMs],
+      [buildRollingWindowSample, streamBackedMode, testingInputMode, trainingSamplesByGesture, trainingSession.segmentDurationMs],
     );
   
     const stopSession = useCallback(() => {
@@ -508,11 +629,25 @@ import { generateMockEmgSample } from "./pipeline";
           return;
         }
 
-        counterRef.current++;
-        const counter = counterRef.current;
-        const emgSample = buildTestingSample(expectedGesture, counter);
-        const result = predictionEngine.predict(expectedGesture, emgSample);
-        const entry = createPredictionRecord(result, counter, counter - 1);
+        const nextCounter = counterRef.current + 1;
+        const emgSample = buildTestingSample(expectedGesture, nextCounter);
+        if (!emgSample) {
+          if (streamBackedMode) {
+            const rollingResult = buildRollingWindowSample();
+            setWindowSkipReason(rollingResult.skipReason ?? "Window not ready");
+          }
+          return;
+        }
+
+        counterRef.current = nextCounter;
+        const result = predictionEngine.predict(emgSample);
+        const entry = createPredictionRecord(result, expectedGesture, nextCounter, nextCounter - 1);
+        lastPredictedPointTimeRef.current = emgSample.timestamp;
+        setWindowSkipReason(
+          result.predictedGestureId === "unknown"
+            ? "Classifier returned Unknown"
+            : "Prediction accepted"
+        );
 
         setPredictedGestureId(entry.predictedGestureId);
         setConfidence(entry.confidence);
@@ -589,11 +724,20 @@ import { generateMockEmgSample } from "./pipeline";
       onExit?.();
     }, [onExit, stopSession]);
   
-    const startSession = useCallback(() => {
+    const startSession = useCallback(async () => {
+      const inputReady = await ensureTestingSignalStream();
+      if (!inputReady) {
+        return;
+      }
+
       setCountdown(3);
       setSessionState("countdown");
       setHistory([]);
+      setLatestDebug(undefined);
+      setWindowSkipReason("Waiting for countdown");
       predictionsRef.current = [];
+      lastPredictedPointTimeRef.current = null;
+      streamSessionCutoffTimeRef.current = Date.now();
   
       let count = 3;
       countdownRef.current = setInterval(() => {
@@ -604,7 +748,7 @@ import { generateMockEmgSample } from "./pipeline";
           beginSession();
         }
       }, 1000);
-    }, [beginSession]);
+    }, [beginSession, ensureTestingSignalStream]);
   
     useEffect(() => () => stopSession(), [stopSession]);
   
@@ -628,6 +772,59 @@ import { generateMockEmgSample } from "./pipeline";
     const gc = gestureColors[targetGesture?.id ?? ""] ?? { ring: "#00d4ff", bar: "#00d4ff" };
     const latestPrediction = history[0];
     const isMatch = latestPrediction?.matchStatus === "match";
+    const latestBufferedPoint = recordingSignalData[recordingSignalData.length - 1];
+    const rollingWindowStats = useMemo(() => {
+      if (!streamBackedMode || recordingSignalData.length === 0) {
+        return {
+          rawPointCount: recordingSignalData.length,
+          rollingPointCount: 0,
+          rollingDurationMs: 0,
+          newestPointAgeMs: null as number | null,
+          latestRawValue: latestBufferedPoint?.raw ?? null,
+          latestNormalizedActivity: latestBufferedPoint?.normalizedActivity ?? null,
+          windowEligible: false,
+          skipReason: streamBackedMode ? "No streamed points yet" : "Using sample-driven mode",
+        };
+      }
+
+      const eligiblePoints = recordingSignalData.filter(
+        (point) => point.time >= streamSessionCutoffTimeRef.current,
+      );
+      const latestEligiblePoint = eligiblePoints[eligiblePoints.length - 1];
+      const newestTime = latestEligiblePoint?.time ?? latestBufferedPoint?.time ?? Date.now();
+      const cutoffTime = newestTime - trainingSession.segmentDurationMs;
+      const windowPoints = eligiblePoints.filter((point) => point.time >= cutoffTime);
+      const rollingDurationMs = windowPoints.length > 1
+        ? (windowPoints[windowPoints.length - 1]?.time ?? newestTime) - (windowPoints[0]?.time ?? newestTime)
+        : 0;
+      const windowEligible =
+        windowPoints.length >= ROLLING_WINDOW_MIN_POINTS &&
+        rollingDurationMs >= trainingSession.segmentDurationMs * ROLLING_WINDOW_READY_RATIO;
+
+      return {
+        rawPointCount: eligiblePoints.length,
+        rollingPointCount: windowPoints.length,
+        rollingDurationMs,
+        newestPointAgeMs: latestEligiblePoint ? Math.max(0, Date.now() - newestTime) : null,
+        latestRawValue: latestEligiblePoint?.raw ?? null,
+        latestNormalizedActivity: latestEligiblePoint?.normalizedActivity ?? null,
+        windowEligible,
+        skipReason: latestEligiblePoint ? (windowEligible ? "Ready" : windowSkipReason) : "Waiting for fresh session samples",
+      };
+    }, [latestBufferedPoint, recordingSignalData, streamBackedMode, trainingSession.segmentDurationMs, windowSkipReason]);
+    const testingInputStatusText = streamBackedMode
+      ? streamBackedMode === "live"
+        ? liveConnectionStatus === "streaming"
+          ? `Streaming ${liveDeviceName ? `(${liveDeviceName})` : "Ganglion"} on channel ${selectedChannelIndex + 1}`
+          : liveConnectionStatus === "connecting"
+          ? "Connecting to Ganglion..."
+          : liveConnectionStatus === "error"
+          ? liveConnectionMessage
+          : "Live Ganglion selected. Start testing to connect."
+        : isStreaming && signalSourceMode === "mock"
+        ? "Mock live stream active"
+        : "Mock live selected. Start testing to begin streaming."
+      : "Sample-driven testing mode";
   
     return (
       <div className="min-h-screen w-full bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white/90 font-['Inter',system-ui,sans-serif]">
@@ -925,6 +1122,9 @@ import { generateMockEmgSample } from "./pipeline";
                       {option.label}
                     </button>
                   ))}
+                </div>
+                <div className="mt-3 text-center text-xs text-white/45">
+                  {testingInputStatusText}
                 </div>
               </div>
   
@@ -1320,7 +1520,71 @@ import { generateMockEmgSample } from "./pipeline";
                         </div>
                       </div>
                     </div>
+                    <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-white/55">
+                      <div>
+                        <div className="text-white/40">Stream Active</div>
+                        <div className="mt-1 text-sm text-white/85">
+                          {streamBackedMode ? (isStreaming ? "Yes" : "No") : "N/A"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Buffered Raw Points</div>
+                        <div className="mt-1 text-sm text-white/85">
+                          {rollingWindowStats.rawPointCount}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Window Points</div>
+                        <div className="mt-1 text-sm text-white/85">
+                          {rollingWindowStats.rollingPointCount}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Window Duration</div>
+                        <div className="mt-1 text-sm text-white/85">
+                          {rollingWindowStats.rollingDurationMs.toFixed(0)} ms
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Newest Point Age</div>
+                        <div className="mt-1 text-sm text-white/85">
+                          {rollingWindowStats.newestPointAgeMs === null ? "—" : `${rollingWindowStats.newestPointAgeMs.toFixed(0)} ms`}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Window Eligible</div>
+                        <div className="mt-1 text-sm text-white/85">
+                          {rollingWindowStats.windowEligible ? "Yes" : "No"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Latest Raw</div>
+                        <div className="mt-1 text-sm text-white/85">
+                          {rollingWindowStats.latestRawValue === null ? "—" : rollingWindowStats.latestRawValue.toFixed(6)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Latest Activity</div>
+                        <div className="mt-1 text-sm text-white/85">
+                          {rollingWindowStats.latestNormalizedActivity === null ? "—" : rollingWindowStats.latestNormalizedActivity.toFixed(3)}
+                        </div>
+                      </div>
+                    </div>
                     <div className="mt-3 space-y-2 text-xs text-white/55">
+                      <div>
+                        <div className="text-white/40">Skip Reason</div>
+                        <div className="mt-1 text-white/75">
+                          {rollingWindowStats.skipReason}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Latest Prediction</div>
+                        <div className="mt-1 text-white/75">
+                          {latestPrediction
+                            ? `${latestPrediction.predictedGestureName} (${latestPrediction.confidence.toFixed(1)}%)`
+                            : "—"}
+                        </div>
+                      </div>
                       <div>
                         <div className="text-white/40">Class Feature Means</div>
                         <div className="mt-1 text-white/75">
