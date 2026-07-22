@@ -1,9 +1,29 @@
 import React from 'react';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { AreaChart, Area, XAxis, YAxis, ReferenceArea, ReferenceLine, ResponsiveContainer } from 'recharts';
+import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
+import {
+  AreaChart,
+  Area,
+  Line,
+  LineChart,
+  XAxis,
+  YAxis,
+  ReferenceArea,
+  ReferenceLine,
+  ResponsiveContainer,
+} from 'recharts';
+import type { DotProps } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, Settings2, RotateCcw, Trash2, ChevronDown } from 'lucide-react';
+import {
+  X,
+  Settings2,
+  RotateCcw,
+  Trash2,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Brain,
+} from 'lucide-react';
 import * as dfd from 'danfojs';
 import { useSignalSource, type SignalSourceMode } from './useSignalSource';
 import {
@@ -54,6 +74,20 @@ interface ExportSample {
   duration: number;
 }
 
+interface DatasetPreviewSample {
+  id: string;
+  gestureId: string;
+  sampleNumber: number;
+  timestamp: number;
+  durationSeconds: number;
+  dataPoints: WaveformPoint[];
+}
+
+type ChartPoint = WaveformPoint & {
+  displayTime: number;
+  pointIndex: number;
+};
+
 type SignalSourceLabel = Record<SignalSourceMode, string>;
 
 const DEFAULT_SEGMENT_DURATION_MS = 1200;
@@ -61,6 +95,397 @@ const MIN_SEGMENT_POINTS = 6;
 const DEFAULT_DISPLAY_WINDOW_MS = 3000;
 const DEFAULT_ACTIVITY_DISPLAY_SENSITIVITY = 1.0;
 const RECORDED_SAMPLE_STATUSES: SampleStatus[] = ['collected', 'flagged', 'rejected'];
+const WAVEFORM_DOT_RADIUS = 4;
+const WAVEFORM_HOVERED_DOT_RADIUS = 6;
+const WAVEFORM_TOOLTIP_DOT_GAP = 2;
+
+function formatRecordedTimestamp(timestamp: number): string {
+  return new Date(timestamp).toLocaleTimeString(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+function formatDurationSeconds(durationSeconds: number): string {
+  return `${durationSeconds.toFixed(1)} seconds`;
+}
+
+function formatWaveformValue(value: number): string {
+  if (Math.abs(value) >= 1000) {
+    return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
+
+  if (Math.abs(value) >= 1) {
+    return value.toFixed(2);
+  }
+
+  return value.toFixed(4);
+}
+
+function formatDisplayTimeSeconds(seconds: number): string {
+  return `${seconds.toFixed(3)} s`;
+}
+
+function computeMinMaxIndices(dataPoints: WaveformPoint[]) {
+  if (dataPoints.length === 0) {
+    return { minIndex: -1, maxIndex: -1 };
+  }
+
+  let minIndex = 0;
+  let maxIndex = 0;
+
+  for (let index = 1; index < dataPoints.length; index += 1) {
+    if (dataPoints[index].value < dataPoints[minIndex].value) {
+      minIndex = index;
+    }
+    if (dataPoints[index].value > dataPoints[maxIndex].value) {
+      maxIndex = index;
+    }
+  }
+
+  return { minIndex, maxIndex };
+}
+
+function capturedSamplesToPreviewSamples(
+  gestureId: string,
+  samples: Sample[],
+  segmentDurationMs: number,
+): DatasetPreviewSample[] {
+  return samples
+    .filter(
+      (sample) =>
+        sample.status !== 'empty' &&
+        sample.waveformData !== undefined &&
+        sample.waveformData.length > 0,
+    )
+    .map((sample) => {
+      const waveformData = sample.waveformData!;
+      const firstPointTime = waveformData[0]?.time ?? sample.timestamp ?? Date.now();
+      const lastPointTime = waveformData[waveformData.length - 1]?.time ?? firstPointTime;
+      const timestamp = sample.timestamp ?? firstPointTime;
+      const durationMs =
+        waveformData.length > 1
+          ? Math.max(0, lastPointTime - firstPointTime)
+          : segmentDurationMs;
+
+      return {
+        id: `${gestureId}-${sample.id}-${timestamp}`,
+        gestureId,
+        sampleNumber: sample.id + 1,
+        timestamp,
+        durationSeconds: durationMs / 1000,
+        dataPoints: waveformData,
+      };
+    });
+}
+
+function WaveformDot({
+  cx,
+  cy,
+  payload,
+  hoveredPointIndex,
+  onPointHover,
+}: DotProps & {
+  payload?: ChartPoint;
+  hoveredPointIndex: number | null;
+  onPointHover: (point: ChartPoint | null, position?: { x: number; y: number }) => void;
+}) {
+  if (cx === undefined || cy === undefined || !payload) {
+    return null;
+  }
+
+  const point = payload;
+  const isHovered = hoveredPointIndex === point.pointIndex;
+
+  return (
+    <g
+      onMouseEnter={() => onPointHover(point, { x: cx, y: cy })}
+      onMouseLeave={() => onPointHover(null)}
+      onFocus={() => onPointHover(point, { x: cx, y: cy })}
+      onBlur={() => onPointHover(null)}
+      tabIndex={0}
+      role="graphics-symbol"
+      aria-label={`Time ${formatDisplayTimeSeconds(point.displayTime)}, value ${formatWaveformValue(point.value)}`}
+    >
+      <circle
+        cx={cx}
+        cy={cy}
+        r={isHovered ? WAVEFORM_HOVERED_DOT_RADIUS : WAVEFORM_DOT_RADIUS}
+        fill="#22d3ee"
+        stroke="#0f172a"
+        strokeWidth={1.5}
+        className="cursor-pointer"
+      />
+    </g>
+  );
+}
+
+const SampleWaveform = memo(function SampleWaveform({
+  dataPoints,
+}: {
+  dataPoints: WaveformPoint[];
+}) {
+  const [hoveredPoint, setHoveredPoint] = useState<ChartPoint | null>(null);
+  const [tooltipPosition, setTooltipPosition] = useState<{ x: number; y: number } | null>(null);
+
+  const chartData = useMemo<ChartPoint[]>(() => {
+    if (dataPoints.length === 0) {
+      return [];
+    }
+
+    const startTime = dataPoints[0].time;
+    return dataPoints.map((point, pointIndex) => ({
+      ...point,
+      displayTime: (point.time - startTime) / 1000,
+      pointIndex,
+    }));
+  }, [dataPoints]);
+
+  const minMax = useMemo(() => computeMinMaxIndices(dataPoints), [dataPoints]);
+
+  const handlePointHover = (point: ChartPoint | null, position?: { x: number; y: number }) => {
+    setHoveredPoint(point);
+    setTooltipPosition(position ?? null);
+  };
+
+  if (chartData.length === 0) {
+    return (
+      <div className="flex h-40 items-center justify-center rounded-lg border border-white/10 bg-slate-950/40 text-sm text-white/45">
+        No waveform data
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative h-44 w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={chartData} margin={{ top: 12, right: 48, left: 4, bottom: 20 }}>
+          <XAxis
+            dataKey="displayTime"
+            type="number"
+            stroke="rgba(255,255,255,0.35)"
+            tick={{ fill: 'rgba(255,255,255,0.55)', fontSize: 11 }}
+            tickLine={false}
+            axisLine={{ stroke: 'rgba(255,255,255,0.15)' }}
+            tickFormatter={(value: number) => `${value.toFixed(1)}s`}
+            label={{
+              value: 'Time',
+              position: 'insideBottom',
+              offset: -6,
+              fill: 'rgba(255,255,255,0.6)',
+              fontSize: 12,
+            }}
+          />
+          <YAxis
+            stroke="rgba(255,255,255,0.35)"
+            tick={{ fill: 'rgba(255,255,255,0.55)', fontSize: 11 }}
+            tickLine={false}
+            axisLine={{ stroke: 'rgba(255,255,255,0.15)' }}
+            width={44}
+            tickFormatter={(value: number) => formatWaveformValue(value)}
+          />
+          <Line
+            type="linear"
+            dataKey="value"
+            stroke="#22d3ee"
+            strokeWidth={1.5}
+            dot={(props) => (
+              <WaveformDot
+                {...props}
+                hoveredPointIndex={hoveredPoint?.pointIndex ?? null}
+                onPointHover={handlePointHover}
+              />
+            )}
+            isAnimationActive={false}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+
+      {hoveredPoint && tooltipPosition && (
+        <div
+          className="pointer-events-none absolute z-10 rounded-md border border-white/15 bg-slate-950/95 px-2.5 py-1.5 text-xs text-white shadow-lg"
+          style={{
+            left: tooltipPosition.x + WAVEFORM_HOVERED_DOT_RADIUS + WAVEFORM_TOOLTIP_DOT_GAP,
+            top: tooltipPosition.y - WAVEFORM_HOVERED_DOT_RADIUS - WAVEFORM_TOOLTIP_DOT_GAP,
+            transform: 'translateY(-100%)',
+          }}
+        >
+          {(hoveredPoint.pointIndex === minMax.minIndex ||
+            hoveredPoint.pointIndex === minMax.maxIndex) && (
+            <div className="mb-0.5 flex gap-1.5 font-bold">
+              {hoveredPoint.pointIndex === minMax.minIndex && (
+                <span className="text-cyan-200">min</span>
+              )}
+              {hoveredPoint.pointIndex === minMax.maxIndex && (
+                <span className="text-amber-200">max</span>
+              )}
+            </div>
+          )}
+          <div className="font-medium text-cyan-300">
+            {formatWaveformValue(hoveredPoint.value)}
+          </div>
+          <div className="text-white/60">
+            Time: {formatDisplayTimeSeconds(hoveredPoint.displayTime)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+});
+
+const DatasetSampleCard = memo(function DatasetSampleCard({
+  sample,
+}: {
+  sample: DatasetPreviewSample;
+}) {
+  return (
+    <article className="rounded-xl border border-white/10 bg-white/5 p-4">
+      <div className="mb-3 flex flex-col gap-1">
+        <h3 className="text-sm font-medium text-white/90">Sample {sample.sampleNumber}</h3>
+        <p className="text-xs text-white/55">
+          Recorded: {formatRecordedTimestamp(sample.timestamp)}
+        </p>
+        <p className="text-xs text-white/55">
+          Duration: {formatDurationSeconds(sample.durationSeconds)}
+        </p>
+      </div>
+      <SampleWaveform dataPoints={sample.dataPoints} />
+    </article>
+  );
+});
+
+function DatasetGestureNavigator({
+  gestures,
+  selectedGestureId,
+  onSelectGestureId,
+}: {
+  gestures: Gesture[];
+  selectedGestureId: string | null;
+  onSelectGestureId: (gestureId: string) => void;
+}) {
+  if (gestures.length === 0) {
+    return (
+      <div className="rounded-lg border border-white/10 bg-slate-950/40 px-4 py-3 text-sm text-white/55">
+        No gestures configured yet.
+      </div>
+    );
+  }
+
+  const currentIndex = Math.max(
+    0,
+    gestures.findIndex((gesture) => gesture.id === selectedGestureId),
+  );
+  const currentGesture = gestures[currentIndex] ?? gestures[0];
+
+  const goToPrevious = () => {
+    const nextIndex = currentIndex === 0 ? gestures.length - 1 : currentIndex - 1;
+    onSelectGestureId(gestures[nextIndex].id);
+  };
+
+  const goToNext = () => {
+    const nextIndex = currentIndex === gestures.length - 1 ? 0 : currentIndex + 1;
+    onSelectGestureId(gestures[nextIndex].id);
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        onClick={goToPrevious}
+        className="flex items-center justify-center rounded-lg border border-white/10 bg-white/5 p-2 text-white/60 transition-colors hover:bg-white/10 hover:text-white"
+        aria-label="Previous gesture"
+        title="Previous gesture"
+      >
+        <ChevronLeft className="h-4 w-4" />
+      </button>
+
+      <div className="flex-1 rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2 text-center">
+        <p className="text-sm font-medium text-white/90">{currentGesture.name}</p>
+      </div>
+
+      <button
+        type="button"
+        onClick={goToNext}
+        className="flex items-center justify-center rounded-lg border border-white/10 bg-white/5 p-2 text-white/60 transition-colors hover:bg-white/10 hover:text-white"
+        aria-label="Next gesture"
+        title="Next gesture"
+      >
+        <ChevronRight className="h-4 w-4" />
+      </button>
+    </div>
+  );
+}
+
+function DatasetPreviewPanel({
+  gestures,
+  samplesByGestureId,
+  initialGestureId,
+}: {
+  gestures: Gesture[];
+  samplesByGestureId: Record<string, DatasetPreviewSample[]>;
+  initialGestureId: string | null;
+}) {
+  const [selectedGestureId, setSelectedGestureId] = useState<string | null>(
+    initialGestureId ?? gestures[0]?.id ?? null,
+  );
+
+  useEffect(() => {
+    if (initialGestureId) {
+      setSelectedGestureId(initialGestureId);
+    }
+  }, [initialGestureId]);
+
+  useEffect(() => {
+    if (gestures.length === 0) {
+      setSelectedGestureId(null);
+      return;
+    }
+
+    const isCurrentGestureAvailable = selectedGestureId
+      ? gestures.some((gesture) => gesture.id === selectedGestureId)
+      : false;
+
+    if (!isCurrentGestureAvailable) {
+      const fallbackGestureId =
+        initialGestureId && gestures.some((gesture) => gesture.id === initialGestureId)
+          ? initialGestureId
+          : gestures[0].id;
+      setSelectedGestureId(fallbackGestureId);
+    }
+  }, [gestures, initialGestureId, selectedGestureId]);
+
+  const samples = useMemo(
+    () => (selectedGestureId ? samplesByGestureId[selectedGestureId] ?? [] : []),
+    [samplesByGestureId, selectedGestureId],
+  );
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="shrink-0 space-y-4 border-b border-white/10 pb-4">
+        <DatasetGestureNavigator
+          gestures={gestures}
+          selectedGestureId={selectedGestureId}
+          onSelectGestureId={setSelectedGestureId}
+        />
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto py-4 pr-1">
+        {gestures.length === 0 ? (
+          <p className="text-sm text-white/55">Add gestures to begin collecting training samples.</p>
+        ) : samples.length === 0 ? (
+          <p className="text-sm text-white/55">No samples recorded for this gesture yet.</p>
+        ) : (
+          <div className="flex flex-col gap-4">
+            {samples.map((sample) => (
+              <DatasetSampleCard key={sample.id} sample={sample} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export default function TrainingScreen() {
   const [feedbackState, setFeedbackState] = useState<FeedbackState>('ready');
@@ -74,6 +499,7 @@ export default function TrainingScreen() {
   const [recordingProgress, setRecordingProgress] = useState(0);
   const [currentCapturedSegment, setCurrentCapturedSegment] = useState<WaveformPoint[]>([]);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isDatasetPreviewOpen, setIsDatasetPreviewOpen] = useState(false);
   const [minRequired, setMinRequired] = useState(8);
   const [sampleTarget, setSampleTarget] = useState(12);
   const [targetSamplesInputValue, setTargetSamplesInputValue] = useState('12');
@@ -85,6 +511,7 @@ export default function TrainingScreen() {
   const [selectedSampleId, setSelectedSampleId] = useState<number | null>(null);
   const [gestures, setGestures] = useState<Gesture[]>(DEFAULT_GESTURES);
   const [currentGestureId, setCurrentGestureId] = useState<string>(DEFAULT_GESTURES[0].id);
+  const [datasetPreviewGestureId, setDatasetPreviewGestureId] = useState<string>(DEFAULT_GESTURES[0].id);
   const [newGestureName, setNewGestureName] = useState('');
   const [isGestureDropdownOpen, setIsGestureDropdownOpen] = useState(false);
   const [showGestureChangeMessage, setShowGestureChangeMessage] = useState(false);
@@ -173,6 +600,22 @@ export default function TrainingScreen() {
   const isAllSamplesCollected = gestures.every(
     (gesture) => gestureData[gesture.id]?.samples.every((sample) => sample.status !== 'empty') ?? false,
   );
+
+  const trainingSamplesByGestureId = useMemo(
+    () =>
+      Object.fromEntries(
+        gestures.map((gesture) => [
+          gesture.id,
+          capturedSamplesToPreviewSamples(
+            gesture.id,
+            gestureData[gesture.id]?.samples ?? [],
+            segmentDurationMs,
+          ),
+        ]),
+      ),
+    [gestures, gestureData, segmentDurationMs],
+  );
+
   useEffect(() => {
     setTargetSamplesInputValue(String(sampleTarget));
   }, [sampleTarget]);
@@ -1047,7 +1490,26 @@ export default function TrainingScreen() {
             </div>
           </div>
           
-          <Sheet open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setDatasetPreviewGestureId(currentGestureId);
+                setIsDatasetPreviewOpen(true);
+              }}
+              className={`flex items-center justify-center rounded-lg border p-2 transition-colors ${
+                isDatasetPreviewOpen
+                  ? 'border-cyan-400/30 bg-cyan-400/10 text-cyan-300'
+                  : 'border-white/10 bg-white/5 text-white/60 hover:bg-white/10 hover:text-white'
+              }`}
+              title="Open dataset preview"
+              aria-label="Open dataset preview"
+              aria-pressed={isDatasetPreviewOpen}
+            >
+              <Brain className="h-4 w-4" />
+            </button>
+
+            <Sheet open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
             <SheetTrigger asChild>
               <button
                 className="flex items-center justify-center rounded-lg border border-white/10 bg-white/5 p-2 text-white/60 transition-colors hover:bg-white/10 hover:text-white"
@@ -1505,6 +1967,28 @@ export default function TrainingScreen() {
               </div>
             </SheetContent>
           </Sheet>
+
+          <Sheet open={isDatasetPreviewOpen} onOpenChange={setIsDatasetPreviewOpen}>
+            <SheetContent
+              side="right"
+              className="flex h-full w-full flex-col border-white/10 bg-slate-900 text-white sm:max-w-xl"
+            >
+              <SheetHeader className="shrink-0 border-b border-white/10 pb-4">
+                <SheetTitle className="text-white">Dataset Preview</SheetTitle>
+                <SheetDescription className="text-white/50">
+                  Review recorded samples and waveforms for each gesture.
+                </SheetDescription>
+              </SheetHeader>
+              <div className="min-h-0 flex-1 overflow-hidden px-4 pb-6">
+                <DatasetPreviewPanel
+                  gestures={gestures}
+                  samplesByGestureId={trainingSamplesByGestureId}
+                  initialGestureId={datasetPreviewGestureId}
+                />
+              </div>
+            </SheetContent>
+          </Sheet>
+          </div>
         </div>
 
         {/* 2. Main Signal Visualization */}
