@@ -2,7 +2,7 @@
 
 import type { PredictionConfidenceStatus } from './types';
 
-export const LOW_CONFIDENCE_THRESHOLD = 85;
+export const LOW_CONFIDENCE_THRESHOLD = 75;
 
 export function getConfidenceStatus(confidence: number): PredictionConfidenceStatus {
   return confidence >= LOW_CONFIDENCE_THRESHOLD ? 'high' : 'low';

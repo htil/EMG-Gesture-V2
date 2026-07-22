@@ -1,5 +1,4 @@
-// Packages mock training data for testing
-
+import { extractEmgFeatures } from './featureExtraction';
 import type { EmgSample, Gesture, TrainingGestureData, TrainingSessionData } from './types';
 
 export interface CapturedTrainingSample {
@@ -43,6 +42,7 @@ function toEmgSample(
     data: waveformData.map((point) => point.value),
     duration,
     quality: sample.quality,
+    features: extractEmgFeatures(waveformData.map((point) => point.value)),
   };
 }
 

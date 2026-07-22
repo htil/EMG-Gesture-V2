@@ -21,12 +21,14 @@ import {
   buildSessionTimeline,
   buildTrialSchedule,
   calculateOverallConfidence,
+  createPredictionEngine,
+  createPredictionRecord,
   calculateSessionDurationMs,
   clampSetting,
-  createMockPredictionEngine,
-  createPredictionRecord,
   findGesture,
   formatSessionLength,
+  generateChannelMockEmgSample,
+  generateNoiseMockEmgSample,
   TESTING_SESSION_LIMITS,
   type PredictionRecord,
   type TestingSessionData,
@@ -35,6 +37,7 @@ import {
   type TrialSegment,
   type TrainingSessionData,
 } from "./pipeline";
+import { generateMockEmgSample } from "./pipeline";
   
   type SessionState =
     | "idle"
@@ -42,7 +45,25 @@ import {
     | "active"
     | "paused"
     | "complete";
+
+  type TestingInputMode =
+    | "replay"
+    | "channel-1"
+    | "channel-2"
+    | "channel-3"
+    | "channel-4"
+    | "noise";
   
+  const SESSION_DURATION = 60;
+  const TARGET_INTERVAL = 4;
+  const TESTING_INPUT_OPTIONS: Array<{ value: TestingInputMode; label: string }> = [
+    { value: "replay", label: "Replay Training" },
+    { value: "channel-1", label: "Channel 1" },
+    { value: "channel-2", label: "Channel 2" },
+    { value: "channel-3", label: "Channel 3" },
+    { value: "channel-4", label: "Channel 4" },
+    { value: "noise", label: "Noise" },
+  ];
   function CircularProgress({
     progress,
     size,
@@ -242,7 +263,15 @@ import {
     const gestures = trainingSession.gestures;
     const gestureColors = useMemo(() => buildGestureColorMap(gestures), [gestures]);
     const predictionEngine = useMemo(
-      () => createMockPredictionEngine(trainingSession),
+      () => createPredictionEngine(trainingSession),
+      [trainingSession],
+    );
+    const modelDebugSummary = useMemo(() => predictionEngine.getModelDebugSummary(), [predictionEngine]);
+    const trainingSamplesByGesture = useMemo(
+      () =>
+        Object.fromEntries(
+          trainingSession.gestureData.map((entry) => [entry.gesture.id, entry.samples]),
+        ) as Record<string, typeof trainingSession.gestureData[number]["samples"]>,
       [trainingSession],
     );
 
@@ -288,6 +317,9 @@ import {
     const [confidence, setConfidence] = useState(94.0);
     const [history, setHistory] =
       useState<PredictionRecord[]>([]);
+    const [testingInputMode, setTestingInputMode] =
+      useState<TestingInputMode>("replay");
+    const [latestDebug, setLatestDebug] = useState<PredictionRecord["debug"] | undefined>(undefined);
 
     const predictionsRef = useRef<PredictionRecord[]>([]);
     const sessionStartedAtRef = useRef<number | null>(null);
@@ -336,6 +368,42 @@ import {
     const countdownRef = useRef<ReturnType<
       typeof setInterval
     > | null>(null);
+
+    const buildTestingSample = useCallback(
+      (expectedGesture: Gesture, counter: number) => {
+        if (testingInputMode === "noise") {
+          return generateNoiseMockEmgSample(trainingSession.segmentDurationMs);
+        }
+
+        if (testingInputMode.startsWith("channel-")) {
+          const channelIndex = Number.parseInt(testingInputMode.split("-")[1], 10) - 1;
+          return generateChannelMockEmgSample(
+            Number.isNaN(channelIndex) ? 0 : channelIndex,
+            trainingSession.segmentDurationMs,
+          );
+        }
+
+        const recordedSamples = trainingSamplesByGesture[expectedGesture.id] ?? [];
+        const recordedSample = recordedSamples.length > 0
+          ? recordedSamples[(counter - 1) % recordedSamples.length]
+          : null;
+
+        if (recordedSample) {
+          return {
+            ...recordedSample,
+            id: `${recordedSample.id}-replay-${counter}`,
+            timestamp: Date.now(),
+          };
+        }
+
+        return generateMockEmgSample(
+          expectedGesture.id,
+          expectedGesture.name,
+          trainingSession.segmentDurationMs,
+        );
+      },
+      [testingInputMode, trainingSamplesByGesture, trainingSession.segmentDurationMs],
+    );
   
     const stopSession = useCallback(() => {
       if (sessionRef.current) clearInterval(sessionRef.current);
@@ -442,11 +510,13 @@ import {
 
         counterRef.current++;
         const counter = counterRef.current;
-        const result = predictionEngine.predict(expectedGesture, counter);
+        const emgSample = buildTestingSample(expectedGesture, counter);
+        const result = predictionEngine.predict(expectedGesture, emgSample);
         const entry = createPredictionRecord(result, counter, counter - 1);
 
         setPredictedGestureId(entry.predictedGestureId);
         setConfidence(entry.confidence);
+        setLatestDebug(entry.debug);
         setHistory((prev) => {
           const next = [entry, ...prev];
           predictionsRef.current = [...predictionsRef.current, entry];
@@ -455,6 +525,7 @@ import {
       }, settings.predictionFrequencyMs);
     }, [
       buildSessionData,
+      buildTestingSample,
       gestures,
       onSessionComplete,
       predictionEngine,
@@ -553,7 +624,7 @@ import {
         ? "Session Complete"
         : "Session Active";
     const targetGesture = findGesture(gestures, targetGestureId) ?? gestures[0];
-    const predictedGesture = findGesture(gestures, predictedGestureId) ?? gestures[0];
+    const predictedGesture = findGesture(gestures, predictedGestureId);
     const gc = gestureColors[targetGesture?.id ?? ""] ?? { ring: "#00d4ff", bar: "#00d4ff" };
     const latestPrediction = history[0];
     const isMatch = latestPrediction?.matchStatus === "match";
@@ -829,6 +900,33 @@ import {
                   </div>
                 ))}
               </div>
+
+              <div className="w-full max-w-3xl rounded-xl border border-white/10 bg-white/5 p-4">
+                <div className="mb-3 text-center">
+                  <div className="text-xs font-semibold tracking-[0.25em] uppercase text-white/50">
+                    Testing Input
+                  </div>
+                  <div className="mt-1 text-sm text-white/55">
+                    Choose whether testing replays recorded mock samples or probes the model with a different mock waveform.
+                  </div>
+                </div>
+                <div className="flex flex-wrap justify-center gap-2">
+                  {TESTING_INPUT_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      onClick={() => setTestingInputMode(option.value)}
+                      className="rounded-lg border px-3 py-2 text-sm transition-colors"
+                      style={{
+                        borderColor: testingInputMode === option.value ? "rgba(0,212,255,0.35)" : "rgba(255,255,255,0.1)",
+                        background: testingInputMode === option.value ? "rgba(0,212,255,0.12)" : "rgba(255,255,255,0.04)",
+                        color: testingInputMode === option.value ? "#00d4ff" : "rgba(255,255,255,0.72)",
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
   
               <button
                 onClick={startSession}
@@ -978,6 +1076,9 @@ import {
                     <div className="font-mono text-sm text-white/50">
                       {history.length} predictions captured
                     </div>
+                    <div className="mt-2 text-xs text-white/45">
+                      Input: {TESTING_INPUT_OPTIONS.find((option) => option.value === testingInputMode)?.label ?? "Replay Training"}
+                    </div>
                   </div>
                 </div>
   
@@ -1103,10 +1204,12 @@ import {
                         <div
                           className="text-2xl font-semibold"
                           style={{
-                            color: gestureColors[predictedGestureId]?.ring ?? "#00d4ff",
+                            color: predictedGesture
+                              ? gestureColors[predictedGestureId]?.ring ?? "#00d4ff"
+                              : "#f5a623",
                           }}
                         >
-                          {predictedGesture?.name}
+                          {predictedGesture?.name ?? "Unknown"}
                         </div>
                       </div>
                     </div>
@@ -1180,6 +1283,71 @@ import {
                         </div>
                       </div>
                     ))}
+                  </div>
+
+                  <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+                    <div className="mb-3 flex items-center justify-between">
+                      <span className="text-xs font-semibold tracking-[0.25em] uppercase text-white/50">
+                        Model Debug
+                      </span>
+                      <span className="text-xs text-white/45">
+                        {modelDebugSummary.trainingSampleCount} samples
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 text-xs text-white/55">
+                      <div>
+                        <div className="text-white/40">Prediction Status</div>
+                        <div className="mt-1 text-sm text-white/85">
+                          {latestDebug?.status === "accepted" ? "Accepted" : "Unknown / gated"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Nearest Distance</div>
+                        <div className="mt-1 text-sm text-white/85">
+                          {latestDebug ? latestDebug.nearestDistance.toFixed(3) : "—"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Support Margin</div>
+                        <div className="mt-1 text-sm text-white/85">
+                          {latestDebug ? `${latestDebug.supportMargin.toFixed(1)}%` : "—"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Supports</div>
+                        <div className="mt-1 text-sm text-white/85">
+                          {latestDebug?.classSupports.slice(0, 2).map((support) => `${support.gestureName} ${support.support.toFixed(1)}%`).join(" / ") ?? "—"}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-3 space-y-2 text-xs text-white/55">
+                      <div>
+                        <div className="text-white/40">Class Feature Means</div>
+                        <div className="mt-1 text-white/75">
+                          {modelDebugSummary.classDebugSummary.map((entry) => (
+                            `${entry.gestureName}: ZC ${entry.featureStats.zeroCrossings.mean.toFixed(1)}, SSC ${entry.featureStats.slopeSignChanges.mean.toFixed(1)}, WAMP ${entry.featureStats.willisonAmplitude.mean.toFixed(1)}`
+                          )).join(" | ")}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Nearest Neighbors</div>
+                        <div className="mt-1 text-white/75">
+                          {latestDebug?.nearestNeighbors.length
+                            ? latestDebug.nearestNeighbors
+                                .map((neighbor) => `${neighbor.gestureName} d=${neighbor.distance.toFixed(2)} s=${neighbor.support.toFixed(1)}%`)
+                                .join(" | ")
+                            : "—"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Feature Snapshot</div>
+                        <div className="mt-1 text-white/75">
+                          {latestDebug
+                            ? `ZC ${latestDebug.features.zeroCrossings}, SSC ${latestDebug.features.slopeSignChanges}, WAMP ${latestDebug.features.willisonAmplitude}, HM ${latestDebug.features.hjorthMobility.toFixed(2)}, HC ${latestDebug.features.hjorthComplexity.toFixed(2)}`
+                            : "—"}
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
