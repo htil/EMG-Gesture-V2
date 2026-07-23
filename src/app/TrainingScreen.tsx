@@ -154,6 +154,8 @@ export default function TrainingScreen() {
     isStreaming,
     resetKey: `${signalSourceMode}:${selectedChannelIndex}`,
     minSegmentPoints: MIN_SEGMENT_POINTS,
+    cooldownMs: signalSourceMode === 'mock' ? 50 : undefined,
+    hysteresisRatio: signalSourceMode === 'mock' ? 1 : undefined,
   });
   
   const isRecordedSampleStatus = (status: SampleStatus) => RECORDED_SAMPLE_STATUSES.includes(status);
