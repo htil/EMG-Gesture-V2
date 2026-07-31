@@ -3,6 +3,7 @@ export * from './gestureUtils';
 export * from './confidence';
 export * from './formatTimestamp';
 export * from './featureExtraction';
+export * from './buildInferenceSample';
 export * from './knnModel';
 export * from './mockEmgGenerator';
 export * from './mockTrainingData';
