@@ -616,6 +616,7 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
           const completedAt = Date.now();
           setSessionState("complete");
           onSessionComplete?.(buildSessionData(completedAt));
+          onShowResults?.();
         }
       }, 100);
 
@@ -652,10 +653,9 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
         setPredictedGestureId(entry.predictedGestureId);
         setConfidence(entry.confidence);
         setLatestDebug(entry.debug);
+        predictionsRef.current = [...predictionsRef.current, entry];
         setHistory((prev) => {
-          const next = [entry, ...prev];
-          predictionsRef.current = [...predictionsRef.current, entry];
-          return next;
+          return [entry, ...prev];
         });
       }, settings.predictionFrequencyMs);
     }, [
@@ -663,6 +663,7 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
       buildTestingSample,
       gestures,
       onSessionComplete,
+      onShowResults,
       predictionEngine,
       settings.predictionFrequencyMs,
       stopSession,

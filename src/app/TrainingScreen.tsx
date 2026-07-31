@@ -1391,8 +1391,8 @@ export default function TrainingScreen() {
   }
 
   return (
-    <div className="size-full bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 flex items-center justify-center p-8">
-      <div className="w-full max-w-5xl flex flex-col gap-8">
+    <div className="min-h-screen w-full bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 overflow-y-auto px-4 py-6 md:px-8 md:py-8">
+      <div className="mx-auto w-full max-w-5xl flex flex-col gap-8">
         {/* 1. Objective Header */}
         <div className="flex items-end justify-between">
           <div className="flex flex-col gap-2">
@@ -2278,76 +2278,6 @@ export default function TrainingScreen() {
                 </button>
               )}
             </div>
-            {activeGestureCount >= 2 && (
-              <div className="mt-4 w-full max-w-3xl rounded-xl border border-white/10 bg-white/5 p-4">
-                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                  <div>
-                    <div className="text-xs font-semibold tracking-[0.25em] uppercase text-white/50">
-                      Training Handoff
-                    </div>
-                    <div className="mt-1 text-sm font-medium text-white/90">
-                      Holdout Evaluation
-                    </div>
-                    <div className="mt-1 text-xs text-white/50">
-                      Feature Set: {featureSetDefinition.label}
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3 text-xs text-white/55 md:min-w-[18rem]">
-                    <div>
-                      <div className="text-white/40">Accuracy</div>
-                      <div className="mt-1 text-sm text-white/85">
-                        {canRunHoldoutEvaluation ? `${holdoutEvaluationSummary.accuracy.toFixed(1)}%` : '—'}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-white/40">Unknown Rate</div>
-                      <div className="mt-1 text-sm text-white/85">
-                        {canRunHoldoutEvaluation ? `${holdoutEvaluationSummary.unknownRate.toFixed(1)}%` : '—'}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-white/40">Evaluated</div>
-                      <div className="mt-1 text-sm text-white/85">
-                        {holdoutEvaluationSummary.evaluatedSamples} / {holdoutEvaluationSummary.totalSamples}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-white/40">Avg Confidence</div>
-                      <div className="mt-1 text-sm text-white/85">
-                        {canRunHoldoutEvaluation ? `${holdoutEvaluationSummary.averageConfidence.toFixed(1)}%` : '—'}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                <div className="mt-3 space-y-2 text-xs text-white/55">
-                  {canRunHoldoutEvaluation ? (
-                    <>
-                      <div>
-                        <div className="text-white/40">Per-Gesture Accuracy</div>
-                        <div className="mt-1 text-white/75">
-                          {holdoutEvaluationSummary.gestureStats
-                            .map((entry) => `${entry.gestureName}: ${entry.accuracy.toFixed(1)}% (${entry.correctPredictions}/${entry.evaluatedSamples})`)
-                            .join(' | ')}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-white/40">Confusions</div>
-                        <div className="mt-1 text-white/75">
-                          {holdoutEvaluationSummary.confusionMatrix
-                            .filter((entry) => entry.expectedGestureId !== entry.predictedGestureId)
-                            .map((entry) => `${entry.expectedGestureName}->${entry.predictedGestureName} x${entry.count}`)
-                            .join(' | ') || 'No confusion entries'}
-                        </div>
-                      </div>
-                    </>
-                  ) : (
-                    <div className="text-white/75">
-                      Record at least 2 samples for 2 gestures to run a leave-one-out comparison before testing.
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
             <p className="text-lg text-white/60 font-light">
               {feedback.instruction}
             </p>
@@ -2472,6 +2402,77 @@ export default function TrainingScreen() {
             </button>
           </div>
         </div>
+
+        {activeGestureCount >= 2 && (
+          <div className="w-full rounded-xl border border-white/10 bg-white/5 p-4">
+            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+              <div>
+                <div className="text-xs font-semibold tracking-[0.25em] uppercase text-white/50">
+                  Training Handoff
+                </div>
+                <div className="mt-1 text-sm font-medium text-white/90">
+                  Holdout Evaluation
+                </div>
+                <div className="mt-1 text-xs text-white/50">
+                  Feature Set: {featureSetDefinition.label}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3 text-xs text-white/55 md:min-w-[18rem]">
+                <div>
+                  <div className="text-white/40">Accuracy</div>
+                  <div className="mt-1 text-sm text-white/85">
+                    {canRunHoldoutEvaluation ? `${holdoutEvaluationSummary.accuracy.toFixed(1)}%` : '—'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-white/40">Unknown Rate</div>
+                  <div className="mt-1 text-sm text-white/85">
+                    {canRunHoldoutEvaluation ? `${holdoutEvaluationSummary.unknownRate.toFixed(1)}%` : '—'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-white/40">Evaluated</div>
+                  <div className="mt-1 text-sm text-white/85">
+                    {holdoutEvaluationSummary.evaluatedSamples} / {holdoutEvaluationSummary.totalSamples}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-white/40">Avg Confidence</div>
+                  <div className="mt-1 text-sm text-white/85">
+                    {canRunHoldoutEvaluation ? `${holdoutEvaluationSummary.averageConfidence.toFixed(1)}%` : '—'}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="mt-3 space-y-2 text-xs text-white/55">
+              {canRunHoldoutEvaluation ? (
+                <>
+                  <div>
+                    <div className="text-white/40">Per-Gesture Accuracy</div>
+                    <div className="mt-1 text-white/75">
+                      {holdoutEvaluationSummary.gestureStats
+                        .map((entry) => `${entry.gestureName}: ${entry.accuracy.toFixed(1)}% (${entry.correctPredictions}/${entry.evaluatedSamples})`)
+                        .join(' | ')}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-white/40">Confusions</div>
+                    <div className="mt-1 text-white/75">
+                      {holdoutEvaluationSummary.confusionMatrix
+                        .filter((entry) => entry.expectedGestureId !== entry.predictedGestureId)
+                        .map((entry) => `${entry.expectedGestureName}->${entry.predictedGestureName} x${entry.count}`)
+                        .join(' | ') || 'No confusion entries'}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="text-white/75">
+                  Record at least 2 samples for 2 gestures to run a leave-one-out comparison before testing.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
