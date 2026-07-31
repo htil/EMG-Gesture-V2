@@ -1,5 +1,5 @@
 import { extractEmgFeatures } from './featureExtraction';
-import type { EmgSample, Gesture, TrainingGestureData, TrainingSessionData } from './types';
+import type { EmgSample, FeatureSetId, Gesture, TrainingGestureData, TrainingSessionData } from './types';
 
 export interface CapturedTrainingSample {
   id: number;
@@ -14,6 +14,7 @@ export interface BuildTrainingSessionInput {
   gestureSamples: Record<string, CapturedTrainingSample[]>;
   sampleTarget: number;
   segmentDurationMs: number;
+  featureSetId: FeatureSetId;
 }
 
 function toEmgSample(
@@ -67,5 +68,6 @@ export function buildTrainingSession(input: BuildTrainingSessionInput): Training
     gestures: input.gestures,
     gestureData,
     segmentDurationMs: input.segmentDurationMs,
+    featureSetId: input.featureSetId,
   };
 }

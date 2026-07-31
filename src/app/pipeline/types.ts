@@ -18,6 +18,9 @@ export interface EmgFeatures {
   hjorthComplexity: number;
 }
 
+export type FeatureKey = keyof EmgFeatures;
+export type FeatureSetId = 'extended' | 'educational';
+
 export interface FeatureStats {
   min: number;
   mean: number;
@@ -77,6 +80,7 @@ export interface TrainingSessionData {
   gestures: Gesture[];
   gestureData: TrainingGestureData[];
   segmentDurationMs: number;
+  featureSetId: FeatureSetId;
 }
 
 export type PredictionMatchStatus = 'match' | 'mismatch';
@@ -106,6 +110,42 @@ export interface TestingSessionData {
   predictions: PredictionRecord[];
   overallConfidence: number;
   sessionDurationSeconds: number;
+}
+
+export interface ModelEvaluationGestureStats {
+  gestureId: string;
+  gestureName: string;
+  totalSamples: number;
+  evaluatedSamples: number;
+  correctPredictions: number;
+  unknownPredictions: number;
+  accuracy: number;
+  unknownRate: number;
+  averageConfidence: number;
+}
+
+export interface ModelEvaluationConfusionEntry {
+  expectedGestureId: string;
+  expectedGestureName: string;
+  predictedGestureId: string;
+  predictedGestureName: string;
+  count: number;
+}
+
+export interface ModelEvaluationSummary {
+  method: 'leave-one-out';
+  featureSetId: FeatureSetId;
+  totalSamples: number;
+  evaluatedSamples: number;
+  skippedSamples: number;
+  correctPredictions: number;
+  incorrectPredictions: number;
+  unknownPredictions: number;
+  accuracy: number;
+  unknownRate: number;
+  averageConfidence: number;
+  gestureStats: ModelEvaluationGestureStats[];
+  confusionMatrix: ModelEvaluationConfusionEntry[];
 }
 
 export interface GestureResultStats {

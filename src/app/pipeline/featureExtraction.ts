@@ -1,4 +1,54 @@
-import type { EmgFeatures } from './types';
+import type { EmgFeatures, FeatureKey, FeatureSetId } from './types';
+
+export const DEFAULT_FEATURE_SET_ID: FeatureSetId = 'extended';
+
+export const FEATURE_SET_OPTIONS: Array<{
+  id: FeatureSetId;
+  label: string;
+  shortLabel: string;
+  description: string;
+  featureKeys: FeatureKey[];
+}> = [
+  {
+    id: 'extended',
+    label: 'Extended 10-Feature Set',
+    shortLabel: 'Extended',
+    description: 'Uses the current 10-feature model, including zero crossings, Willison amplitude, and Hjorth metrics.',
+    featureKeys: [
+      'rms',
+      'mav',
+      'std',
+      'peak',
+      'waveformLength',
+      'zeroCrossings',
+      'slopeSignChanges',
+      'willisonAmplitude',
+      'hjorthMobility',
+      'hjorthComplexity',
+    ],
+  },
+  {
+    id: 'educational',
+    label: 'Educational 5-Feature Set',
+    shortLabel: 'Educational',
+    description: 'Keeps the model beginner-friendly with RMS, MAV, standard deviation, peak, and waveform length.',
+    featureKeys: [
+      'rms',
+      'mav',
+      'std',
+      'peak',
+      'waveformLength',
+    ],
+  },
+];
+
+export function getFeatureSetDefinition(featureSetId: FeatureSetId = DEFAULT_FEATURE_SET_ID) {
+  return FEATURE_SET_OPTIONS.find((option) => option.id === featureSetId) ?? FEATURE_SET_OPTIONS[0];
+}
+
+export function getFeatureSetKeys(featureSetId: FeatureSetId = DEFAULT_FEATURE_SET_ID): FeatureKey[] {
+  return getFeatureSetDefinition(featureSetId).featureKeys;
+}
 
 export function extractEmgFeatures(values: number[]): EmgFeatures {
   if (values.length === 0) {

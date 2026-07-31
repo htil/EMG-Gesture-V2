@@ -2,6 +2,7 @@ import type {
   ClassSupportDebug,
   EmgFeatures,
   FeatureStats,
+  FeatureKey,
   Gesture,
   ModelClassDebugSummary,
   PredictionConfidenceStatus,
@@ -9,7 +10,7 @@ import type {
   TrainingSessionData,
 } from './types';
 import { getConfidenceStatus, getMatchStatus } from './confidence';
-import { extractEmgFeatures } from './featureExtraction';
+import { extractEmgFeatures, getFeatureSetKeys } from './featureExtraction';
 import { formatPredictionTimestamp } from './formatTimestamp';
 import type { EmgSample, PredictionRecord } from './types';
 
@@ -30,7 +31,7 @@ interface BuiltKnnModel {
   gestures: Gesture[];
   trainingSamples: KnnTrainingSample[];
   normalization: NormalizationStats;
-  featureKeys: string[];
+  featureKeys: FeatureKey[];
   classDebugSummary: ModelClassDebugSummary[];
   isReady: boolean;
 }
@@ -46,24 +47,12 @@ export interface PredictionEngineResult {
 
 const KNN_K = 3;
 const MIN_LABELS = 2;
-const FEATURE_KEYS: Array<keyof EmgFeatures> = [
-  'rms',
-  'mav',
-  'std',
-  'peak',
-  'waveformLength',
-  'zeroCrossings',
-  'slopeSignChanges',
-  'willisonAmplitude',
-  'hjorthMobility',
-  'hjorthComplexity',
-];
 const MIN_SUPPORT_THRESHOLD = 0.56;
 const MIN_SUPPORT_MARGIN = 0.1;
 const MAX_NEAREST_DISTANCE = 5.2;
 
-function featureVectorFromEmgFeatures(features: EmgFeatures): FeatureVector {
-  return FEATURE_KEYS.map((key) => features[key]);
+function featureVectorFromEmgFeatures(features: EmgFeatures, featureKeys: FeatureKey[]): FeatureVector {
+  return featureKeys.map((key) => features[key]);
 }
 
 function computeNormalizationStats(vectors: FeatureVector[]): NormalizationStats {
@@ -107,11 +96,11 @@ function computeFeatureStats(values: number[]): FeatureStats {
   };
 }
 
-function buildClassDebugSummary(trainingSession: TrainingSessionData): ModelClassDebugSummary[] {
+function buildClassDebugSummary(trainingSession: TrainingSessionData, featureKeys: FeatureKey[]): ModelClassDebugSummary[] {
   return trainingSession.gestureData.map((entry) => {
     const features = entry.samples.map((sample) => sample.features ?? extractEmgFeatures(sample.data));
     const featureStats = Object.fromEntries(
-      FEATURE_KEYS.map((key) => [
+      featureKeys.map((key) => [
         key,
         computeFeatureStats(features.map((feature) => feature[key])),
       ]),
@@ -127,26 +116,27 @@ function buildClassDebugSummary(trainingSession: TrainingSessionData): ModelClas
 }
 
 function buildKnnModel(trainingSession: TrainingSessionData): BuiltKnnModel {
+  const featureKeys = getFeatureSetKeys(trainingSession.featureSetId);
   const collectedSamples = trainingSession.gestureData.flatMap((entry) => entry.samples);
   const labelsWithSamples = new Set(collectedSamples.map((sample) => sample.gestureId));
-  const classDebugSummary = buildClassDebugSummary(trainingSession);
+  const classDebugSummary = buildClassDebugSummary(trainingSession, featureKeys);
 
   if (collectedSamples.length === 0 || labelsWithSamples.size < MIN_LABELS) {
     return {
       gestures: trainingSession.gestures,
       trainingSamples: [],
       normalization: {
-        means: Array(FEATURE_KEYS.length).fill(0),
-        stdDevs: Array(FEATURE_KEYS.length).fill(1),
+        means: Array(featureKeys.length).fill(0),
+        stdDevs: Array(featureKeys.length).fill(1),
       },
-      featureKeys: FEATURE_KEYS,
+      featureKeys,
       classDebugSummary,
       isReady: false,
     };
   }
 
   const featureVectors = collectedSamples.map((sample) => (
-    featureVectorFromEmgFeatures(sample.features ?? extractEmgFeatures(sample.data))
+    featureVectorFromEmgFeatures(sample.features ?? extractEmgFeatures(sample.data), featureKeys)
   ));
   const normalization = computeNormalizationStats(featureVectors);
   const trainingSamples = collectedSamples.map((sample, index) => ({
@@ -159,7 +149,7 @@ function buildKnnModel(trainingSession: TrainingSessionData): BuiltKnnModel {
     gestures: trainingSession.gestures,
     trainingSamples,
     normalization,
-    featureKeys: FEATURE_KEYS,
+    featureKeys,
     classDebugSummary,
     isReady: true,
   };
@@ -172,7 +162,7 @@ function predictKnn(model: BuiltKnnModel, values: number[]) {
 
   const liveFeatures = extractEmgFeatures(values);
   const liveVector = normalizeVector(
-    featureVectorFromEmgFeatures(liveFeatures),
+    featureVectorFromEmgFeatures(liveFeatures, model.featureKeys),
     model.normalization,
   );
 

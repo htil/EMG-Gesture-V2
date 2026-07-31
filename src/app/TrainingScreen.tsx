@@ -38,11 +38,16 @@ import {
 import ResultScreen from './ResultScreen';
 import TestingScreen from './TestingScreen';
 import {
+  DEFAULT_FEATURE_SET_ID,
   DEFAULT_GESTURES,
   DEFAULT_TESTING_SESSION_SETTINGS,
   buildTrainingSession,
   createGesture,
+  evaluateKnnModel,
+  FEATURE_SET_OPTIONS,
+  getFeatureSetDefinition,
   getChannelMockSignalValue,
+  type FeatureSetId,
   type Gesture,
   type TestingSessionData,
   type TestingSessionSettings,
@@ -495,6 +500,7 @@ export default function TrainingScreen() {
   const [segmentDurationMs, setSegmentDurationMs] = useState(DEFAULT_SEGMENT_DURATION_MS);
   const [displayWindowMs, setDisplayWindowMs] = useState(DEFAULT_DISPLAY_WINDOW_MS);
   const [activityDisplaySensitivity, setActivityDisplaySensitivity] = useState(DEFAULT_ACTIVITY_DISPLAY_SENSITIVITY);
+  const [featureSetId, setFeatureSetId] = useState<FeatureSetId>(DEFAULT_FEATURE_SET_ID);
   const [selectedChannelIndex, setSelectedChannelIndex] = useState(0);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isDatasetPreviewOpen, setIsDatasetPreviewOpen] = useState(false);
@@ -615,6 +621,15 @@ export default function TrainingScreen() {
   const isAllSamplesCollected = gestures.every(
     (gesture) => gestureData[gesture.id]?.samples.every((sample) => sample.status !== 'empty') ?? false,
   );
+  const activeGestureCounts = samplesPerGesture.filter((entry) => entry.count > 0);
+  const activeGestureCount = activeGestureCounts.length;
+  const minimumSamplesPerActiveGesture = activeGestureCounts.length > 0
+    ? Math.min(...activeGestureCounts.map((entry) => entry.count))
+    : 0;
+  const featureSetDefinition = useMemo(
+    () => getFeatureSetDefinition(featureSetId),
+    [featureSetId],
+  );
 
   const trainingSamplesByGestureId = useMemo(
     () =>
@@ -630,6 +645,24 @@ export default function TrainingScreen() {
       ),
     [gestures, gestureData, segmentDurationMs],
   );
+
+  const pendingTrainingSession = useMemo(
+    () => buildTrainingSession({
+      gestures,
+      gestureSamples: Object.fromEntries(
+        gestures.map((gesture) => [gesture.id, gestureData[gesture.id]?.samples ?? []]),
+      ),
+      sampleTarget,
+      segmentDurationMs,
+      featureSetId,
+    }),
+    [featureSetId, gestureData, gestures, sampleTarget, segmentDurationMs],
+  );
+  const holdoutEvaluationSummary = useMemo(
+    () => evaluateKnnModel(pendingTrainingSession),
+    [pendingTrainingSession],
+  );
+  const canRunHoldoutEvaluation = activeGestureCount >= 2 && minimumSamplesPerActiveGesture >= 2;
 
   useEffect(() => {
     setTargetSamplesInputValue(String(sampleTarget));
@@ -1211,15 +1244,7 @@ export default function TrainingScreen() {
   };
 
   const handleStartTesting = () => {
-    const session = buildTrainingSession({
-      gestures,
-      gestureSamples: Object.fromEntries(
-        gestures.map((gesture) => [gesture.id, gestureData[gesture.id]?.samples ?? []]),
-      ),
-      sampleTarget,
-      segmentDurationMs,
-    });
-    setTrainingSession(session);
+    setTrainingSession(pendingTrainingSession);
     setTestingSession(null);
     setActiveScreen('testing');
   };
@@ -1602,6 +1627,35 @@ export default function TrainingScreen() {
                       </button>
                     ))}
                   </div>
+                </div>
+
+                <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-white/90">Model Feature Set</p>
+                      <p className="text-xs text-white/45">Choose which feature vector the kNN model and leave-one-out evaluation use.</p>
+                    </div>
+                    <span className="text-sm text-white/75">{featureSetDefinition.shortLabel}</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {FEATURE_SET_OPTIONS.map((option) => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        onClick={() => setFeatureSetId(option.id)}
+                        className={`rounded-lg border px-3 py-2 text-sm transition-colors ${
+                          featureSetId === option.id
+                            ? 'border-cyan-400/30 bg-cyan-400/15 text-cyan-300'
+                            : 'border-white/10 bg-slate-950/50 text-white/70 hover:bg-white/10 hover:text-white'
+                        }`}
+                      >
+                        {option.shortLabel}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-white/45">
+                    {featureSetDefinition.description}
+                  </p>
                 </div>
 
                 <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
@@ -2224,6 +2278,76 @@ export default function TrainingScreen() {
                 </button>
               )}
             </div>
+            {activeGestureCount >= 2 && (
+              <div className="mt-4 w-full max-w-3xl rounded-xl border border-white/10 bg-white/5 p-4">
+                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                  <div>
+                    <div className="text-xs font-semibold tracking-[0.25em] uppercase text-white/50">
+                      Training Handoff
+                    </div>
+                    <div className="mt-1 text-sm font-medium text-white/90">
+                      Holdout Evaluation
+                    </div>
+                    <div className="mt-1 text-xs text-white/50">
+                      Feature Set: {featureSetDefinition.label}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 text-xs text-white/55 md:min-w-[18rem]">
+                    <div>
+                      <div className="text-white/40">Accuracy</div>
+                      <div className="mt-1 text-sm text-white/85">
+                        {canRunHoldoutEvaluation ? `${holdoutEvaluationSummary.accuracy.toFixed(1)}%` : '—'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-white/40">Unknown Rate</div>
+                      <div className="mt-1 text-sm text-white/85">
+                        {canRunHoldoutEvaluation ? `${holdoutEvaluationSummary.unknownRate.toFixed(1)}%` : '—'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-white/40">Evaluated</div>
+                      <div className="mt-1 text-sm text-white/85">
+                        {holdoutEvaluationSummary.evaluatedSamples} / {holdoutEvaluationSummary.totalSamples}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-white/40">Avg Confidence</div>
+                      <div className="mt-1 text-sm text-white/85">
+                        {canRunHoldoutEvaluation ? `${holdoutEvaluationSummary.averageConfidence.toFixed(1)}%` : '—'}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-3 space-y-2 text-xs text-white/55">
+                  {canRunHoldoutEvaluation ? (
+                    <>
+                      <div>
+                        <div className="text-white/40">Per-Gesture Accuracy</div>
+                        <div className="mt-1 text-white/75">
+                          {holdoutEvaluationSummary.gestureStats
+                            .map((entry) => `${entry.gestureName}: ${entry.accuracy.toFixed(1)}% (${entry.correctPredictions}/${entry.evaluatedSamples})`)
+                            .join(' | ')}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Confusions</div>
+                        <div className="mt-1 text-white/75">
+                          {holdoutEvaluationSummary.confusionMatrix
+                            .filter((entry) => entry.expectedGestureId !== entry.predictedGestureId)
+                            .map((entry) => `${entry.expectedGestureName}->${entry.predictedGestureName} x${entry.count}`)
+                            .join(' | ') || 'No confusion entries'}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-white/75">
+                      Record at least 2 samples for 2 gestures to run a leave-one-out comparison before testing.
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
             <p className="text-lg text-white/60 font-light">
               {feedback.instruction}
             </p>
