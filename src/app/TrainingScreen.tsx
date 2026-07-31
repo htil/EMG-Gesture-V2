@@ -23,6 +23,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Brain,
+  CircleHelp,
 } from 'lucide-react';
 import * as dfd from 'danfojs';
 import { useSignalSource, type SignalSourceMode } from './useSignalSource';
@@ -46,6 +47,7 @@ import {
   evaluateKnnModel,
   FEATURE_SET_OPTIONS,
   getFeatureSetDefinition,
+  extractEmgFeatures,
   getChannelMockSignalValue,
   type FeatureSetId,
   type Gesture,
@@ -90,6 +92,18 @@ interface DatasetPreviewSample {
   dataPoints: WaveformPoint[];
 }
 
+interface RawDataRow {
+  label: string;
+  index: number;
+  timeOffset: number;
+  value: number;
+}
+
+interface RawDataView {
+  sample: DatasetPreviewSample;
+  label: string;
+}
+
 type ChartPoint = WaveformPoint & {
   displayTime: number;
   pointIndex: number;
@@ -132,6 +146,81 @@ function formatWaveformValue(value: number): string {
 
 function formatDisplayTimeSeconds(seconds: number): string {
   return `${seconds.toFixed(3)} s`;
+}
+
+interface FeatureRow {
+  name: string;
+  value: string;
+}
+
+const NOT_CALCULATED = '**';
+
+/** Placeholder copy per feature — replace individually later. */
+const FEATURE_MORE_INFO: Record<string, string> = {
+  Min: 'Info here',
+  Max: 'Info here',
+  Range: 'Info here',
+  'Average Signal Strength': 'Info here',
+  RMS: 'Info here',
+  MAV: 'Info here',
+  'Standard Deviation': 'Info here',
+  Peak: 'Info here',
+  'Waveform Length': 'Info here',
+  'Zero Crossings': 'Info here',
+  'Slope Sign Changes': 'Info here',
+  'Willison Amplitude': 'Info here',
+  'Hjorth Mobility': 'Info here',
+  'Hjorth Complexity': 'Info here',
+};
+
+function formatFeatureValue(value: number, integer = false): string {
+  if (!Number.isFinite(value)) {
+    return NOT_CALCULATED;
+  }
+  return integer ? String(Math.round(value)) : formatWaveformValue(value);
+}
+
+function buildFeatureRows(sample: DatasetPreviewSample): FeatureRow[] {
+  const values = sample.dataPoints.map((point) => point.value);
+  const features = extractEmgFeatures(values);
+  const { minIndex, maxIndex } = computeMinMaxIndices(sample.dataPoints);
+  const min = minIndex >= 0 ? sample.dataPoints[minIndex].value : null;
+  const max = maxIndex >= 0 ? sample.dataPoints[maxIndex].value : null;
+
+  return [
+    { name: 'Min', value: min === null ? NOT_CALCULATED : formatWaveformValue(min) },
+    { name: 'Max', value: max === null ? NOT_CALCULATED : formatWaveformValue(max) },
+    { name: 'Range', value: NOT_CALCULATED },
+    { name: 'Average Signal Strength', value: NOT_CALCULATED },
+    { name: 'RMS', value: formatFeatureValue(features.rms) },
+    { name: 'MAV', value: formatFeatureValue(features.mav) },
+    { name: 'Standard Deviation', value: formatFeatureValue(features.std) },
+    { name: 'Peak', value: formatFeatureValue(features.peak) },
+    { name: 'Waveform Length', value: formatFeatureValue(features.waveformLength) },
+    { name: 'Zero Crossings', value: formatFeatureValue(features.zeroCrossings, true) },
+    { name: 'Slope Sign Changes', value: formatFeatureValue(features.slopeSignChanges, true) },
+    { name: 'Willison Amplitude', value: formatFeatureValue(features.willisonAmplitude, true) },
+    { name: 'Hjorth Mobility', value: formatFeatureValue(features.hjorthMobility) },
+    { name: 'Hjorth Complexity', value: formatFeatureValue(features.hjorthComplexity) },
+  ];
+}
+
+function buildRawDataRows(sample: DatasetPreviewSample, label: string): RawDataRow[] {
+  const points = sample.dataPoints;
+  if (points.length === 0) {
+    return [];
+  }
+
+  const durationMs = sample.durationSeconds * 1000;
+  const stepMs =
+    points.length > 1 ? durationMs / Math.max(points.length - 1, 1) : 0;
+
+  return points.map((point, index) => ({
+    label,
+    index,
+    timeOffset: Number((index * stepMs).toFixed(3)),
+    value: point.value,
+  }));
 }
 
 function computeMinMaxIndices(dataPoints: WaveformPoint[]) {
@@ -343,24 +432,378 @@ const SampleWaveform = memo(function SampleWaveform({
 
 const DatasetSampleCard = memo(function DatasetSampleCard({
   sample,
+  onViewRawData,
 }: {
   sample: DatasetPreviewSample;
+  onViewRawData: (sample: DatasetPreviewSample) => void;
 }) {
   return (
-    <article className="rounded-xl border border-white/10 bg-white/5 p-4">
-      <div className="mb-3 flex flex-col gap-1">
-        <h3 className="text-sm font-medium text-white/90">Sample {sample.sampleNumber}</h3>
-        <p className="text-xs text-white/55">
-          Recorded: {formatRecordedTimestamp(sample.timestamp)}
-        </p>
-        <p className="text-xs text-white/55">
-          Duration: {formatDurationSeconds(sample.durationSeconds)}
-        </p>
-      </div>
-      <SampleWaveform dataPoints={sample.dataPoints} />
-    </article>
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => onViewRawData(sample)}
+        className="absolute right-full top-1/2 z-10 flex h-1/2 w-3 -translate-y-1/2 items-center justify-center rounded-l-md rounded-r-none border border-r-0 border-white/10 bg-white/[0.12] text-white/50 transition-[width,colors] duration-200 ease-out hover:w-6 hover:bg-white/20 hover:text-white/85 focus-visible:w-6 focus-visible:bg-white/20 focus-visible:text-white/85 focus-visible:outline-none"
+        aria-label="View raw data"
+        title="View raw data"
+      >
+        <svg
+          viewBox="0 0 10 28"
+          className="h-4 w-2"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+          aria-hidden="true"
+        >
+          <path
+            d="M8 2 L2 14 L8 26"
+            stroke="currentColor"
+            strokeWidth="1.25"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button>
+      <article className="rounded-xl border border-white/10 bg-white/5 p-4">
+        <div className="mb-3 flex flex-col gap-1">
+          <h3 className="text-sm font-medium text-white/90">Sample {sample.sampleNumber}</h3>
+          <p className="text-xs text-white/55">
+            Recorded: {formatRecordedTimestamp(sample.timestamp)}
+          </p>
+          <p className="text-xs text-white/55">
+            Duration: {formatDurationSeconds(sample.durationSeconds)}
+          </p>
+        </div>
+        <SampleWaveform dataPoints={sample.dataPoints} />
+      </article>
+    </div>
   );
 });
+
+function RawDataSidebarPanel({
+  sample,
+  label,
+  onClose,
+  onExpandFeatures,
+  showExpandButton,
+}: {
+  sample: DatasetPreviewSample;
+  label: string;
+  onClose: () => void;
+  onExpandFeatures: () => void;
+  showExpandButton: boolean;
+}) {
+  const rows = useMemo(() => buildRawDataRows(sample, label), [sample, label]);
+
+  return (
+    <motion.aside
+      initial={{ x: '100%' }}
+      animate={{ x: 0 }}
+      exit={{ x: '100%' }}
+      transition={{ type: 'tween', duration: 0.35, ease: [0.32, 0.72, 0, 1] }}
+      className="absolute inset-0 flex h-full min-h-0 w-full flex-col border-r border-white/10 bg-slate-900 text-white"
+      aria-label="Raw Data"
+      data-raw-data-sidebar=""
+    >
+      <AnimatePresence>
+        {showExpandButton && (
+          <motion.button
+            type="button"
+            initial={{ width: 0, opacity: 0 }}
+            animate={{ width: 12, opacity: 1 }}
+            exit={{ width: 0, opacity: 0 }}
+            whileHover={{ width: 24 }}
+            whileFocus={{ width: 24 }}
+            transition={{ type: 'tween', duration: 0.2, ease: [0.32, 0.72, 0, 1] }}
+            onClick={onExpandFeatures}
+            className="absolute right-full top-1/4 z-10 flex h-24 -translate-y-1/2 items-center justify-center overflow-hidden rounded-l-md rounded-r-none border border-r-0 border-white/10 bg-white/[0.12] text-white/50 transition-colors duration-200 ease-out hover:bg-white/20 hover:text-white/85 focus-visible:bg-white/20 focus-visible:text-white/85 focus-visible:outline-none"
+            aria-label="View features"
+            title="View features"
+          >
+            <svg
+              viewBox="0 0 10 28"
+              className="h-4 w-2 shrink-0"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+              aria-hidden="true"
+            >
+              <path
+                d="M8 2 L2 14 L8 26"
+                stroke="currentColor"
+                strokeWidth="1.25"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </motion.button>
+        )}
+      </AnimatePresence>
+      <div className="flex shrink-0 items-start justify-between gap-3 border-b border-white/10 px-4 py-4">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold text-white">Raw Data</h2>
+          <p className="mt-1 text-sm text-white/50">
+            Sample {sample.sampleNumber} · {label}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-xs p-1 text-white/60 opacity-70 transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
+          aria-label="Close raw data"
+          title="Close raw data"
+        >
+          <X className="size-4" />
+        </button>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+        {rows.length === 0 ? (
+          <p className="px-4 py-6 text-sm text-white/55">No raw data available for this sample.</p>
+        ) : (
+          <table className="w-full border-collapse text-left text-sm">
+            <thead className="sticky top-0 z-10 bg-slate-950/95 backdrop-blur-sm">
+              <tr className="border-b border-white/15">
+                {(['label', 'index', 'timeOffset', 'value'] as const).map((column) => (
+                  <th
+                    key={column}
+                    className="border-r border-white/10 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-white/55 last:border-r-0"
+                  >
+                    {column}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr
+                  key={`${row.label}-${row.index}`}
+                  className="border-b border-white/10 odd:bg-white/[0.02] even:bg-transparent hover:bg-cyan-400/[0.04]"
+                >
+                  <td className="border-r border-white/10 px-3 py-1.5 text-white/80 last:border-r-0">
+                    {row.label}
+                  </td>
+                  <td className="border-r border-white/10 px-3 py-1.5 font-mono text-xs tabular-nums text-white/55 last:border-r-0">
+                    {row.index}
+                  </td>
+                  <td className="border-r border-white/10 px-3 py-1.5 font-mono text-xs tabular-nums text-white/55 last:border-r-0">
+                    {row.timeOffset}
+                  </td>
+                  <td className="border-r border-white/10 px-3 py-1.5 font-mono text-xs tabular-nums text-cyan-300/90 last:border-r-0">
+                    {formatWaveformValue(row.value)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </motion.aside>
+  );
+}
+
+function RawDataSidebar({
+  view,
+  onClose,
+  onExitComplete,
+  onExpandFeatures,
+  showExpandButton,
+}: {
+  view: RawDataView | null;
+  onClose: () => void;
+  onExitComplete?: () => void;
+  onExpandFeatures: () => void;
+  showExpandButton: boolean;
+}) {
+  return (
+    <AnimatePresence mode="sync" onExitComplete={onExitComplete}>
+      {view && (
+        <RawDataSidebarPanel
+          key={view.sample.id}
+          sample={view.sample}
+          label={view.label}
+          onClose={onClose}
+          onExpandFeatures={onExpandFeatures}
+          showExpandButton={showExpandButton}
+        />
+      )}
+    </AnimatePresence>
+  );
+}
+
+function FeaturesSidebarPanel({
+  sample,
+  label,
+  onClose,
+  onOpenMoreInfo,
+}: {
+  sample: DatasetPreviewSample;
+  label: string;
+  onClose: () => void;
+  onOpenMoreInfo: (featureName: string) => void;
+}) {
+  const rows = useMemo(() => buildFeatureRows(sample), [sample]);
+
+  return (
+    <motion.aside
+      initial={{ x: '100%' }}
+      animate={{ x: 0 }}
+      exit={{ x: '100%' }}
+      transition={{ type: 'tween', duration: 0.25, ease: [0.32, 0.72, 0, 1] }}
+      className="pointer-events-auto absolute inset-x-0 top-0 z-10 flex h-1/2 min-h-0 w-full flex-col border-b border-r border-white/10 bg-slate-900 text-white"
+      aria-label="Features"
+    >
+      <div className="flex shrink-0 items-start justify-between gap-3 border-b border-white/10 px-4 py-4">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold text-white">Features</h2>
+          <p className="mt-1 text-sm text-white/50">
+            Sample {sample.sampleNumber} · {label}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-xs p-1 text-white/60 opacity-70 transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
+          aria-label="Close features"
+          title="Close features"
+        >
+          <X className="size-4" />
+        </button>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+        <table className="w-full border-collapse text-left text-sm">
+          <thead className="sticky top-0 z-10 bg-slate-950/95 backdrop-blur-sm">
+            <tr className="border-b border-white/15">
+              <th className="border-r border-white/10 px-3 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-white/55">
+                Feature
+              </th>
+              <th className="px-3 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-white/55">
+                Value
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr
+                key={row.name}
+                className="border-b border-white/10 odd:bg-white/[0.02] even:bg-transparent hover:bg-cyan-400/[0.04]"
+              >
+                <td className="border-r border-white/10 px-3 py-2 text-white/80">
+                  <div className="flex items-center gap-2">
+                    <span>{row.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => onOpenMoreInfo(row.name)}
+                      className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-white/20 bg-white/5 text-white/55 transition-colors hover:border-white/35 hover:bg-white/10 hover:text-white/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
+                      aria-label={`More info about ${row.name}`}
+                      title="More info"
+                    >
+                      <CircleHelp className="h-3 w-3" aria-hidden="true" />
+                    </button>
+                  </div>
+                </td>
+                <td
+                  className={`px-3 py-2 font-mono text-xs tabular-nums ${
+                    row.value === NOT_CALCULATED ? 'text-white/35' : 'text-cyan-300/90'
+                  }`}
+                >
+                  {row.value}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </motion.aside>
+  );
+}
+
+function FeaturesSidebar({
+  view,
+  onClose,
+  onExitComplete,
+  onOpenMoreInfo,
+}: {
+  view: RawDataView | null;
+  onClose: () => void;
+  onExitComplete?: () => void;
+  onOpenMoreInfo: (featureName: string) => void;
+}) {
+  return (
+    <AnimatePresence mode="sync" onExitComplete={onExitComplete}>
+      {view && (
+        <FeaturesSidebarPanel
+          key={view.sample.id}
+          sample={view.sample}
+          label={view.label}
+          onClose={onClose}
+          onOpenMoreInfo={onOpenMoreInfo}
+        />
+      )}
+    </AnimatePresence>
+  );
+}
+
+function MoreInfoSidebarPanel({
+  featureName,
+  onClose,
+}: {
+  featureName: string;
+  onClose: () => void;
+}) {
+  const description = FEATURE_MORE_INFO[featureName] ?? 'Info here';
+
+  return (
+    <motion.aside
+      initial={{ y: '-100%' }}
+      animate={{ y: 0 }}
+      exit={{ y: '-100%' }}
+      transition={{ type: 'tween', duration: 0.28, ease: [0.32, 0.72, 0, 1] }}
+      className="pointer-events-auto absolute inset-x-0 bottom-0 z-[5] flex h-1/2 min-h-0 w-full flex-col border-r border-white/10 bg-slate-900 text-white"
+      aria-label="More Information"
+    >
+      <div className="flex shrink-0 items-start justify-between gap-3 border-b border-white/10 px-4 py-4">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold text-white">More Information</h2>
+          <p className="mt-1 text-sm text-white/50">{featureName}</p>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-xs p-1 text-white/60 opacity-70 transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
+          aria-label="Close more information"
+          title="Close more information"
+        >
+          <X className="size-4" />
+        </button>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4">
+        <p className="text-sm leading-relaxed text-white/75">{description}</p>
+      </div>
+    </motion.aside>
+  );
+}
+
+function MoreInfoSidebar({
+  featureName,
+  onClose,
+  onExitComplete,
+}: {
+  featureName: string | null;
+  onClose: () => void;
+  onExitComplete?: () => void;
+}) {
+  return (
+    <AnimatePresence mode="sync" onExitComplete={onExitComplete}>
+      {featureName && (
+        <MoreInfoSidebarPanel
+          key={featureName}
+          featureName={featureName}
+          onClose={onClose}
+        />
+      )}
+    </AnimatePresence>
+  );
+}
 
 function DatasetGestureNavigator({
   gestures,
@@ -428,10 +871,12 @@ function DatasetPreviewPanel({
   gestures,
   samplesByGestureId,
   initialGestureId,
+  onViewRawData,
 }: {
   gestures: Gesture[];
   samplesByGestureId: Record<string, DatasetPreviewSample[]>;
   initialGestureId: string | null;
+  onViewRawData: (view: RawDataView | null) => void;
 }) {
   const [selectedGestureId, setSelectedGestureId] = useState<string | null>(
     initialGestureId ?? gestures[0]?.id ?? null,
@@ -467,17 +912,32 @@ function DatasetPreviewPanel({
     [samplesByGestureId, selectedGestureId],
   );
 
+  const selectedGestureName = useMemo(
+    () => gestures.find((gesture) => gesture.id === selectedGestureId)?.name ?? '',
+    [gestures, selectedGestureId],
+  );
+
+  const handleSelectGestureId = (gestureId: string) => {
+    setSelectedGestureId(gestureId);
+    onViewRawData(null);
+  };
+
+  const handleViewRawData = (sample: DatasetPreviewSample) => {
+    onViewRawData({ sample, label: selectedGestureName });
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="shrink-0 space-y-4 border-b border-white/10 pb-4">
+      <div className="shrink-0 space-y-4 border-b border-white/10 px-4 pb-4">
         <DatasetGestureNavigator
           gestures={gestures}
           selectedGestureId={selectedGestureId}
-          onSelectGestureId={setSelectedGestureId}
+          onSelectGestureId={handleSelectGestureId}
         />
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto py-4 pr-1">
+      {/* Extra left padding leaves room for the extract button to double in width on hover. */}
+      <div className="min-h-0 flex-1 overflow-y-auto py-4 pl-8 pr-4">
         {gestures.length === 0 ? (
           <p className="text-sm text-white/55">Add gestures to begin collecting training samples.</p>
         ) : samples.length === 0 ? (
@@ -485,7 +945,11 @@ function DatasetPreviewPanel({
         ) : (
           <div className="flex flex-col gap-4">
             {samples.map((sample) => (
-              <DatasetSampleCard key={sample.id} sample={sample} />
+              <DatasetSampleCard
+                key={sample.id}
+                sample={sample}
+                onViewRawData={handleViewRawData}
+              />
             ))}
           </div>
         )}
@@ -504,6 +968,18 @@ export default function TrainingScreen() {
   const [selectedChannelIndex, setSelectedChannelIndex] = useState(0);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isDatasetPreviewOpen, setIsDatasetPreviewOpen] = useState(false);
+  const [rawDataView, setRawDataView] = useState<RawDataView | null>(null);
+  const [isRawDataSlotOpen, setIsRawDataSlotOpen] = useState(false);
+  const rawDataViewRef = useRef<RawDataView | null>(null);
+  const [isFeaturesOpen, setIsFeaturesOpen] = useState(false);
+  const [isFeaturesSlotOpen, setIsFeaturesSlotOpen] = useState(false);
+  const [moreInfoFeature, setMoreInfoFeature] = useState<string | null>(null);
+  const moreInfoFeatureRef = useRef<string | null>(null);
+  const pendingCloseRawAfterFeaturesRef = useRef(false);
+  const pendingCloseSheetAfterRawRef = useRef(false);
+  const pendingCloseFeaturesAfterMoreInfoRef = useRef(false);
+  const pendingRawDataViewRef = useRef<RawDataView | null>(null);
+  const isClosingDatasetPreviewRef = useRef(false);
   const [minRequired, setMinRequired] = useState(8);
   const [sampleTarget, setSampleTarget] = useState(12);
   const [targetSamplesInputValue, setTargetSamplesInputValue] = useState('12');
@@ -528,6 +1004,104 @@ export default function TrainingScreen() {
   );
   const previewPanelRef = useRef<HTMLDivElement>(null);
   const gestureDropdownRef = useRef<HTMLDivElement>(null);
+
+  rawDataViewRef.current = rawDataView;
+  moreInfoFeatureRef.current = moreInfoFeature;
+
+  const featuresView = isFeaturesOpen ? rawDataView : null;
+  const featuresViewRef = useRef<RawDataView | null>(null);
+  featuresViewRef.current = featuresView;
+
+  const beginCloseFeatures = useCallback(() => {
+    pendingRawDataViewRef.current = null;
+    if (moreInfoFeature !== null) {
+      pendingCloseFeaturesAfterMoreInfoRef.current = true;
+      setMoreInfoFeature(null);
+      return;
+    }
+    setIsFeaturesOpen(false);
+  }, [moreInfoFeature]);
+
+  const closeMoreInfo = useCallback(() => {
+    pendingCloseFeaturesAfterMoreInfoRef.current = false;
+    pendingRawDataViewRef.current = null;
+    setMoreInfoFeature(null);
+  }, []);
+
+  const openMoreInfo = useCallback((featureName: string) => {
+    pendingCloseFeaturesAfterMoreInfoRef.current = false;
+    setMoreInfoFeature(featureName);
+  }, []);
+
+  const showRawDataForSample = useCallback(
+    (view: RawDataView) => {
+      // Let More Information retract first; the swap runs on its exit.
+      if (moreInfoFeature !== null) {
+        pendingRawDataViewRef.current = view;
+        setMoreInfoFeature(null);
+        return;
+      }
+      setIsRawDataSlotOpen(true);
+      setRawDataView(view);
+    },
+    [moreInfoFeature],
+  );
+
+  const closeFeatures = useCallback(() => {
+    pendingCloseRawAfterFeaturesRef.current = false;
+    pendingCloseSheetAfterRawRef.current = false;
+    isClosingDatasetPreviewRef.current = false;
+    beginCloseFeatures();
+  }, [beginCloseFeatures]);
+
+  const openFeatures = useCallback(() => {
+    pendingCloseRawAfterFeaturesRef.current = false;
+    pendingCloseSheetAfterRawRef.current = false;
+    pendingCloseFeaturesAfterMoreInfoRef.current = false;
+    isClosingDatasetPreviewRef.current = false;
+    setMoreInfoFeature(null);
+    setIsFeaturesOpen(true);
+    setIsFeaturesSlotOpen(true);
+  }, []);
+
+  const closeRawData = useCallback(() => {
+    if (isClosingDatasetPreviewRef.current) {
+      return;
+    }
+    pendingCloseSheetAfterRawRef.current = false;
+    if (isFeaturesOpen || isFeaturesSlotOpen) {
+      pendingCloseRawAfterFeaturesRef.current = true;
+      beginCloseFeatures();
+      return;
+    }
+    setRawDataView(null);
+  }, [isFeaturesOpen, isFeaturesSlotOpen, beginCloseFeatures]);
+
+  const beginCloseDatasetPreview = useCallback(() => {
+    if (isClosingDatasetPreviewRef.current) {
+      return;
+    }
+    isClosingDatasetPreviewRef.current = true;
+
+    if (isFeaturesOpen || isFeaturesSlotOpen || moreInfoFeature !== null) {
+      pendingCloseRawAfterFeaturesRef.current = true;
+      pendingCloseSheetAfterRawRef.current = true;
+      beginCloseFeatures();
+      return;
+    }
+
+    if (rawDataView !== null || isRawDataSlotOpen) {
+      pendingCloseSheetAfterRawRef.current = true;
+      setRawDataView(null);
+      return;
+    }
+
+    isClosingDatasetPreviewRef.current = false;
+    pendingCloseRawAfterFeaturesRef.current = false;
+    pendingCloseSheetAfterRawRef.current = false;
+    pendingCloseFeaturesAfterMoreInfoRef.current = false;
+    setIsDatasetPreviewOpen(false);
+  }, [isFeaturesOpen, isFeaturesSlotOpen, moreInfoFeature, rawDataView, isRawDataSlotOpen, beginCloseFeatures]);
 
   const generateMockSignalValue = useCallback(() => {
     const cycleDurationMs = Math.max(segmentDurationMs, 1);
@@ -2003,23 +2577,129 @@ export default function TrainingScreen() {
             </SheetContent>
           </Sheet>
 
-          <Sheet open={isDatasetPreviewOpen} onOpenChange={setIsDatasetPreviewOpen}>
+          <Sheet
+            open={isDatasetPreviewOpen}
+            onOpenChange={(open) => {
+              if (open) {
+                isClosingDatasetPreviewRef.current = false;
+                pendingCloseRawAfterFeaturesRef.current = false;
+                pendingCloseSheetAfterRawRef.current = false;
+                pendingCloseFeaturesAfterMoreInfoRef.current = false;
+                pendingRawDataViewRef.current = null;
+                setMoreInfoFeature(null);
+                setIsDatasetPreviewOpen(true);
+                return;
+              }
+              beginCloseDatasetPreview();
+            }}
+          >
             <SheetContent
               side="right"
-              className="flex h-full w-full flex-col border-white/10 bg-slate-900 text-white sm:max-w-xl"
+              className={`gap-0 border-white/10 bg-transparent p-0 text-white/60 shadow-2xl ${
+                isFeaturesSlotOpen
+                  ? 'w-screen sm:max-w-none'
+                  : isRawDataSlotOpen
+                    ? 'w-[calc(min(36rem,100vw)+((100vw-min(36rem,100vw))/2))] sm:max-w-none'
+                    : 'w-full sm:max-w-xl'
+              }`}
             >
-              <SheetHeader className="shrink-0 border-b border-white/10 pb-4">
-                <SheetTitle className="text-white">Dataset Preview</SheetTitle>
-                <SheetDescription className="text-white/50">
-                  Review recorded samples and waveforms for each gesture.
-                </SheetDescription>
-              </SheetHeader>
-              <div className="min-h-0 flex-1 overflow-hidden px-4 pb-6">
-                <DatasetPreviewPanel
-                  gestures={gestures}
-                  samplesByGestureId={trainingSamplesByGestureId}
-                  initialGestureId={datasetPreviewGestureId}
-                />
+              <div className="flex h-full min-h-0 w-full flex-row">
+                {/* Fixed-width slots: sidebar panels are absolutely stacked inside so switching
+                    samples never changes row width and the panels to the right stay put. Overflow
+                    stays visible so each panel's edge button can protrude past its slot; sliding
+                    panels are hidden by the opaque panel painting above them. */}
+                {/* `isolate` keeps the Features/More Info z-order local to this slot so the
+                    whole slot still paints behind the Raw Data panel while sliding. */}
+                <div
+                  className={`relative isolate h-full min-h-0 shrink-0 pointer-events-none ${
+                    isFeaturesSlotOpen ? 'w-[calc((100vw-min(36rem,100vw))/2)]' : 'w-0'
+                  }`}
+                >
+                  <MoreInfoSidebar
+                    featureName={moreInfoFeature}
+                    onClose={closeMoreInfo}
+                    onExitComplete={() => {
+                      if (moreInfoFeatureRef.current) {
+                        return;
+                      }
+                      if (pendingCloseFeaturesAfterMoreInfoRef.current) {
+                        pendingCloseFeaturesAfterMoreInfoRef.current = false;
+                        pendingRawDataViewRef.current = null;
+                        setIsFeaturesOpen(false);
+                        return;
+                      }
+                      if (pendingRawDataViewRef.current) {
+                        const nextView = pendingRawDataViewRef.current;
+                        pendingRawDataViewRef.current = null;
+                        setIsRawDataSlotOpen(true);
+                        setRawDataView(nextView);
+                      }
+                    }}
+                  />
+                  <FeaturesSidebar
+                    view={featuresView}
+                    onClose={closeFeatures}
+                    onOpenMoreInfo={openMoreInfo}
+                    onExitComplete={() => {
+                      if (!featuresViewRef.current) {
+                        setMoreInfoFeature(null);
+                        setIsFeaturesSlotOpen(false);
+                        if (pendingCloseRawAfterFeaturesRef.current) {
+                          pendingCloseRawAfterFeaturesRef.current = false;
+                          setRawDataView(null);
+                        }
+                      }
+                    }}
+                  />
+                </div>
+                <div
+                  className={`relative h-full min-h-0 shrink-0 ${
+                    isRawDataSlotOpen ? 'w-[calc((100vw-min(36rem,100vw))/2)]' : 'w-0'
+                  }`}
+                >
+                  <RawDataSidebar
+                    view={rawDataView}
+                    onClose={closeRawData}
+                    onExpandFeatures={openFeatures}
+                    showExpandButton={!isFeaturesOpen && !isFeaturesSlotOpen}
+                    onExitComplete={() => {
+                      if (!rawDataViewRef.current) {
+                        setIsRawDataSlotOpen(false);
+                        if (pendingCloseSheetAfterRawRef.current) {
+                          pendingCloseSheetAfterRawRef.current = false;
+                          isClosingDatasetPreviewRef.current = false;
+                          setIsDatasetPreviewOpen(false);
+                        }
+                      }
+                    }}
+                  />
+                </div>
+                <div
+                  className={`relative flex h-full min-h-0 flex-col border-l border-white/10 bg-slate-900 text-white ${
+                    isRawDataSlotOpen ? 'w-[min(36rem,100vw)] shrink-0' : 'w-full'
+                  }`}
+                >
+                  <SheetHeader className="shrink-0 border-b border-white/10 pb-4">
+                    <SheetTitle className="text-white">Dataset Preview</SheetTitle>
+                    <SheetDescription className="text-white/50">
+                      Review recorded samples and waveforms for each gesture.
+                    </SheetDescription>
+                  </SheetHeader>
+                  <div className="min-h-0 flex-1 overflow-hidden pb-6">
+                    <DatasetPreviewPanel
+                      gestures={gestures}
+                      samplesByGestureId={trainingSamplesByGestureId}
+                      initialGestureId={datasetPreviewGestureId}
+                      onViewRawData={(view) => {
+                        if (view) {
+                          showRawDataForSample(view);
+                        } else {
+                          closeRawData();
+                        }
+                      }}
+                    />
+                  </div>
+                </div>
               </div>
             </SheetContent>
           </Sheet>
