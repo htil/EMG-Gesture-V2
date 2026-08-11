@@ -198,14 +198,15 @@ export function useSignalSource(
       setLiveConnectionMessage('Connected. Starting stream...');
 
       connection.onSample((sample) => {
+        const sampleTime = Date.now();
         const rawSample = sample.data[selectedChannelIndexRef.current] ?? 0;
         const scaledRawSample = rawSample * EMG_SIGNAL_MULTIPLIER;
         featureWindowRef.current.push({
-          time: sample.timestamp,
+          time: sampleTime,
           value: scaledRawSample
         });
         featureWindowRef.current = featureWindowRef.current.filter((point) => (
-          point.time >= sample.timestamp - FEATURE_WINDOW_MS
+          point.time >= sampleTime - FEATURE_WINDOW_MS
         ));
 
         const rms = Math.sqrt(
@@ -215,10 +216,10 @@ export function useSignalSource(
         const activityEnvelope = Math.max(0, rms / FEATURE_SIGNAL_SCALE);
 
         setLivePacketCount(count => count + 1);
-        sampleRateTimesRef.current.push(sample.timestamp);
-        sampleRateTimesRef.current = sampleRateTimesRef.current.filter((time) => time >= sample.timestamp - 1000);
+        sampleRateTimesRef.current.push(sampleTime);
+        sampleRateTimesRef.current = sampleRateTimesRef.current.filter((time) => time >= sampleTime - 1000);
         pendingRecordingPointsRef.current.push({
-          time: sample.timestamp,
+          time: sampleTime,
           value: activityEnvelope,
           raw: rawSample,
           activityEnvelope,

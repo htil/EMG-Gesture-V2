@@ -1936,6 +1936,7 @@ export default function TrainingScreen() {
     return (
       <TestingScreen
         trainingSession={trainingSession}
+        signalData={signalData}
         recordingSignalData={recordingSignalData}
         signalSourceMode={signalSourceMode}
         isStreaming={isStreaming}
@@ -1945,6 +1946,8 @@ export default function TrainingScreen() {
         liveDeviceName={liveDeviceName}
         selectedChannelIndex={selectedChannelIndex}
         isBluetoothAvailable={isBluetoothAvailable}
+        threshold={threshold}
+        displayWindowMs={displayWindowMs}
         onSessionComplete={setTestingSession}
         onShowResults={() => setActiveScreen('results')}
         onExit={() => setActiveScreen('training')}

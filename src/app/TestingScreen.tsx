@@ -1,5 +1,14 @@
 import React from "react";
 import { ChevronLeft, LogOut, Settings2 } from "lucide-react";
+import {
+  Area,
+  AreaChart,
+  ReferenceArea,
+  ReferenceLine,
+  ResponsiveContainer,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import {
     useState,
@@ -31,6 +40,7 @@ import {
   generateChannelMockEmgSample,
   generateNoiseMockEmgSample,
   TESTING_SESSION_LIMITS,
+  type EmgSample,
   type Gesture,
   type PredictionRecord,
   type TestingSessionData,
@@ -41,6 +51,7 @@ import {
 } from "./pipeline";
 import { generateMockEmgSample } from "./pipeline";
 import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useSignalSource";
+import { useGestureRecorder } from "./useGestureRecorder";
   
   type SessionState =
     | "idle"
@@ -61,8 +72,6 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
   
   const SESSION_DURATION = 60;
   const TARGET_INTERVAL = 4;
-  const ROLLING_WINDOW_READY_RATIO = 0.8;
-  const ROLLING_WINDOW_MIN_POINTS = 8;
   const TESTING_INPUT_OPTIONS: Array<{ value: TestingInputMode; label: string }> = [
     { value: "replay", label: "Replay Training" },
     { value: "mock-live", label: "Mock Live" },
@@ -254,8 +263,19 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
     );
   }
 
+  function trimSignalPointsToWindow(points: SignalPoint[], windowMs: number) {
+    if (points.length === 0) {
+      return points;
+    }
+
+    const newestTime = points[points.length - 1].time;
+    const cutoffTime = newestTime - windowMs;
+    return points.filter((point) => point.time >= cutoffTime);
+  }
+
   export default function TestingScreen({
     trainingSession,
+    signalData,
     recordingSignalData,
     signalSourceMode,
     isStreaming,
@@ -265,6 +285,8 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
     liveDeviceName,
     selectedChannelIndex,
     isBluetoothAvailable,
+    threshold,
+    displayWindowMs,
     onSessionComplete,
     onShowResults,
     onExit,
@@ -272,6 +294,7 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
     onSettingsChange,
   }: {
     trainingSession: TrainingSessionData;
+    signalData: SignalPoint[];
     recordingSignalData: SignalPoint[];
     signalSourceMode: SignalSourceMode;
     isStreaming: boolean;
@@ -281,6 +304,8 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
     liveDeviceName: string | null;
     selectedChannelIndex: number;
     isBluetoothAvailable: boolean;
+    threshold: number;
+    displayWindowMs: number;
     onSessionComplete?: (session: TestingSessionData) => void;
     onShowResults?: () => void;
     onExit?: () => void;
@@ -348,6 +373,12 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
       useState<TestingInputMode>("replay");
     const [latestDebug, setLatestDebug] = useState<PredictionRecord["debug"] | undefined>(undefined);
     const [windowSkipReason, setWindowSkipReason] = useState<string>("Idle");
+    const [sampleDrivenDisplayBuffer, setSampleDrivenDisplayBuffer] = useState<SignalPoint[]>([]);
+    const [mockLiveSignalData, setMockLiveSignalData] = useState<SignalPoint[]>([]);
+    const [lastCapturedSegmentRange, setLastCapturedSegmentRange] = useState<{
+      start: number;
+      end: number;
+    } | null>(null);
 
     const predictionsRef = useRef<PredictionRecord[]>([]);
     const sessionStartedAtRef = useRef<number | null>(null);
@@ -360,8 +391,11 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
     const counterRef = useRef(0);
     const currentTargetIdRef = useRef<string>("");
     const currentPhaseRef = useRef<TrialPhase>("trial");
-    const streamSessionCutoffTimeRef = useRef<number>(0);
-    const lastPredictedPointTimeRef = useRef<number | null>(null);
+    const sampleDrivenDisplaySampleRef = useRef<EmgSample | null>(null);
+    const sampleDrivenDisplayIndexRef = useRef(0);
+    const mockLiveSampleRef = useRef<EmgSample | null>(null);
+    const mockLiveSampleIndexRef = useRef(0);
+    const mockLiveSourceCounterRef = useRef(0);
 
     useEffect(() => {
       setTrialPeriodInput(String(settings.trialPeriodMs));
@@ -410,63 +444,52 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
 
       return null;
     }, [testingInputMode]);
-
-    const buildRollingWindowSample = useCallback(() => {
+    const effectiveStreamSignalData = useMemo(
+      () => (streamBackedMode === "mock" ? mockLiveSignalData : recordingSignalData),
+      [mockLiveSignalData, recordingSignalData, streamBackedMode],
+    );
+    const isTestingStreamActive = useMemo(() => {
       if (!streamBackedMode) {
-        return { sample: null, skipReason: "Not a stream-backed mode" };
+        return false;
       }
 
-      if (!isStreaming) {
-        return { sample: null, skipReason: "Stream inactive" };
+      if (sessionState !== "active" || sessionPhase !== "trial") {
+        return false;
       }
 
-      if (signalSourceMode !== streamBackedMode) {
-        return { sample: null, skipReason: "Waiting for selected source mode" };
+      if (streamBackedMode === "mock") {
+        return true;
       }
 
-      if (recordingSignalData.length === 0) {
-        return { sample: null, skipReason: "No streamed points yet" };
-      }
+      return signalSourceMode === "live" && isStreaming;
+    }, [isStreaming, sessionPhase, sessionState, signalSourceMode, streamBackedMode]);
 
-      const sessionEligiblePoints = recordingSignalData.filter(
-        (point) => point.time >= streamSessionCutoffTimeRef.current,
-      );
-      if (sessionEligiblePoints.length === 0) {
-        return { sample: null, skipReason: "Waiting for fresh session samples" };
-      }
-
-      const windowDurationMs = trainingSession.segmentDurationMs;
-      const latestTime = sessionEligiblePoints[sessionEligiblePoints.length - 1]?.time;
-      if (!latestTime) {
-        return { sample: null, skipReason: "Missing newest point timestamp" };
-      }
-
-      if (
-        lastPredictedPointTimeRef.current !== null &&
-        latestTime <= lastPredictedPointTimeRef.current
-      ) {
-        return { sample: null, skipReason: "No fresh samples since last prediction" };
-      }
-
-      const windowStart = latestTime - windowDurationMs;
-      const windowPoints = sessionEligiblePoints.filter((point) => point.time >= windowStart);
-      if (windowPoints.length < ROLLING_WINDOW_MIN_POINTS) {
-        return { sample: null, skipReason: `Need at least ${ROLLING_WINDOW_MIN_POINTS} points` };
-      }
-
-      const coverageMs = (windowPoints[windowPoints.length - 1]?.time ?? latestTime) - (windowPoints[0]?.time ?? latestTime);
-      if (coverageMs < windowDurationMs * ROLLING_WINDOW_READY_RATIO) {
-        return { sample: null, skipReason: `Window coverage ${coverageMs.toFixed(0)} ms is not ready` };
-      }
-
-      return {
-        sample: buildInferenceSample(windowPoints, windowDurationMs),
-        skipReason: null,
-      };
-    }, [isStreaming, recordingSignalData, signalSourceMode, streamBackedMode, trainingSession.segmentDurationMs]);
+    const {
+      recorderState,
+      currentCapturedSegment,
+      completedSegment,
+      acknowledgeCompletedSegment,
+      diagnostics: recorderDiagnostics,
+    } = useGestureRecorder({
+      signalPoints: effectiveStreamSignalData,
+      threshold,
+      segmentDurationMs: trainingSession.segmentDurationMs,
+      isStreaming: isTestingStreamActive,
+      resetKey: [
+        streamBackedMode ?? "sample",
+        sessionState,
+        sessionPhase,
+        targetGestureId,
+        trainingSession.segmentDurationMs,
+      ].join(":"),
+    });
 
     const ensureTestingSignalStream = useCallback(async () => {
       if (!streamBackedMode) {
+        return true;
+      }
+
+      if (streamBackedMode === "mock") {
         return true;
       }
 
@@ -488,10 +511,6 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
 
     const buildTestingSample = useCallback(
       (expectedGesture: Gesture, counter: number) => {
-        if (streamBackedMode) {
-          return buildRollingWindowSample().sample;
-        }
-
         if (testingInputMode === "noise") {
           return generateNoiseMockEmgSample(trainingSession.segmentDurationMs);
         }
@@ -523,7 +542,7 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
           trainingSession.segmentDurationMs,
         );
       },
-      [buildRollingWindowSample, streamBackedMode, testingInputMode, trainingSamplesByGesture, trainingSession.segmentDurationMs],
+      [testingInputMode, trainingSamplesByGesture, trainingSession.segmentDurationMs],
     );
   
     const stopSession = useCallback(() => {
@@ -592,19 +611,9 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
           currentPhaseRef.current = segment.phase;
           currentTargetIdRef.current = segment.gestureId;
 
-          // During rest, surface the gesture from the upcoming trial so the UI
-          // can preview (muted) what comes next.
-          let displayGestureId = segment.gestureId;
-          if (segment.phase === "rest") {
-            const upcomingTrial = timeline.find(
-              (entry) => entry.phase === "trial" && entry.startMs >= segment.endMs,
-            );
-            displayGestureId = upcomingTrial?.gestureId ?? segment.gestureId;
-          }
-
           const segmentRemainingMs = Math.max(0, segment.endMs - elapsedMs);
           setSessionPhase(segment.phase);
-          setTargetGestureId(displayGestureId);
+          setTargetGestureId(segment.gestureId);
           setSegmentDuration(segment.durationMs / 1000);
           setSegmentTimer(parseFloat((segmentRemainingMs / 1000).toFixed(1)));
         }
@@ -621,6 +630,10 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
       }, 100);
 
       predictionRef.current = setInterval(() => {
+        if (streamBackedMode) {
+          return;
+        }
+
         if (currentPhaseRef.current !== "trial") {
           return;
         }
@@ -633,17 +646,14 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
         const nextCounter = counterRef.current + 1;
         const emgSample = buildTestingSample(expectedGesture, nextCounter);
         if (!emgSample) {
-          if (streamBackedMode) {
-            const rollingResult = buildRollingWindowSample();
-            setWindowSkipReason(rollingResult.skipReason ?? "Window not ready");
-          }
           return;
         }
 
         counterRef.current = nextCounter;
+        sampleDrivenDisplaySampleRef.current = emgSample;
+        sampleDrivenDisplayIndexRef.current = 0;
         const result = predictionEngine.predict(emgSample);
         const entry = createPredictionRecord(result, expectedGesture, nextCounter, nextCounter - 1);
-        lastPredictedPointTimeRef.current = emgSample.timestamp;
         setWindowSkipReason(
           result.predictedGestureId === "unknown"
             ? "Classifier returned Unknown"
@@ -667,6 +677,7 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
       predictionEngine,
       settings.predictionFrequencyMs,
       stopSession,
+      streamBackedMode,
     ]);
 
     const beginSession = useCallback(() => {
@@ -696,7 +707,13 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
       setSegmentTimer((firstSegment?.durationMs ?? settings.trialPeriodMs) / 1000);
       setPredictedGestureId(gestures[0]?.id ?? "");
       setConfidence(94.0);
+      setLastCapturedSegmentRange(null);
       predictionsRef.current = [];
+      setSampleDrivenDisplayBuffer([]);
+      setMockLiveSignalData([]);
+      mockLiveSampleRef.current = null;
+      mockLiveSampleIndexRef.current = 0;
+      mockLiveSourceCounterRef.current = 0;
 
       startTicking();
     }, [gestures, settings, startTicking]);
@@ -736,9 +753,10 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
       setHistory([]);
       setLatestDebug(undefined);
       setWindowSkipReason("Waiting for countdown");
+      setSampleDrivenDisplayBuffer([]);
+      setMockLiveSignalData([]);
+      setLastCapturedSegmentRange(null);
       predictionsRef.current = [];
-      lastPredictedPointTimeRef.current = null;
-      streamSessionCutoffTimeRef.current = Date.now();
   
       let count = 3;
       countdownRef.current = setInterval(() => {
@@ -750,7 +768,63 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
         }
       }, 1000);
     }, [beginSession, ensureTestingSignalStream]);
-  
+
+    useEffect(() => {
+      if (!streamBackedMode || !completedSegment || sessionState !== "active") {
+        return;
+      }
+
+      const expectedGesture = findGesture(gestures, currentTargetIdRef.current) ?? gestures[0];
+      if (!expectedGesture) {
+        acknowledgeCompletedSegment();
+        return;
+      }
+
+      const emgSample = buildInferenceSample(
+        completedSegment.points.map((point) => ({
+          time: point.time,
+          raw: point.value,
+        })),
+        trainingSession.segmentDurationMs,
+      );
+
+      if (!emgSample) {
+        setWindowSkipReason("Completed segment was empty");
+        acknowledgeCompletedSegment();
+        return;
+      }
+
+      const nextCounter = counterRef.current + 1;
+      counterRef.current = nextCounter;
+
+      const result = predictionEngine.predict(emgSample);
+      const entry = createPredictionRecord(result, expectedGesture, nextCounter, nextCounter - 1);
+
+      setPredictedGestureId(entry.predictedGestureId);
+      setConfidence(entry.confidence);
+      setLatestDebug(entry.debug);
+      setWindowSkipReason(
+        result.predictedGestureId === "unknown"
+          ? "Triggered segment predicted Unknown"
+          : "Triggered segment predicted"
+      );
+      setLastCapturedSegmentRange({
+        start: completedSegment.triggeredAt,
+        end: completedSegment.completedAt,
+      });
+      predictionsRef.current = [...predictionsRef.current, entry];
+      setHistory((prev) => [entry, ...prev]);
+      acknowledgeCompletedSegment();
+    }, [
+      acknowledgeCompletedSegment,
+      completedSegment,
+      gestures,
+      predictionEngine,
+      sessionState,
+      streamBackedMode,
+      trainingSession.segmentDurationMs,
+    ]);
+
     useEffect(() => () => stopSession(), [stopSession]);
   
     const sessionMins = Math.floor(timeLeft / 60);
@@ -772,47 +846,204 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
     const predictedGesture = findGesture(gestures, predictedGestureId);
     const gc = gestureColors[targetGesture?.id ?? ""] ?? { ring: "#00d4ff", bar: "#00d4ff" };
     const latestPrediction = history[0];
-    const isMatch = latestPrediction?.matchStatus === "match";
-    const latestBufferedPoint = recordingSignalData[recordingSignalData.length - 1];
+    const activeMatchStatus = sessionPhase === "rest" ? null : latestPrediction?.matchStatus ?? null;
+    const isMatch = activeMatchStatus === "match";
+    const latestBufferedPoint = effectiveStreamSignalData[effectiveStreamSignalData.length - 1];
     const rollingWindowStats = useMemo(() => {
-      if (!streamBackedMode || recordingSignalData.length === 0) {
+      if (!streamBackedMode) {
         return {
-          rawPointCount: recordingSignalData.length,
-          rollingPointCount: 0,
-          rollingDurationMs: 0,
+          rawPointCount: 0,
+          capturePointCount: 0,
+          captureDurationMs: 0,
           newestPointAgeMs: null as number | null,
-          latestRawValue: latestBufferedPoint?.raw ?? null,
-          latestNormalizedActivity: latestBufferedPoint?.normalizedActivity ?? null,
-          windowEligible: false,
+          latestRawValue: null as number | null,
+          latestNormalizedActivity: null as number | null,
+          triggerArmed: false,
           skipReason: streamBackedMode ? "No streamed points yet" : "Using sample-driven mode",
         };
       }
 
-      const eligiblePoints = recordingSignalData.filter(
-        (point) => point.time >= streamSessionCutoffTimeRef.current,
-      );
-      const latestEligiblePoint = eligiblePoints[eligiblePoints.length - 1];
-      const newestTime = latestEligiblePoint?.time ?? latestBufferedPoint?.time ?? Date.now();
-      const cutoffTime = newestTime - trainingSession.segmentDurationMs;
-      const windowPoints = eligiblePoints.filter((point) => point.time >= cutoffTime);
-      const rollingDurationMs = windowPoints.length > 1
-        ? (windowPoints[windowPoints.length - 1]?.time ?? newestTime) - (windowPoints[0]?.time ?? newestTime)
-        : 0;
-      const windowEligible =
-        windowPoints.length >= ROLLING_WINDOW_MIN_POINTS &&
-        rollingDurationMs >= trainingSession.segmentDurationMs * ROLLING_WINDOW_READY_RATIO;
-
       return {
-        rawPointCount: eligiblePoints.length,
-        rollingPointCount: windowPoints.length,
-        rollingDurationMs,
-        newestPointAgeMs: latestEligiblePoint ? Math.max(0, Date.now() - newestTime) : null,
-        latestRawValue: latestEligiblePoint?.raw ?? null,
-        latestNormalizedActivity: latestEligiblePoint?.normalizedActivity ?? null,
-        windowEligible,
-        skipReason: latestEligiblePoint ? (windowEligible ? "Ready" : windowSkipReason) : "Waiting for fresh session samples",
+        rawPointCount: effectiveStreamSignalData.length,
+        capturePointCount: recorderDiagnostics.capturedRawPointCount,
+        captureDurationMs: recorderDiagnostics.elapsedCaptureDurationMs,
+        newestPointAgeMs: latestBufferedPoint ? Math.max(0, Date.now() - latestBufferedPoint.time) : null,
+        latestRawValue: latestBufferedPoint?.raw ?? null,
+        latestNormalizedActivity: latestBufferedPoint?.normalizedActivity ?? null,
+        triggerArmed: recorderState === "idle",
+        skipReason: recorderState === "recording"
+          ? "Capturing triggered segment"
+          : recorderState === "cooldown"
+            ? "Cooldown active"
+            : windowSkipReason,
       };
-    }, [latestBufferedPoint, recordingSignalData, streamBackedMode, trainingSession.segmentDurationMs, windowSkipReason]);
+    }, [
+      effectiveStreamSignalData.length,
+      latestBufferedPoint,
+      recorderDiagnostics.capturedRawPointCount,
+      recorderDiagnostics.elapsedCaptureDurationMs,
+      recorderState,
+      streamBackedMode,
+      windowSkipReason,
+    ]);
+    const previewGesture = targetGesture ?? gestures[0];
+    const sampleDrivenPreviewSample = useMemo(() => {
+      if (streamBackedMode || !previewGesture) {
+        return null;
+      }
+
+      return buildTestingSample(previewGesture, 1);
+    }, [buildTestingSample, previewGesture, streamBackedMode]);
+    useEffect(() => {
+      if (streamBackedMode) {
+        setSampleDrivenDisplayBuffer([]);
+        sampleDrivenDisplaySampleRef.current = null;
+        sampleDrivenDisplayIndexRef.current = 0;
+        return;
+      }
+
+      sampleDrivenDisplaySampleRef.current = latestPrediction?.emgSample ?? sampleDrivenPreviewSample;
+      sampleDrivenDisplayIndexRef.current = 0;
+      setSampleDrivenDisplayBuffer([]);
+    }, [latestPrediction?.emgSample, sampleDrivenPreviewSample, streamBackedMode]);
+
+    useEffect(() => {
+      if (streamBackedMode) {
+        return;
+      }
+
+      const interval = window.setInterval(() => {
+        const sample = sampleDrivenDisplaySampleRef.current;
+        if (!sample || sample.data.length === 0) {
+          return;
+        }
+
+        const nextIndex = sampleDrivenDisplayIndexRef.current % sample.data.length;
+        const value = sample.data[nextIndex];
+        const nextPoint: SignalPoint = {
+          time: Date.now(),
+          value,
+          raw: value,
+          activityEnvelope: value,
+          normalizedActivity: value,
+        };
+
+        setSampleDrivenDisplayBuffer((prev) => (
+          trimSignalPointsToWindow([...prev, nextPoint], displayWindowMs)
+        ));
+        sampleDrivenDisplayIndexRef.current = nextIndex + 1;
+      }, 50);
+
+      return () => window.clearInterval(interval);
+    }, [displayWindowMs, streamBackedMode]);
+    useEffect(() => {
+      if (streamBackedMode !== "mock") {
+        setMockLiveSignalData([]);
+        mockLiveSampleRef.current = null;
+        mockLiveSampleIndexRef.current = 0;
+        mockLiveSourceCounterRef.current = 0;
+        return;
+      }
+
+      const interval = window.setInterval(() => {
+        const currentTargetGesture =
+          findGesture(gestures, currentTargetIdRef.current) ??
+          gestures[0] ??
+          null;
+        if (!currentTargetGesture) {
+          return;
+        }
+
+        const isTrialPhase = currentPhaseRef.current === "trial";
+        let sample = mockLiveSampleRef.current;
+
+        if (!sample || mockLiveSampleIndexRef.current >= sample.data.length) {
+          if (isTrialPhase) {
+            const recordedSamples = trainingSamplesByGesture[currentTargetGesture.id] ?? [];
+            const sourceIndex = mockLiveSourceCounterRef.current;
+            sample = recordedSamples.length > 0
+              ? {
+                  ...recordedSamples[sourceIndex % recordedSamples.length],
+                  id: `mock-live-${currentTargetGesture.id}-${Date.now()}-${sourceIndex}`,
+                  timestamp: Date.now(),
+                }
+              : generateMockEmgSample(
+                  currentTargetGesture.id,
+                  currentTargetGesture.name,
+                  trainingSession.segmentDurationMs,
+                );
+            mockLiveSourceCounterRef.current = sourceIndex + 1;
+          } else {
+            sample = generateNoiseMockEmgSample(trainingSession.segmentDurationMs);
+          }
+
+          mockLiveSampleRef.current = sample;
+          mockLiveSampleIndexRef.current = 0;
+        }
+
+        const nextIndex = mockLiveSampleIndexRef.current;
+        const value = sample.data[nextIndex] ?? 0;
+        const nextPoint: SignalPoint = {
+          time: Date.now(),
+          value,
+          raw: value,
+          activityEnvelope: value,
+          normalizedActivity: value,
+        };
+
+        setMockLiveSignalData((prev) => trimSignalPointsToWindow([...prev, nextPoint], displayWindowMs));
+        mockLiveSampleIndexRef.current = nextIndex + 1;
+      }, 50);
+
+      return () => window.clearInterval(interval);
+    }, [displayWindowMs, gestures, streamBackedMode, trainingSamplesByGesture, trainingSession.segmentDurationMs]);
+    useEffect(() => {
+      if (streamBackedMode !== "mock") {
+        return;
+      }
+
+      setMockLiveSignalData([]);
+      mockLiveSampleRef.current = null;
+      mockLiveSampleIndexRef.current = 0;
+    }, [sessionPhase, streamBackedMode, targetGestureId]);
+
+    const testingDisplaySignalData = useMemo(() => {
+      if (streamBackedMode === "live") {
+        return signalData;
+      }
+
+      if (streamBackedMode === "mock") {
+        return mockLiveSignalData;
+      }
+
+      return sampleDrivenDisplayBuffer;
+    }, [mockLiveSignalData, sampleDrivenDisplayBuffer, signalData, streamBackedMode]);
+    const testingChartWindowEnd = Math.max(
+      testingDisplaySignalData[testingDisplaySignalData.length - 1]?.time ?? 0,
+      recordingSignalData[recordingSignalData.length - 1]?.time ?? 0,
+      Date.now(),
+    );
+    const testingChartWindowStart = testingChartWindowEnd - displayWindowMs;
+    const testingActivityChartData = testingDisplaySignalData.filter((point) => point.time >= testingChartWindowStart);
+    const activeCaptureRange = currentCapturedSegment.length > 0
+      ? {
+          start: currentCapturedSegment[0]?.time ?? testingChartWindowStart,
+          end: currentCapturedSegment[currentCapturedSegment.length - 1]?.time ?? testingChartWindowEnd,
+        }
+      : null;
+    const highlightedCaptureRange = activeCaptureRange ?? lastCapturedSegmentRange;
+    const testingChartWindowSeconds = displayWindowMs / 1000;
+    const testingActivityTickCount = 4;
+    const testingActivityTimeTicks = Array.from({ length: testingActivityTickCount }, (_, index) => {
+      const ratio = index / (testingActivityTickCount - 1);
+      const secondsFromNow = testingChartWindowSeconds * (1 - ratio);
+      return {
+        key: index,
+        label: index === testingActivityTickCount - 1
+          ? "now"
+          : `-${secondsFromNow.toFixed(secondsFromNow >= 2 ? 0 : 1)}s`,
+      };
+    });
     const testingInputStatusText = streamBackedMode
       ? streamBackedMode === "live"
         ? liveConnectionStatus === "streaming"
@@ -822,7 +1053,7 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
           : liveConnectionStatus === "error"
           ? liveConnectionMessage
           : "Live Ganglion selected. Start testing to connect."
-        : isStreaming && signalSourceMode === "mock"
+        : sessionState === "active"
         ? "Mock live stream active"
         : "Mock live selected. Start testing to begin streaming."
       : "Sample-driven testing mode";
@@ -1128,6 +1359,73 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
                   {testingInputStatusText}
                 </div>
               </div>
+
+              <div className="w-full max-w-3xl rounded-xl border border-white/10 bg-white/5 p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-semibold tracking-[0.25em] uppercase text-white/50">
+                      Activity / Envelope Preview
+                    </div>
+                    <div className="mt-1 text-sm text-white/55">
+                      Live stream context stays visible regardless of the selected testing mode.
+                    </div>
+                  </div>
+                  <div className="text-xs text-white/45">
+                    Window: {testingChartWindowSeconds.toFixed(1)} s
+                  </div>
+                </div>
+                <div className="h-48">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={testingActivityChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                      <defs>
+                        <linearGradient id="testingActivityPreviewGradient" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#22d3ee" stopOpacity={0.35} />
+                          <stop offset="95%" stopColor="#06b6d4" stopOpacity={0.05} />
+                        </linearGradient>
+                      </defs>
+                      <XAxis dataKey="time" type="number" domain={[testingChartWindowStart, testingChartWindowEnd]} hide />
+                      <YAxis domain={[0, 1]} hide />
+                      {highlightedCaptureRange ? (
+                        <ReferenceArea
+                          x1={highlightedCaptureRange.start}
+                          x2={highlightedCaptureRange.end}
+                          fill="#22d3ee"
+                          fillOpacity={activeCaptureRange ? 0.16 : 0.08}
+                          ifOverflow="extendDomain"
+                        />
+                      ) : null}
+                      <ReferenceLine
+                        y={threshold}
+                        stroke="#f59e0b"
+                        strokeWidth={2}
+                        strokeDasharray="8 4"
+                        opacity={0.65}
+                      />
+                      <ReferenceLine y={0} stroke="#ffffff" strokeWidth={1} opacity={0.1} />
+                      <Area
+                        type="monotone"
+                        dataKey="value"
+                        stroke="#22d3ee"
+                        strokeWidth={2}
+                        fill="url(#testingActivityPreviewGradient)"
+                        isAnimationActive={false}
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="mt-3 flex items-center justify-between text-[11px] text-white/45">
+                  {testingActivityTimeTicks.map((tick, index) => (
+                    <div
+                      key={`preview-${tick.key}`}
+                      className={`flex flex-col items-center ${index === testingActivityTickCount - 1 ? "items-end" : index === 0 ? "items-start" : ""}`}
+                      style={{ width: index === 0 || index === testingActivityTickCount - 1 ? "auto" : undefined }}
+                    >
+                      <span className="mb-1 h-2 w-px bg-white/15" />
+                      <span>{tick.label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
   
               <button
                 onClick={startSession}
@@ -1314,6 +1612,63 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
               </div>
   
               {/* Main section: Target + Prediction */}
+              <div className="rounded-xl border border-white/10 bg-white/5 p-5">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-semibold tracking-[0.25em] uppercase text-white/50">
+                      Activity / Envelope
+                    </div>
+                    <div className="mt-1 text-sm text-white/55">
+                      Stream activity stays visible during Testing regardless of prediction mode.
+                    </div>
+                  </div>
+                  <div className="text-xs text-white/45">
+                    Window: {testingChartWindowSeconds.toFixed(1)} s
+                  </div>
+                </div>
+                <div className="h-56">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={testingActivityChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                      <defs>
+                        <linearGradient id="testingActivityGradient" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#22d3ee" stopOpacity={0.35} />
+                          <stop offset="95%" stopColor="#06b6d4" stopOpacity={0.05} />
+                        </linearGradient>
+                      </defs>
+                      <XAxis dataKey="time" type="number" domain={[testingChartWindowStart, testingChartWindowEnd]} hide />
+                      <YAxis domain={[0, 1]} hide />
+                      <ReferenceLine
+                        y={threshold}
+                        stroke="#f59e0b"
+                        strokeWidth={2}
+                        strokeDasharray="8 4"
+                        opacity={0.65}
+                      />
+                      <ReferenceLine y={0} stroke="#ffffff" strokeWidth={1} opacity={0.1} />
+                      <Area
+                        type="monotone"
+                        dataKey="value"
+                        stroke="#22d3ee"
+                        strokeWidth={2}
+                        fill="url(#testingActivityGradient)"
+                        isAnimationActive={false}
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="mt-3 flex items-center justify-between text-[11px] text-white/45">
+                  {testingActivityTimeTicks.map((tick, index) => (
+                    <div
+                      key={tick.key}
+                      className={`flex flex-col items-center ${index === testingActivityTickCount - 1 ? "items-end" : index === 0 ? "items-start" : ""}`}
+                      style={{ width: index === 0 || index === testingActivityTickCount - 1 ? "auto" : undefined }}
+                    >
+                      <span className="mb-1 h-2 w-px bg-white/15" />
+                      <span>{tick.label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
               <div className="grid grid-cols-5 gap-4">
                 {/* Target Gesture — large, prominent */}
                 <div
@@ -1422,11 +1777,15 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
                     className="rounded-xl border p-4 flex items-center justify-between"
                     style={{
                       background:
-                        isMatch
+                        activeMatchStatus === null
+                          ? "rgba(148,163,184,0.06)"
+                          : isMatch
                           ? "rgba(74,222,128,0.06)"
                           : "rgba(255,77,109,0.06)",
                       borderColor:
-                        isMatch
+                        activeMatchStatus === null
+                          ? "rgba(148,163,184,0.25)"
+                          : isMatch
                           ? "rgba(74,222,128,0.25)"
                           : "rgba(255,77,109,0.25)",
                     }}
@@ -1438,18 +1797,24 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
                       className="text-sm font-bold px-3 py-1 rounded-full"
                       style={{
                         background:
-                          isMatch
+                          activeMatchStatus === null
+                            ? "rgba(148,163,184,0.15)"
+                            : isMatch
                             ? "rgba(74,222,128,0.15)"
                             : "rgba(255,77,109,0.15)",
                         color:
-                          isMatch
+                          activeMatchStatus === null
+                            ? "#94a3b8"
+                            : isMatch
                             ? "#4ade80"
                             : "#ff4d6d",
                       }}
                     >
-                      {isMatch
-                        ? "✓ Match"
-                        : "✗ Mismatch"}
+                      {activeMatchStatus === null
+                        ? "Rest"
+                        : isMatch
+                          ? "Match"
+                          : "Mismatch"}
                     </span>
                   </div>
   
@@ -1535,15 +1900,15 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
                         </div>
                       </div>
                       <div>
-                        <div className="text-white/40">Window Points</div>
+                        <div className="text-white/40">Recorder State</div>
                         <div className="mt-1 text-sm text-white/85">
-                          {rollingWindowStats.rollingPointCount}
+                          {streamBackedMode ? recorderState.toUpperCase() : "SAMPLE"}
                         </div>
                       </div>
                       <div>
-                        <div className="text-white/40">Window Duration</div>
+                        <div className="text-white/40">Capture Duration</div>
                         <div className="mt-1 text-sm text-white/85">
-                          {rollingWindowStats.rollingDurationMs.toFixed(0)} ms
+                          {rollingWindowStats.captureDurationMs.toFixed(0)} ms
                         </div>
                       </div>
                       <div>
@@ -1553,9 +1918,9 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
                         </div>
                       </div>
                       <div>
-                        <div className="text-white/40">Window Eligible</div>
+                        <div className="text-white/40">Trigger Armed</div>
                         <div className="mt-1 text-sm text-white/85">
-                          {rollingWindowStats.windowEligible ? "Yes" : "No"}
+                          {rollingWindowStats.triggerArmed ? "Yes" : "No"}
                         </div>
                       </div>
                       <div>
@@ -1590,7 +1955,7 @@ import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useS
                         <div className="text-white/40">Class Feature Means</div>
                         <div className="mt-1 text-white/75">
                           {modelDebugSummary.classDebugSummary.map((entry) => (
-                            `${entry.gestureName}: ZC ${entry.featureStats.zeroCrossings.mean.toFixed(1)}, SSC ${entry.featureStats.slopeSignChanges.mean.toFixed(1)}, WAMP ${entry.featureStats.willisonAmplitude.mean.toFixed(1)}`
+                            `${entry.gestureName}: ZC ${entry.featureStats.zeroCrossings?.mean?.toFixed(1) ?? "—"}, SSC ${entry.featureStats.slopeSignChanges?.mean?.toFixed(1) ?? "—"}, WAMP ${entry.featureStats.willisonAmplitude?.mean?.toFixed(1) ?? "—"}`
                           )).join(" | ")}
                         </div>
                       </div>
