@@ -52,6 +52,9 @@ import {
 import { generateMockEmgSample } from "./pipeline";
 import type { LiveConnectionStatus, SignalPoint, SignalSourceMode } from "./useSignalSource";
 import { useGestureRecorder } from "./useGestureRecorder";
+import { useStudy } from './study/StudyProvider';
+import { neutralCaptureDue } from './study/neutralTesting';
+import { cueMockTrial } from './study/mockGestureSignal';
   
   type SessionState =
     | "idle"
@@ -292,13 +295,14 @@ import { useGestureRecorder } from "./useGestureRecorder";
     onExit,
     settings,
     onSettingsChange,
+    onMockGestureCue,
   }: {
     trainingSession: TrainingSessionData;
     signalData: SignalPoint[];
     recordingSignalData: SignalPoint[];
     signalSourceMode: SignalSourceMode;
     isStreaming: boolean;
-    startStreamForMode: (mode: SignalSourceMode) => Promise<void>;
+    startStreamForMode: (mode: SignalSourceMode) => Promise<boolean>;
     liveConnectionStatus: LiveConnectionStatus;
     liveConnectionMessage: string;
     liveDeviceName: string | null;
@@ -311,7 +315,10 @@ import { useGestureRecorder } from "./useGestureRecorder";
     onExit?: () => void;
     settings: TestingSessionSettings;
     onSettingsChange: React.Dispatch<React.SetStateAction<TestingSessionSettings>>;
+    onMockGestureCue?: (gestureId: string) => void;
   }) {
+    const study = useStudy();
+    const isPilot = !!study.session;
     const gestures = trainingSession.gestures;
     const gestureColors = useMemo(() => buildGestureColorMap(gestures), [gestures]);
     const predictionEngine = useMemo(
@@ -366,11 +373,11 @@ import { useGestureRecorder } from "./useGestureRecorder";
     const [predictedGestureId, setPredictedGestureId] = useState<string>(
       gestures[0]?.id ?? "",
     );
-    const [confidence, setConfidence] = useState(94.0);
+    const [confidence, setConfidence] = useState(0);
     const [history, setHistory] =
       useState<PredictionRecord[]>([]);
     const [testingInputMode, setTestingInputMode] =
-      useState<TestingInputMode>("replay");
+      useState<TestingInputMode>(study.session ? (study.session.config.sourceMode === 'live' ? 'live-ganglion' : 'mock-live') : 'replay');
     const [latestDebug, setLatestDebug] = useState<PredictionRecord["debug"] | undefined>(undefined);
     const [windowSkipReason, setWindowSkipReason] = useState<string>("Idle");
     const [sampleDrivenDisplayBuffer, setSampleDrivenDisplayBuffer] = useState<SignalPoint[]>([]);
@@ -396,6 +403,10 @@ import { useGestureRecorder } from "./useGestureRecorder";
     const mockLiveSampleRef = useRef<EmgSample | null>(null);
     const mockLiveSampleIndexRef = useRef(0);
     const mockLiveSourceCounterRef = useRef(0);
+    const scheduledTrialsRef = useRef(new Set<number>());
+    const mockCuedTrialsRef = useRef(new Set<number>());
+    const predictedTrialsRef = useRef(new Set<number>());
+    const captureTargetsRef = useRef(new Map<string, { gestureId: string; trialIndex: number }>());
 
     useEffect(() => {
       setTrialPeriodInput(String(settings.trialPeriodMs));
@@ -445,8 +456,8 @@ import { useGestureRecorder } from "./useGestureRecorder";
       return null;
     }, [testingInputMode]);
     const effectiveStreamSignalData = useMemo(
-      () => (streamBackedMode === "mock" ? mockLiveSignalData : recordingSignalData),
-      [mockLiveSignalData, recordingSignalData, streamBackedMode],
+      () => (streamBackedMode === "mock" && !isPilot ? mockLiveSignalData : recordingSignalData),
+      [mockLiveSignalData, recordingSignalData, streamBackedMode, isPilot],
     );
     const isTestingStreamActive = useMemo(() => {
       if (!streamBackedMode) {
@@ -457,24 +468,35 @@ import { useGestureRecorder } from "./useGestureRecorder";
         return false;
       }
 
-      if (streamBackedMode === "mock") {
+      if (study.blocked) return false;
+      if (streamBackedMode === "mock" && !isPilot) {
         return true;
       }
 
-      return signalSourceMode === "live" && isStreaming;
-    }, [isStreaming, sessionPhase, sessionState, signalSourceMode, streamBackedMode]);
+      return signalSourceMode === streamBackedMode && isStreaming;
+    }, [isStreaming, sessionPhase, sessionState, signalSourceMode, streamBackedMode, isPilot, study.blocked]);
 
     const {
       recorderState,
       currentCapturedSegment,
       completedSegment,
       acknowledgeCompletedSegment,
+      startRecording,
       diagnostics: recorderDiagnostics,
     } = useGestureRecorder({
       signalPoints: effectiveStreamSignalData,
       threshold,
       segmentDurationMs: trainingSession.segmentDurationMs,
       isStreaming: isTestingStreamActive,
+      triggerMode: isPilot ? 'manual' : 'signal',
+      preTriggerWindowMs: isPilot ? 0 : undefined,
+      onEvent: event => {
+        if (event.type === 'capture_triggered') {
+          const trial = timelineRef.current.find(t => t.phase === 'trial' && elapsedMsRef.current >= t.startMs && elapsedMsRef.current < t.endMs);
+          captureTargetsRef.current.set(event.attemptId, { gestureId: currentTargetIdRef.current, trialIndex: trial?.trialIndex ?? -1 });
+        }
+        study.log(`testing_${event.type}`, { ...event, ...captureTargetsRef.current.get(event.attemptId), input: testingInputMode }, event.time);
+      },
       resetKey: [
         streamBackedMode ?? "sample",
         sessionState,
@@ -484,12 +506,25 @@ import { useGestureRecorder } from "./useGestureRecorder";
       ].join(":"),
     });
 
+    useEffect(() => {
+      if (!isPilot || !isTestingStreamActive) return;
+      const trial = timelineRef.current.find(t => elapsedMsRef.current >= t.startMs && elapsedMsRef.current < t.endMs);
+      // Cue the source once per trial, even when adjacent trials use the same gesture.
+      // The cue selects mock input only; it is never passed to feature extraction/kNN.
+      if (signalSourceMode === 'mock' && onMockGestureCue) {
+        cueMockTrial(trial, mockCuedTrialsRef.current, onMockGestureCue);
+      }
+      if (trial && !scheduledTrialsRef.current.has(trial.trialIndex) && neutralCaptureDue(trial, elapsedMsRef.current, trainingSession.segmentDurationMs)) {
+        if (startRecording('scheduled')) scheduledTrialsRef.current.add(trial.trialIndex);
+      }
+    }, [isPilot, isTestingStreamActive, segmentTimer, startRecording, trainingSession.segmentDurationMs, signalSourceMode, targetGestureId, onMockGestureCue]);
+
     const ensureTestingSignalStream = useCallback(async () => {
       if (!streamBackedMode) {
         return true;
       }
 
-      if (streamBackedMode === "mock") {
+      if (streamBackedMode === "mock" && !isPilot) {
         return true;
       }
 
@@ -502,12 +537,11 @@ import { useGestureRecorder } from "./useGestureRecorder";
       }
 
       try {
-        await startStreamForMode(streamBackedMode);
-        return true;
+        return await startStreamForMode(streamBackedMode);
       } catch {
         return false;
       }
-    }, [isBluetoothAvailable, isStreaming, signalSourceMode, startStreamForMode, streamBackedMode]);
+    }, [isBluetoothAvailable, isStreaming, signalSourceMode, startStreamForMode, streamBackedMode, isPilot]);
 
     const buildTestingSample = useCallback(
       (expectedGesture: Gesture, counter: number) => {
@@ -555,9 +589,10 @@ import { useGestureRecorder } from "./useGestureRecorder";
 
     const applySettingValue = useCallback(
       (key: keyof TestingSessionSettings, nextValue: number) => {
+        if (isPilot) return;
         onSettingsChange((prev) => ({ ...prev, [key]: clampSetting(nextValue, key) }));
       },
-      [onSettingsChange],
+      [onSettingsChange, isPilot],
     );
 
     const commitSettingInput = useCallback(
@@ -690,6 +725,12 @@ import { useGestureRecorder } from "./useGestureRecorder";
       const totalSeconds = totalMs / 1000;
       const firstSegment = timeline[0];
       const firstTargetId = firstSegment?.gestureId ?? gestures[0]?.id ?? "";
+      scheduledTrialsRef.current.clear();
+      mockCuedTrialsRef.current.clear();
+      predictedTrialsRef.current.clear();
+      captureTargetsRef.current.clear();
+      study.log('testing_started', { trainingSessionId: trainingSession.id, input: testingInputMode,
+        segmentation: isPilot ? 'cue-timed' : 'diagnostic', settings, timeline });
 
       timelineRef.current = timeline;
       totalMsRef.current = totalMs;
@@ -706,7 +747,7 @@ import { useGestureRecorder } from "./useGestureRecorder";
       setSegmentDuration((firstSegment?.durationMs ?? settings.trialPeriodMs) / 1000);
       setSegmentTimer((firstSegment?.durationMs ?? settings.trialPeriodMs) / 1000);
       setPredictedGestureId(gestures[0]?.id ?? "");
-      setConfidence(94.0);
+      setConfidence(0);
       setLastCapturedSegmentRange(null);
       predictionsRef.current = [];
       setSampleDrivenDisplayBuffer([]);
@@ -716,17 +757,38 @@ import { useGestureRecorder } from "./useGestureRecorder";
       mockLiveSourceCounterRef.current = 0;
 
       startTicking();
-    }, [gestures, settings, startTicking]);
+    }, [gestures, settings, startTicking, study.log, trainingSession.id, testingInputMode, isPilot]);
 
     const pauseSession = useCallback(() => {
       stopSession();
       setSessionState("paused");
-    }, [stopSession]);
+      study.log('testing_paused', { elapsedMs: elapsedMsRef.current });
+    }, [stopSession, study.log]);
 
-    const resumeSession = useCallback(() => {
+    const resumeSession = useCallback(async () => {
+      if (!await ensureTestingSignalStream()) return;
       setSessionState("active");
       startTicking();
-    }, [startTicking]);
+      study.log('testing_resumed', { elapsedMs: elapsedMsRef.current });
+    }, [startTicking, ensureTestingSignalStream, study.log]);
+
+    useEffect(() => {
+      if (isPilot && sessionState === 'active' && (!isStreaming || study.blocked)) {
+        pauseSession();
+        study.log('testing_interrupted', { reason: liveConnectionMessage });
+      }
+    }, [isPilot, sessionState, isStreaming, study.blocked, pauseSession, study.log, liveConnectionMessage]);
+
+    useEffect(() => {
+      if (sessionState !== 'active') return;
+      const trial = timelineRef.current.find(t => elapsedMsRef.current >= t.startMs && elapsedMsRef.current < t.endMs);
+      if (!trial) return;
+      study.log('testing_phase', { ...trial });
+      if (trial.phase === 'rest' && !predictedTrialsRef.current.has(trial.trialIndex)) {
+        study.log('testing_trial_missing', { trialIndex: trial.trialIndex, gestureId: trial.gestureId,
+          reason: scheduledTrialsRef.current.has(trial.trialIndex) ? 'capture_failed_or_interrupted' : 'no_complete_window' });
+      }
+    }, [sessionPhase, targetGestureId, sessionState, study.log]);
 
     const finishSession = useCallback(() => {
       stopSession();
@@ -737,12 +799,14 @@ import { useGestureRecorder } from "./useGestureRecorder";
     }, [buildSessionData, onSessionComplete, onShowResults, stopSession]);
 
     const handleExitConfirm = useCallback(() => {
+      study.log('testing_exited', { predictions: predictionsRef.current.length, elapsedMs: elapsedMsRef.current });
       stopSession();
       setIsExitDialogOpen(false);
       onExit?.();
-    }, [onExit, stopSession]);
+    }, [onExit, stopSession, study.log]);
   
     const startSession = useCallback(async () => {
+      if (!modelDebugSummary.isReady || study.blocked) return;
       const inputReady = await ensureTestingSignalStream();
       if (!inputReady) {
         return;
@@ -767,14 +831,15 @@ import { useGestureRecorder } from "./useGestureRecorder";
           beginSession();
         }
       }, 1000);
-    }, [beginSession, ensureTestingSignalStream]);
+    }, [beginSession, ensureTestingSignalStream, modelDebugSummary.isReady, study.blocked]);
 
     useEffect(() => {
       if (!streamBackedMode || !completedSegment || sessionState !== "active") {
         return;
       }
 
-      const expectedGesture = findGesture(gestures, currentTargetIdRef.current) ?? gestures[0];
+      const targetAtCapture = captureTargetsRef.current.get(completedSegment.id);
+      const expectedGesture = findGesture(gestures, targetAtCapture?.gestureId ?? currentTargetIdRef.current) ?? gestures[0];
       if (!expectedGesture) {
         acknowledgeCompletedSegment();
         return;
@@ -799,6 +864,9 @@ import { useGestureRecorder } from "./useGestureRecorder";
 
       const result = predictionEngine.predict(emgSample);
       const entry = createPredictionRecord(result, expectedGesture, nextCounter, nextCounter - 1);
+      if (targetAtCapture) predictedTrialsRef.current.add(targetAtCapture.trialIndex);
+      study.log('testing_prediction', { attemptId: completedSegment.id, trialIndex: targetAtCapture?.trialIndex, record: entry,
+        trainingSessionId: trainingSession.id });
 
       setPredictedGestureId(entry.predictedGestureId);
       setConfidence(entry.confidence);
@@ -937,7 +1005,7 @@ import { useGestureRecorder } from "./useGestureRecorder";
       return () => window.clearInterval(interval);
     }, [displayWindowMs, streamBackedMode]);
     useEffect(() => {
-      if (streamBackedMode !== "mock") {
+      if (streamBackedMode !== "mock" || isPilot) {
         setMockLiveSignalData([]);
         mockLiveSampleRef.current = null;
         mockLiveSampleIndexRef.current = 0;
@@ -996,7 +1064,7 @@ import { useGestureRecorder } from "./useGestureRecorder";
       }, 50);
 
       return () => window.clearInterval(interval);
-    }, [displayWindowMs, gestures, streamBackedMode, trainingSamplesByGesture, trainingSession.segmentDurationMs]);
+    }, [displayWindowMs, gestures, streamBackedMode, trainingSamplesByGesture, trainingSession.segmentDurationMs, isPilot]);
     useEffect(() => {
       if (streamBackedMode !== "mock") {
         return;
@@ -1008,6 +1076,7 @@ import { useGestureRecorder } from "./useGestureRecorder";
     }, [sessionPhase, streamBackedMode, targetGestureId]);
 
     const testingDisplaySignalData = useMemo(() => {
+      if (isPilot) return signalData;
       if (streamBackedMode === "live") {
         return signalData;
       }
@@ -1017,7 +1086,7 @@ import { useGestureRecorder } from "./useGestureRecorder";
       }
 
       return sampleDrivenDisplayBuffer;
-    }, [mockLiveSignalData, sampleDrivenDisplayBuffer, signalData, streamBackedMode]);
+    }, [mockLiveSignalData, sampleDrivenDisplayBuffer, signalData, streamBackedMode, isPilot]);
     const testingChartWindowEnd = Math.max(
       testingDisplaySignalData[testingDisplaySignalData.length - 1]?.time ?? 0,
       recordingSignalData[recordingSignalData.length - 1]?.time ?? 0,
@@ -1188,7 +1257,8 @@ import { useGestureRecorder } from "./useGestureRecorder";
                     </SheetDescription>
                   </SheetHeader>
 
-                  <div className="flex flex-col gap-6 overflow-y-auto px-4 pb-6">
+                  <fieldset disabled={isPilot} className="flex min-w-0 flex-col gap-6 overflow-y-auto px-4 pb-6">
+                    {isPilot && <p className="text-sm text-white/60">Same cue-timed capture and settings for both conditions. One prediction per trial.</p>}
                     <NumericSettingField
                       title="Trial Period"
                       description="How long each target gesture remains displayed."
@@ -1269,7 +1339,7 @@ import { useGestureRecorder } from "./useGestureRecorder";
                         </div>
                       </div>
                     </div>
-                  </div>
+                  </fieldset>
                 </SheetContent>
               </Sheet>
             )}
@@ -1336,11 +1406,12 @@ import { useGestureRecorder } from "./useGestureRecorder";
                     Testing Input
                   </div>
                   <div className="mt-1 text-sm text-white/55">
-                    Choose whether testing replays recorded mock samples or probes the model with a different mock waveform.
+                    {isPilot ? 'Follow each gesture cue. One fixed-duration sample is captured automatically per trial, using the same timing in both conditions.' :
+                      'Choose whether testing replays recorded mock samples or probes the model with a different mock waveform.'}
                   </div>
                 </div>
                 <div className="flex flex-wrap justify-center gap-2">
-                  {TESTING_INPUT_OPTIONS.map((option) => (
+                  {TESTING_INPUT_OPTIONS.filter(option => !isPilot || option.value === testingInputMode).map((option) => (
                     <button
                       key={option.value}
                       onClick={() => setTestingInputMode(option.value)}

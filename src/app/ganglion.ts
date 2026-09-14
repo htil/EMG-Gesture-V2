@@ -128,6 +128,7 @@ export async function connectGanglion(): Promise<GanglionConnection> {
   const disconnectedListeners = new Set<() => void>();
   const rawDataPacketToSample = constants.rawDataToSampleObjectDefault(channelCount);
   const server = await device.gatt.connect();
+  try {
   const service = await server.getPrimaryService(GANGLION_SERVICE_UUID);
   const receiveCharacteristic = await service.getCharacteristic(GANGLION_RECEIVE_UUID);
   const sendCharacteristic = await service.getCharacteristic(GANGLION_SEND_UUID);
@@ -176,6 +177,10 @@ export async function connectGanglion(): Promise<GanglionConnection> {
       disconnectedListeners.add(callback);
     },
   };
+  } catch (error) {
+    if (server.connected) server.disconnect();
+    throw error;
+  }
 }
 
 function dataViewToBytes(value?: DataView) {

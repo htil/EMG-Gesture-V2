@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { connectGanglion as connectGanglionDevice, isWebBluetoothAvailable, type GanglionConnection } from './ganglion';
 
 export type SignalPoint = {
+  sequence?: number;
   time: number;
   value: number;
   raw: number;
@@ -20,7 +21,7 @@ type UseSignalSourceResult = {
   isStreaming: boolean;
   selectSignalSourceMode: (mode: SignalSourceMode) => Promise<void>;
   startStream: () => Promise<void>;
-  startStreamForMode: (mode: SignalSourceMode) => Promise<void>;
+  startStreamForMode: (mode: SignalSourceMode) => Promise<boolean>;
   stopStream: () => Promise<void>;
   liveConnectionStatus: LiveConnectionStatus;
   liveConnectionMessage: string;
@@ -28,6 +29,7 @@ type UseSignalSourceResult = {
   livePacketCount: number;
   liveDisplayScale: number;
   liveSampleRateHz: number;
+  activityReference: { baseline: number; upper: number };
   isBluetoothAvailable: boolean;
 };
 
@@ -72,11 +74,13 @@ export function useSignalSource(
   generateMockSignalValue: () => number,
   displayWindowMs: number = 3000,
   selectedChannelIndex: number = 0,
-  displaySensitivity: number = 1
+  displaySensitivity: number = 1,
+  fixedActivityReference?: { baseline: number; upper: number },
+  initialSourceMode: SignalSourceMode = 'mock',
 ): UseSignalSourceResult {
   const [signalData, setSignalData] = useState<SignalPoint[]>([]);
   const [recordingSignalData, setRecordingSignalData] = useState<SignalPoint[]>([]);
-  const [signalSourceMode, setSignalSourceMode] = useState<SignalSourceMode>('mock');
+  const [signalSourceMode, setSignalSourceMode] = useState<SignalSourceMode>(initialSourceMode);
   const [isStreaming, setIsStreaming] = useState(false);
   const [liveConnectionStatus, setLiveConnectionStatus] = useState<LiveConnectionStatus>('disconnected');
   const [liveConnectionMessage, setLiveConnectionMessage] = useState('Idle. Select a source and start stream.');
@@ -93,6 +97,11 @@ export function useSignalSource(
   const selectedChannelIndexRef = useRef(selectedChannelIndex);
   const sampleRateTimesRef = useRef<number[]>([]);
   const displaySensitivityRef = useRef(displaySensitivity);
+  const sequenceRef = useRef(0);
+  const generationRef = useRef(0);
+  const lastArrivalRef = useRef(0);
+  const fixedReferenceRef = useRef(fixedActivityReference);
+  fixedReferenceRef.current = fixedActivityReference;
 
   useEffect(() => {
     displaySensitivityRef.current = displaySensitivity;
@@ -152,6 +161,8 @@ export function useSignalSource(
   }, []);
 
   const selectSignalSourceMode = useCallback(async (mode: SignalSourceMode) => {
+    generationRef.current += 1;
+    setIsStreaming(false);
     await disconnectGanglion();
     setIsStreaming(false);
     setSignalSourceMode(mode);
@@ -166,6 +177,7 @@ export function useSignalSource(
   }, [disconnectGanglion, resetDisplayState]);
 
   const startMockStream = useCallback(async () => {
+    generationRef.current += 1;
     await disconnectGanglion();
     resetDisplayState();
     setSignalSourceMode('mock');
@@ -176,10 +188,12 @@ export function useSignalSource(
   }, [disconnectGanglion, resetDisplayState]);
 
   const connectGanglion = useCallback(async () => {
+    const generation = ++generationRef.current;
+    setIsStreaming(false);
     if (!isWebBluetoothAvailable()) {
       setLiveConnectionStatus('error');
       setLiveConnectionMessage('Web Bluetooth needs Chrome or Edge on localhost/HTTPS.');
-      return;
+      return false;
     }
 
     await disconnectGanglion();
@@ -192,13 +206,16 @@ export function useSignalSource(
       setLiveConnectionMessage('Choose your Ganglion in the Bluetooth prompt.');
 
       const connection = await connectGanglionDevice();
+      if (generation !== generationRef.current) { connection.disconnect(); return false; }
       ganglionRef.current = connection;
       setLiveDeviceName(connection.deviceName);
       setLiveConnectionStatus('connected');
       setLiveConnectionMessage('Connected. Starting stream...');
 
       connection.onSample((sample) => {
+        if (ganglionRef.current !== connection || generation !== generationRef.current) return;
         const sampleTime = Date.now();
+        lastArrivalRef.current = sampleTime;
         const rawSample = sample.data[selectedChannelIndexRef.current] ?? 0;
         const scaledRawSample = rawSample * EMG_SIGNAL_MULTIPLIER;
         featureWindowRef.current.push({
@@ -219,6 +236,7 @@ export function useSignalSource(
         sampleRateTimesRef.current.push(sampleTime);
         sampleRateTimesRef.current = sampleRateTimesRef.current.filter((time) => time >= sampleTime - 1000);
         pendingRecordingPointsRef.current.push({
+          sequence: ++sequenceRef.current,
           time: sampleTime,
           value: activityEnvelope,
           raw: rawSample,
@@ -228,9 +246,9 @@ export function useSignalSource(
       });
 
       connection.onDisconnected(() => {
-        if (ganglionRef.current === connection) {
-          ganglionRef.current = null;
-        }
+        if (ganglionRef.current !== connection) return;
+        ganglionRef.current = null;
+        pendingRecordingPointsRef.current = [];
 
         setIsStreaming(false);
         setLiveConnectionStatus('disconnected');
@@ -239,25 +257,30 @@ export function useSignalSource(
       });
 
       await connection.startStreaming();
+      if (generation !== generationRef.current || ganglionRef.current !== connection) { connection.disconnect(); return false; }
+      lastArrivalRef.current = Date.now();
       setIsStreaming(true);
       setLiveConnectionStatus('streaming');
       setLiveConnectionMessage('Live Ganglion stream active.');
+      return true;
     } catch (error) {
+      if (generation !== generationRef.current) return false;
       await disconnectGanglion();
       setIsStreaming(false);
       setLiveConnectionStatus('error');
       setLiveConnectionMessage(error instanceof Error ? error.message : 'Unable to connect to Ganglion.');
       setLiveDeviceName(null);
+      return false;
     }
   }, [disconnectGanglion, resetDisplayState]);
 
   const startStreamForMode = useCallback(async (mode: SignalSourceMode) => {
     if (mode === 'live') {
-      await connectGanglion();
-      return;
+      return await connectGanglion();
     }
 
     await startMockStream();
+    return true;
   }, [connectGanglion, startMockStream]);
 
   const startStream = useCallback(async () => {
@@ -265,6 +288,8 @@ export function useSignalSource(
   }, [signalSourceMode, startStreamForMode]);
 
   const stopStream = useCallback(async () => {
+    generationRef.current += 1;
+    setIsStreaming(false);
     await disconnectGanglion();
     setIsStreaming(false);
     resetDisplayState();
@@ -285,6 +310,7 @@ export function useSignalSource(
     const interval = setInterval(() => {
       const value = clampSignalValue(generateMockSignalValue());
       pushMockSignalPoint({
+        sequence: ++sequenceRef.current,
         time: Date.now(),
         value,
         raw: value,
@@ -304,6 +330,13 @@ export function useSignalSource(
 
     const interval = window.setInterval(() => {
       if (pendingRecordingPointsRef.current.length === 0) {
+        if (Date.now() - lastArrivalRef.current > 2000) {
+          generationRef.current += 1;
+          setIsStreaming(false);
+          void disconnectGanglion();
+          setLiveConnectionStatus('error');
+          setLiveConnectionMessage('No Ganglion samples for 2 seconds. Capture stopped. Check battery and reconnect with Start Stream.');
+        }
         return;
       }
 
@@ -332,6 +365,10 @@ export function useSignalSource(
         activityUpperReferenceRef.current +
         (targetUpperReference - activityUpperReferenceRef.current) * ACTIVE_REFERENCE_SMOOTHING;
       activityUpperReferenceRef.current = Math.max(upperReference, baseline + MIN_ACTIVITY_RANGE);
+      if (fixedReferenceRef.current) {
+        activityBaselineRef.current = fixedReferenceRef.current.baseline;
+        activityUpperReferenceRef.current = fixedReferenceRef.current.upper;
+      }
       setLiveDisplayScale(activityUpperReferenceRef.current);
       setLiveSampleRateHz(sampleRateTimesRef.current.length);
 
@@ -356,7 +393,7 @@ export function useSignalSource(
     }, LIVE_RENDER_INTERVAL_MS);
 
     return () => window.clearInterval(interval);
-  }, [displayWindowMs, isStreaming, signalSourceMode]);
+  }, [displayWindowMs, isStreaming, signalSourceMode, disconnectGanglion]);
 
   useEffect(() => {
     setSignalData(prev => {
@@ -367,6 +404,7 @@ export function useSignalSource(
 
   useEffect(() => {
     return () => {
+      generationRef.current += 1;
       void disconnectGanglion();
     };
   }, [disconnectGanglion]);
@@ -386,6 +424,7 @@ export function useSignalSource(
     livePacketCount,
     liveDisplayScale,
     liveSampleRateHz,
+    activityReference: { baseline: activityBaselineRef.current, upper: activityUpperReferenceRef.current },
     isBluetoothAvailable: isWebBluetoothAvailable()
   };
 }

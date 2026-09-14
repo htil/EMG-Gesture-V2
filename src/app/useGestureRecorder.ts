@@ -1,21 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SignalPoint } from './useSignalSource';
+import { RecorderMachine, type RecorderEvent, type TriggerSource } from './recorder/recorderMachine';
+export type { RecorderState, Segment as CompletedGestureSegment, WaveformPoint as RecorderWaveformPoint } from './recorder/recorderMachine';
 
-export type RecorderState = 'idle' | 'recording' | 'cooldown';
-
-export type RecorderWaveformPoint = {
-  time: number;
-  value: number;
-};
-
-export interface CompletedGestureSegment {
-  points: RecorderWaveformPoint[];
-  triggeredAt: number;
-  completedAt: number;
-  preTriggerPointCount: number;
-}
-
-interface UseGestureRecorderOptions {
+interface Options {
   signalPoints: SignalPoint[];
   threshold: number;
   segmentDurationMs: number;
@@ -25,236 +13,78 @@ interface UseGestureRecorderOptions {
   preTriggerWindowMs?: number;
   cooldownMs?: number;
   hysteresisRatio?: number;
+  triggerMode?: 'signal' | 'manual';
+  onEvent?: (event: RecorderEvent) => void;
 }
 
-interface GestureRecorderDiagnostics {
-  normalizedActivity: number;
-  threshold: number;
-  thresholdCrossingDetected: boolean;
-  capturedRawPointCount: number;
-  elapsedCaptureDurationMs: number;
-  preTriggerPointCount: number;
-}
-
-interface UseGestureRecorderResult {
-  recorderState: RecorderState;
-  isRecording: boolean;
-  recordingStartTime: number | null;
-  recordingProgress: number;
-  currentCapturedSegment: RecorderWaveformPoint[];
-  completedSegment: CompletedGestureSegment | null;
-  acknowledgeCompletedSegment: () => void;
-  diagnostics: GestureRecorderDiagnostics;
-}
-
-const DEFAULT_PRE_TRIGGER_WINDOW_MS = 175;
-const DEFAULT_COOLDOWN_MS = 350;
-const DEFAULT_HYSTERESIS_RATIO = 0.7;
-
-export function useGestureRecorder({
-  signalPoints,
-  threshold,
-  segmentDurationMs,
-  isStreaming,
-  resetKey,
-  minSegmentPoints = 6,
-  preTriggerWindowMs = DEFAULT_PRE_TRIGGER_WINDOW_MS,
-  cooldownMs = DEFAULT_COOLDOWN_MS,
-  hysteresisRatio = DEFAULT_HYSTERESIS_RATIO,
-}: UseGestureRecorderOptions): UseGestureRecorderResult {
-  const [recorderState, setRecorderState] = useState<RecorderState>('idle');
-  const [recordingStartTime, setRecordingStartTime] = useState<number | null>(null);
-  const [recordingProgress, setRecordingProgress] = useState(0);
-  const [currentCapturedSegment, setCurrentCapturedSegment] = useState<RecorderWaveformPoint[]>([]);
-  const [completedSegment, setCompletedSegment] = useState<CompletedGestureSegment | null>(null);
-  const [normalizedActivity, setNormalizedActivity] = useState(0);
-  const [thresholdCrossingDetected, setThresholdCrossingDetected] = useState(false);
-  const [elapsedCaptureDurationMs, setElapsedCaptureDurationMs] = useState(0);
-  const [preTriggerPointCount, setPreTriggerPointCount] = useState(0);
-
-  const lastProcessedTimeRef = useRef<number | null>(null);
-  const preTriggerBufferRef = useRef<RecorderWaveformPoint[]>([]);
-  const recordedSegmentRef = useRef<RecorderWaveformPoint[]>([]);
-  const recordingTriggerTimeRef = useRef<number | null>(null);
-  const cooldownUntilRef = useRef<number | null>(null);
-  const aboveThresholdRef = useRef(false);
-  const recorderStateRef = useRef<RecorderState>('idle');
-  const preTriggerPointCountRef = useRef(0);
-
-  const resetRecorder = useCallback(() => {
-    setRecorderState('idle');
-    setRecordingStartTime(null);
-    setRecordingProgress(0);
-    setCurrentCapturedSegment([]);
-    setCompletedSegment(null);
-    setThresholdCrossingDetected(false);
-    setElapsedCaptureDurationMs(0);
-    setPreTriggerPointCount(0);
-    lastProcessedTimeRef.current = null;
-    preTriggerBufferRef.current = [];
-    recordedSegmentRef.current = [];
-    recordingTriggerTimeRef.current = null;
-    cooldownUntilRef.current = null;
-    aboveThresholdRef.current = false;
-    recorderStateRef.current = 'idle';
-    preTriggerPointCountRef.current = 0;
-  }, []);
+export function useGestureRecorder({ signalPoints, threshold, segmentDurationMs, isStreaming, resetKey,
+  minSegmentPoints = 6, preTriggerWindowMs = 175, cooldownMs = 350, hysteresisRatio = 0.7,
+  triggerMode = 'signal', onEvent }: Options) {
+  const machineRef = useRef<RecorderMachine | null>(null);
+  const config = { durationMs: segmentDurationMs, threshold, triggerMode, preTriggerMs: preTriggerWindowMs,
+    cooldownMs, hysteresisRatio, minPoints: minSegmentPoints, maxGapMs: 250 };
+  if (!machineRef.current) machineRef.current = new RecorderMachine(config);
+  const machine = machineRef.current;
+  const eventRef = useRef(onEvent);
+  eventRef.current = onEvent;
+  const pointsRef = useRef(signalPoints);
+  pointsRef.current = signalPoints;
+  const [, render] = useState(0);
+  const flush = useCallback(() => {
+    machine.events.splice(0).forEach(event => eventRef.current?.(event));
+    render(n => n + 1);
+  }, [machine]);
 
   useEffect(() => {
-    resetRecorder();
-    setNormalizedActivity(0);
-  }, [isStreaming, resetKey]);
+    machine.config = config;
+    const last = pointsRef.current.at(-1);
+    machine.enable(isStreaming, last ? (last.sequence ?? last.time) : -Infinity);
+    flush();
+    return () => {
+      machine.abort('context_changed_or_stopped', Date.now());
+      machine.events.splice(0).forEach(event => eventRef.current?.(event));
+    };
+  }, [isStreaming, resetKey, threshold, segmentDurationMs, triggerMode, preTriggerWindowMs,
+    cooldownMs, hysteresisRatio, minSegmentPoints, machine, flush]);
 
   useEffect(() => {
-    if (signalPoints.length === 0) {
-      return;
-    }
+    if (!isStreaming) return;
+    machine.feed(signalPoints);
+    flush();
+  }, [isStreaming, signalPoints, machine, flush]);
 
-    const lastProcessedTime = lastProcessedTimeRef.current;
-    const newPoints = lastProcessedTime === null
-      ? signalPoints
-      : signalPoints.filter((point) => point.time > lastProcessedTime);
+  useEffect(() => {
+    if (!isStreaming) return;
+    const timer = window.setInterval(() => {
+      if (machine.active) { machine.checkStall(Date.now()); flush(); }
+    }, 100);
+    return () => window.clearInterval(timer);
+  }, [isStreaming, machine, flush]);
 
-    if (newPoints.length === 0) {
-      return;
-    }
-
-    const lowerThreshold = Math.max(0, threshold * hysteresisRatio);
-
-    for (const point of newPoints) {
-      lastProcessedTimeRef.current = point.time;
-      setNormalizedActivity(point.normalizedActivity);
-
-      const wasAboveThreshold = aboveThresholdRef.current;
-      const crossesThreshold = !wasAboveThreshold && point.normalizedActivity >= threshold;
-
-      if (point.normalizedActivity >= threshold) {
-        aboveThresholdRef.current = true;
-      } else if (point.normalizedActivity <= lowerThreshold) {
-        aboveThresholdRef.current = false;
-      }
-
-      const currentRecorderState = recorderStateRef.current;
-
-      if (currentRecorderState === 'idle') {
-        if (crossesThreshold) {
-          const preTriggerPoints = [...preTriggerBufferRef.current];
-          const seededSegment = [...preTriggerPoints, { time: point.time, value: point.raw }];
-
-          recordedSegmentRef.current = seededSegment;
-          recordingTriggerTimeRef.current = point.time;
-          recorderStateRef.current = 'recording';
-          preTriggerPointCountRef.current = preTriggerPoints.length;
-          setRecorderState('recording');
-          setRecordingStartTime(point.time);
-          setRecordingProgress(0);
-          setCurrentCapturedSegment(seededSegment);
-          setThresholdCrossingDetected(true);
-          setElapsedCaptureDurationMs(0);
-          setPreTriggerPointCount(preTriggerPoints.length);
-          continue;
-        }
-
-        preTriggerBufferRef.current = [
-          ...preTriggerBufferRef.current,
-          { time: point.time, value: point.raw },
-        ].filter((bufferPoint) => bufferPoint.time >= point.time - preTriggerWindowMs);
-        continue;
-      }
-
-      if (currentRecorderState === 'recording') {
-        const triggerTime = recordingTriggerTimeRef.current ?? point.time;
-        const nextSegment = [...recordedSegmentRef.current, { time: point.time, value: point.raw }];
-        recordedSegmentRef.current = nextSegment;
-        setCurrentCapturedSegment(nextSegment);
-
-        const elapsedMs = point.time - triggerTime;
-        setElapsedCaptureDurationMs(elapsedMs);
-        setRecordingProgress(
-          Math.max(0, Math.min(1, elapsedMs / Math.max(segmentDurationMs, 1))),
-        );
-
-        if (elapsedMs < segmentDurationMs) {
-          continue;
-        }
-
-        recorderStateRef.current = 'cooldown';
-        setRecorderState('cooldown');
-        setRecordingStartTime(null);
-        setRecordingProgress(0);
-        setCurrentCapturedSegment([]);
-        setElapsedCaptureDurationMs(segmentDurationMs);
-        cooldownUntilRef.current = point.time + cooldownMs;
-        recordingTriggerTimeRef.current = null;
-        preTriggerBufferRef.current = [];
-        recordedSegmentRef.current = [];
-
-        if (nextSegment.length >= minSegmentPoints) {
-          setCompletedSegment({
-            points: nextSegment,
-            triggeredAt: triggerTime,
-            completedAt: point.time,
-            preTriggerPointCount: preTriggerPointCountRef.current,
-          });
-        }
-
-        continue;
-      }
-
-      if (currentRecorderState === 'cooldown') {
-        const cooldownElapsed = point.time >= (cooldownUntilRef.current ?? point.time);
-        const belowHysteresis = point.normalizedActivity <= lowerThreshold;
-
-        if (cooldownElapsed && belowHysteresis) {
-          recorderStateRef.current = 'idle';
-          preTriggerPointCountRef.current = 0;
-          setRecorderState('idle');
-          setThresholdCrossingDetected(false);
-          setElapsedCaptureDurationMs(0);
-          setPreTriggerPointCount(0);
-          preTriggerBufferRef.current = [{ time: point.time, value: point.raw }];
-        }
-      }
-    }
-  }, [
-    hysteresisRatio,
-    isStreaming,
-    minSegmentPoints,
-    preTriggerWindowMs,
-    segmentDurationMs,
-    signalPoints,
-    threshold,
-    cooldownMs,
-  ]);
-
-  const acknowledgeCompletedSegment = () => {
-    setCompletedSegment(null);
-  };
-
-  const diagnostics = useMemo<GestureRecorderDiagnostics>(() => ({
-    normalizedActivity,
-    threshold,
-    thresholdCrossingDetected,
-    capturedRawPointCount: currentCapturedSegment.length,
-    elapsedCaptureDurationMs,
-    preTriggerPointCount,
-  }), [
-    currentCapturedSegment.length,
-    elapsedCaptureDurationMs,
-    normalizedActivity,
-    preTriggerPointCount,
-    threshold,
-    thresholdCrossingDetected,
-  ]);
-
+  const startRecording = useCallback((source: TriggerSource = 'button', time = Date.now()) => {
+    const accepted = machine.trigger(source, time);
+    flush();
+    return accepted;
+  }, [machine, flush]);
+  const acknowledgeCompletedSegment = useCallback(() => { machine.completed.shift(); flush(); }, [machine, flush]);
+  const active = machine.active;
+  const elapsed = active ? Math.max(0, Math.min(Date.now() - active.triggeredAt, active.durationMs)) : 0;
   return {
-    recorderState,
-    isRecording: recorderState === 'recording',
-    recordingStartTime,
-    recordingProgress,
-    currentCapturedSegment,
-    completedSegment,
+    recorderState: machine.state,
+    isRecording: machine.state === 'recording',
+    recordingStartTime: active?.triggeredAt ?? null,
+    recordingProgress: active ? elapsed / active.durationMs : 0,
+    currentCapturedSegment: active?.points ?? [],
+    completedSegment: machine.completed[0] ?? null,
     acknowledgeCompletedSegment,
-    diagnostics,
+    startRecording,
+    canStartRecording: machine.canTrigger('button', Date.now()),
+    diagnostics: {
+      normalizedActivity: machine.activity, threshold,
+      thresholdCrossingDetected: active?.triggerSource === 'signal',
+      capturedRawPointCount: active?.points.length ?? 0,
+      elapsedCaptureDurationMs: elapsed,
+      preTriggerPointCount: active?.preTriggerPointCount ?? 0,
+    },
   };
 }

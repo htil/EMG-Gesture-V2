@@ -5,6 +5,9 @@ EMG Gesture V2 is an EMG training and data-collection interface for testing gest
 
 ## Run the app
 
+For the formative-pilot branch, see [the pilot handoff and rehearsal procedure](docs/FORMATIVE_PILOT.md).
+Run `npm test` for study-critical automated checks. Pilot sessions start explicitly from Session Settings.
+
 From the project root:
 
 ```bash

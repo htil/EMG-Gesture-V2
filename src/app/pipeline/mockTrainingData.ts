@@ -2,6 +2,8 @@ import { extractEmgFeatures } from './featureExtraction';
 import type { EmgSample, FeatureSetId, Gesture, TrainingGestureData, TrainingSessionData } from './types';
 
 export interface CapturedTrainingSample {
+  durationMs?: number;
+  provenance?: EmgSample['provenance'];
   id: number;
   status: 'empty' | 'collected' | 'flagged' | 'rejected';
   timestamp?: number;
@@ -41,7 +43,8 @@ function toEmgSample(
     gestureName: gesture.name,
     timestamp,
     data: waveformData.map((point) => point.value),
-    duration,
+    duration: sample.durationMs ?? duration,
+    provenance: sample.provenance,
     quality: sample.quality,
     features: extractEmgFeatures(waveformData.map((point) => point.value)),
   };

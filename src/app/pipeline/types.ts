@@ -58,6 +58,7 @@ export interface PredictionDebug {
 }
 
 export interface EmgSample {
+  provenance?: { attemptId: string; triggerSource: string; triggeredAt: number; durationMs: number };
   id: string;
   gestureId: string;
   gestureName: string;

@@ -28,6 +28,10 @@ import {
 import * as dfd from 'danfojs';
 import { useSignalSource, type SignalSourceMode } from './useSignalSource';
 import { useGestureRecorder } from './useGestureRecorder';
+import { useButtonStartShortcut } from './recorder/useButtonStartShortcut';
+import { mockGestureSignal } from './study/mockGestureSignal';
+import { StudySetup, useStudy } from './study/StudyProvider';
+import type { RecorderEvent } from './recorder/recorderMachine';
 import {
   Sheet,
   SheetContent,
@@ -64,6 +68,8 @@ type SampleStatus = 'empty' | 'collected' | 'flagged' | 'rejected';
 type WaveformPoint = { time: number; value: number };
 
 interface Sample {
+  durationMs?: number;
+  provenance?: { attemptId: string; triggerSource: string; triggeredAt: number; durationMs: number };
   id: number;
   status: SampleStatus;
   timestamp?: number;
@@ -959,13 +965,20 @@ function DatasetPreviewPanel({
 }
 
 export default function TrainingScreen() {
+  const study = useStudy();
+  const studyConfig = study.session?.config;
+  const studyCondition = study.session?.periods[study.session.period - 1].condition;
+  const attemptGestures = useRef(new Map<string, string>());
+  const [captureFailure, setCaptureFailure] = useState('');
   const [feedbackState, setFeedbackState] = useState<FeedbackState>('ready');
-  const [threshold, setThreshold] = useState(0.6);
-  const [segmentDurationMs, setSegmentDurationMs] = useState(DEFAULT_SEGMENT_DURATION_MS);
-  const [displayWindowMs, setDisplayWindowMs] = useState(DEFAULT_DISPLAY_WINDOW_MS);
-  const [activityDisplaySensitivity, setActivityDisplaySensitivity] = useState(DEFAULT_ACTIVITY_DISPLAY_SENSITIVITY);
-  const [featureSetId, setFeatureSetId] = useState<FeatureSetId>(DEFAULT_FEATURE_SET_ID);
-  const [selectedChannelIndex, setSelectedChannelIndex] = useState(0);
+  const mockFeedbackRef = useRef(feedbackState);
+  mockFeedbackRef.current = feedbackState;
+  const [threshold, setThreshold] = useState(studyConfig?.threshold ?? 0.6);
+  const [segmentDurationMs, setSegmentDurationMs] = useState(studyConfig?.segmentDurationMs ?? DEFAULT_SEGMENT_DURATION_MS);
+  const [displayWindowMs, setDisplayWindowMs] = useState(studyConfig?.displayWindowMs ?? DEFAULT_DISPLAY_WINDOW_MS);
+  const [activityDisplaySensitivity, setActivityDisplaySensitivity] = useState(studyConfig?.sensitivity ?? DEFAULT_ACTIVITY_DISPLAY_SENSITIVITY);
+  const [featureSetId, setFeatureSetId] = useState<FeatureSetId>(studyConfig?.featureSetId ?? DEFAULT_FEATURE_SET_ID);
+  const [selectedChannelIndex, setSelectedChannelIndex] = useState(studyConfig?.selectedChannelIndex ?? 0);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isDatasetPreviewOpen, setIsDatasetPreviewOpen] = useState(false);
   const [rawDataView, setRawDataView] = useState<RawDataView | null>(null);
@@ -980,8 +993,8 @@ export default function TrainingScreen() {
   const pendingCloseFeaturesAfterMoreInfoRef = useRef(false);
   const pendingRawDataViewRef = useRef<RawDataView | null>(null);
   const isClosingDatasetPreviewRef = useRef(false);
-  const [minRequired, setMinRequired] = useState(8);
-  const [sampleTarget, setSampleTarget] = useState(12);
+  const [minRequired, setMinRequired] = useState(studyConfig?.sampleTarget ?? 8);
+  const [sampleTarget, setSampleTarget] = useState(studyConfig?.sampleTarget ?? 12);
   const [targetSamplesInputValue, setTargetSamplesInputValue] = useState('12');
   const [segmentDurationInputValue, setSegmentDurationInputValue] = useState(String(DEFAULT_SEGMENT_DURATION_MS));
   const [displayWindowInputValue, setDisplayWindowInputValue] = useState((DEFAULT_DISPLAY_WINDOW_MS / 1000).toFixed(1));
@@ -989,18 +1002,24 @@ export default function TrainingScreen() {
     DEFAULT_ACTIVITY_DISPLAY_SENSITIVITY.toFixed(1)
   );
   const [selectedSampleId, setSelectedSampleId] = useState<number | null>(null);
-  const [gestures, setGestures] = useState<Gesture[]>(DEFAULT_GESTURES);
-  const [currentGestureId, setCurrentGestureId] = useState<string>(DEFAULT_GESTURES[0].id);
+  const [gestures, setGestures] = useState<Gesture[]>(studyConfig?.gestures ?? DEFAULT_GESTURES);
+  const [currentGestureId, setCurrentGestureId] = useState<string>((studyConfig?.gestures ?? DEFAULT_GESTURES)[0].id);
   const [datasetPreviewGestureId, setDatasetPreviewGestureId] = useState<string>(DEFAULT_GESTURES[0].id);
   const [newGestureName, setNewGestureName] = useState('');
   const [isGestureDropdownOpen, setIsGestureDropdownOpen] = useState(false);
   const [showGestureChangeMessage, setShowGestureChangeMessage] = useState(false);
   const [showRawSignal, setShowRawSignal] = useState(false);
   const [activeScreen, setActiveScreen] = useState<AppScreen>('training');
+  const testingMockGestureRef = useRef(currentGestureId);
+  const mockEpochRef = useRef({ key: '', time: 0 });
+  const setTestingMockGesture = useCallback((id: string) => {
+    testingMockGestureRef.current = id;
+    mockEpochRef.current = { key: '', time: 0 };
+  }, []);
   const [trainingSession, setTrainingSession] = useState<TrainingSessionData | null>(null);
   const [testingSession, setTestingSession] = useState<TestingSessionData | null>(null);
   const [testingSettings, setTestingSettings] = useState<TestingSessionSettings>(
-    DEFAULT_TESTING_SESSION_SETTINGS,
+    studyConfig?.testingSettings ?? DEFAULT_TESTING_SESSION_SETTINGS,
   );
   const previewPanelRef = useRef<HTMLDivElement>(null);
   const gestureDropdownRef = useRef<HTMLDivElement>(null);
@@ -1107,7 +1126,15 @@ export default function TrainingScreen() {
     const cycleDurationMs = Math.max(segmentDurationMs, 1);
     const progress = (Date.now() % cycleDurationMs) / cycleDurationMs;
 
-    switch (feedbackState) {
+    if (studyConfig) {
+      const id = activeScreen === 'testing' ? testingMockGestureRef.current : currentGestureId;
+      const key = `${activeScreen}:${id}:${cycleDurationMs}`;
+      const now = Date.now();
+      if (mockEpochRef.current.key !== key) mockEpochRef.current = { key, time: now };
+      return mockGestureSignal(gestures.findIndex(gesture => gesture.id === id), now - mockEpochRef.current.time, cycleDurationMs);
+    }
+
+    switch (mockFeedbackRef.current) {
       case 'recording':
       case 'good':
         return getChannelMockSignalValue(selectedChannelIndex, progress, 'active');
@@ -1120,7 +1147,7 @@ export default function TrainingScreen() {
       default:
         return getChannelMockSignalValue(selectedChannelIndex, progress, 'idle');
     }
-  }, [feedbackState, segmentDurationMs, selectedChannelIndex]);
+  }, [segmentDurationMs, selectedChannelIndex, studyConfig, activeScreen, currentGestureId, gestures]);
 
   const {
     signalData,
@@ -1137,13 +1164,31 @@ export default function TrainingScreen() {
     livePacketCount,
     liveDisplayScale,
     liveSampleRateHz,
+    activityReference,
     isBluetoothAvailable
   } = useSignalSource(
     generateMockSignalValue,
     displayWindowMs,
     selectedChannelIndex,
-    activityDisplaySensitivity
+    activityDisplaySensitivity,
+    studyConfig?.activityReference,
+    studyConfig?.sourceMode,
   );
+
+  const [gestureData, setGestureData] = useState<Record<string, GestureData>>(() =>
+    Object.fromEntries((studyConfig?.gestures ?? DEFAULT_GESTURES).map(gesture => [gesture.id, {
+      samples: Array.from({ length: studyConfig?.sampleTarget ?? 12 }, (_, id) => ({ id, status: 'empty' as const })),
+    }])),
+  );
+  const captureEnabled = isStreaming && activeScreen === 'training' && !study.blocked &&
+    (gestureData[currentGestureId]?.samples.some(sample => sample.status === 'empty') ?? false);
+  const onRecorderEvent = (event: RecorderEvent) => {
+    if (event.type === 'capture_triggered') setCaptureFailure('');
+    if (event.type === 'capture_failed') setCaptureFailure(event.reason ?? 'capture_interrupted');
+    if (event.type === 'capture_triggered') attemptGestures.current.set(event.attemptId, currentGestureId);
+    study.log(event.type, { ...event, gestureId: attemptGestures.current.get(event.attemptId),
+      sourceMode: signalSourceMode, selectedChannelIndex, threshold, segmentDurationMs, stage: 'training' }, event.time);
+  };
 
   const {
     recorderState,
@@ -1153,19 +1198,30 @@ export default function TrainingScreen() {
     currentCapturedSegment,
     completedSegment,
     acknowledgeCompletedSegment,
+    startRecording,
+    canStartRecording,
     diagnostics: recorderDiagnostics,
   } = useGestureRecorder({
     signalPoints: recordingSignalData,
     threshold,
     segmentDurationMs,
-    isStreaming,
-    resetKey: `${signalSourceMode}:${selectedChannelIndex}`,
+    isStreaming: captureEnabled,
+    resetKey: `${signalSourceMode}:${selectedChannelIndex}:${currentGestureId}:${activeScreen}`,
+    triggerMode: studyCondition === 'A' ? 'manual' : 'signal',
+    preTriggerWindowMs: studyConfig ? 0 : undefined,
+    onEvent: onRecorderEvent,
     minSegmentPoints: MIN_SEGMENT_POINTS,
-    cooldownMs: signalSourceMode === 'mock' ? 50 : undefined,
-    hysteresisRatio: signalSourceMode === 'mock' ? 1 : undefined,
+    cooldownMs: !studyConfig && signalSourceMode === 'mock' ? 50 : 350,
+    hysteresisRatio: !studyConfig && signalSourceMode === 'mock' ? 1 : 0.7,
   });
   
   const isRecordedSampleStatus = (status: SampleStatus) => RECORDED_SAMPLE_STATUSES.includes(status);
+  const manualCaptureAllowed = studyCondition === 'A' && captureEnabled && canStartRecording;
+  const triggerManualCapture = useCallback(() => {
+    if (!manualCaptureAllowed) return;
+    if (!startRecording('button')) study.log('trigger_rejected', { reason: 'recorder_not_ready', gestureId: currentGestureId });
+  }, [manualCaptureAllowed, startRecording, study.log, currentGestureId]);
+  useButtonStartShortcut(manualCaptureAllowed, triggerManualCapture);
 
   const createEmptySamples = (totalCount: number = 12): Sample[] =>
     Array.from({ length: totalCount }, (_, i) => ({
@@ -1176,9 +1232,6 @@ export default function TrainingScreen() {
   const initializeGestureData = (gestureList: Gesture[]): Record<string, GestureData> =>
     Object.fromEntries(gestureList.map((gesture) => [gesture.id, { samples: createEmptySamples() }]));
 
-  const [gestureData, setGestureData] = useState<Record<string, GestureData>>(() =>
-    initializeGestureData(DEFAULT_GESTURES),
-  );
 
   const currentGesture = gestures.find((gesture) => gesture.id === currentGestureId) ?? gestures[0];
   const currentSamples = gestureData[currentGesture?.id ?? '']?.samples ?? [];
@@ -1238,6 +1291,14 @@ export default function TrainingScreen() {
   );
   const canRunHoldoutEvaluation = activeGestureCount >= 2 && minimumSamplesPerActiveGesture >= 2;
 
+  useEffect(() => { study.dataset(pendingTrainingSession); }, [pendingTrainingSession, study.dataset]);
+  useEffect(() => { setTrainingSession(null); setTestingSession(null); }, [gestureData]);
+  useEffect(() => { study.log('screen_changed', { screen: activeScreen }); }, [activeScreen, study.log]);
+  useEffect(() => { study.log('gesture_selected', { gestureId: currentGestureId }); }, [currentGestureId, study.log]);
+  useEffect(() => {
+    study.log('signal_status', { isStreaming, signalSourceMode, liveConnectionStatus, liveConnectionMessage, liveDeviceName });
+  }, [isStreaming, signalSourceMode, liveConnectionStatus, liveConnectionMessage, liveDeviceName, study.log]);
+
   useEffect(() => {
     setTargetSamplesInputValue(String(sampleTarget));
   }, [sampleTarget]);
@@ -1256,7 +1317,7 @@ export default function TrainingScreen() {
 
   // Simulate state changes for demonstration
   useEffect(() => {
-    if (signalSourceMode !== 'mock' || !isStreaming || isRecording) {
+    if (studyConfig || signalSourceMode !== 'mock' || !isStreaming || isRecording) {
       return;
     }
 
@@ -1279,10 +1340,10 @@ export default function TrainingScreen() {
     }, 3000);
 
     return () => clearInterval(stateInterval);
-  }, [isRecording, isStreaming, signalSourceMode]);
+  }, [isRecording, isStreaming, signalSourceMode, studyConfig]);
 
   useEffect(() => {
-    if (signalSourceMode === 'mock') {
+    if (signalSourceMode === 'mock' && !studyConfig) {
       return;
     }
 
@@ -1298,7 +1359,7 @@ export default function TrainingScreen() {
 
     setFeedbackState('ready');
     setHighlightSegment(null);
-  }, [recorderState, signalSourceMode]);
+  }, [recorderState, signalSourceMode, studyConfig]);
 
   useEffect(() => {
     if (!isRecording) {
@@ -1323,10 +1384,11 @@ export default function TrainingScreen() {
     }
 
     const peak = waveformData.reduce((max, samplePoint) => Math.max(max, samplePoint.value), 0);
-    const quality: SampleQuality = peak >= threshold + 0.08 ? 'good' : 'weak';
+    const quality: SampleQuality | undefined = studyConfig ? undefined : peak >= threshold + 0.08 ? 'good' : 'weak';
+    const capturedGestureId = attemptGestures.current.get(completedSegment.id) ?? currentGestureId;
 
     setGestureData((prev) => {
-      const gesture = prev[currentGestureId];
+      const gesture = prev[capturedGestureId];
       if (!gesture) {
         return prev;
       }
@@ -1338,13 +1400,16 @@ export default function TrainingScreen() {
 
       return {
         ...prev,
-        [currentGestureId]: {
+        [capturedGestureId]: {
           samples: gesture.samples.map((sample, index) =>
             index === targetIndex
               ? {
                   ...sample,
                   status: 'collected',
                   timestamp: completedSegment.completedAt,
+                  durationMs: studyConfig ? completedSegment.durationMs : waveformData.at(-1)!.time - waveformData[0].time,
+                  provenance: { attemptId: completedSegment.id, triggerSource: completedSegment.triggerSource,
+                    triggeredAt: completedSegment.triggeredAt, durationMs: completedSegment.durationMs },
                   waveformData,
                   quality,
                 }
@@ -1354,11 +1419,11 @@ export default function TrainingScreen() {
       };
     });
 
-    setFeedbackState(quality);
-    setHighlightSegment(quality === 'good' ? 'good' : 'bad');
+    setFeedbackState(quality ?? 'good');
+    setHighlightSegment(studyConfig ? null : quality === 'good' ? 'good' : 'bad');
     setTimeout(() => setHighlightSegment(null), 800);
     acknowledgeCompletedSegment();
-  }, [acknowledgeCompletedSegment, completedSegment, currentGestureId, threshold]);
+  }, [acknowledgeCompletedSegment, completedSegment, currentGestureId, threshold, studyConfig]);
 
   // Close preview when clicking outside
   useEffect(() => {
@@ -1439,10 +1504,12 @@ export default function TrainingScreen() {
   };
 
   const handleThresholdChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (studyConfig) return;
     setThreshold(parseFloat(e.target.value));
   };
 
   const applyTargetSampleValue = (nextValue: number) => {
+    if (studyConfig) return;
     const clampedValue = Math.max(1, Math.min(50, nextValue));
     setSampleTarget(clampedValue);
     setMinRequired(clampedValue);
@@ -1499,6 +1566,7 @@ export default function TrainingScreen() {
   };
 
   const applySegmentDurationValue = (nextValue: number) => {
+    if (studyConfig) return;
     setSegmentDurationMs(Math.max(400, Math.min(3000, nextValue)));
   };
 
@@ -1579,6 +1647,7 @@ export default function TrainingScreen() {
   };
 
   const handleSignalSourceChange = (mode: SignalSourceMode) => {
+    if (studyConfig) return;
     void selectSignalSourceMode(mode);
   };
 
@@ -1689,7 +1758,11 @@ export default function TrainingScreen() {
     }
   };
 
-  const feedback = getFeedbackConfig();
+  const feedback = { ...getFeedbackConfig(), ...(studyConfig ? {
+    instruction: !isStreaming ? 'Start Stream when you are ready.' : isRecording ? 'Capturing the full sample. You may relax.' :
+      recorderState === 'cooldown' ? 'Relax before the next sample.' : studyCondition === 'A' ?
+        'Perform the selected gesture and press Record Sample.' : 'Perform the selected gesture to cross the line and start a sample.',
+  } : {}) };
   const latestRecordingSignal = recordingSignalData[recordingSignalData.length - 1];
   const latestDisplaySignal = signalData[signalData.length - 1];
   const latestSignal = latestRecordingSignal ?? latestDisplaySignal;
@@ -1772,6 +1845,7 @@ export default function TrainingScreen() {
         : 'Use Ganglion for real EMG sample collection'
       : 'Use synthetic signal for development and UI checks';
   const connectionStatusLabel =
+    signalSourceMode === 'mock' && isStreaming ? 'Mock Running' :
     !isStreaming && liveConnectionStatus !== 'connecting' && liveConnectionStatus !== 'error'
       ? 'Idle'
       : 
@@ -1809,7 +1883,7 @@ export default function TrainingScreen() {
             label: gesture.name,
             timestamp,
             data: waveformData.map((point) => point.value),
-            duration
+            duration: sample.durationMs ?? duration
           };
         });
     }
@@ -1818,6 +1892,11 @@ export default function TrainingScreen() {
   };
 
   const handleStartTesting = () => {
+    if (studyConfig && (isRecording || !canRunHoldoutEvaluation || !isAllSamplesCollected)) return;
+    study.log('neutral_evaluation', { method: 'leave-one-out', summary: holdoutEvaluationSummary,
+      sampleIds: pendingTrainingSession.gestureData.flatMap(g => g.samples.map(s => s.id)) });
+    study.log('model_built', { trainingSessionId: pendingTrainingSession.id, featureSetId,
+      sampleIds: pendingTrainingSession.gestureData.flatMap(g => g.samples.map(s => s.id)) });
     setTrainingSession(pendingTrainingSession);
     setTestingSession(null);
     setActiveScreen('testing');
@@ -1948,11 +2027,12 @@ export default function TrainingScreen() {
         isBluetoothAvailable={isBluetoothAvailable}
         threshold={threshold}
         displayWindowMs={displayWindowMs}
-        onSessionComplete={setTestingSession}
+        onSessionComplete={(session) => { setTestingSession(session); study.log('testing_completed', { session }); }}
         onShowResults={() => setActiveScreen('results')}
         onExit={() => setActiveScreen('training')}
         settings={testingSettings}
         onSettingsChange={setTestingSettings}
+        onMockGestureCue={setTestingMockGesture}
       />
     );
   }
@@ -2086,6 +2166,11 @@ export default function TrainingScreen() {
               </SheetHeader>
 
               <div className="flex flex-col gap-6 overflow-y-auto px-4 pb-6">
+                <StudySetup readiness={{ isStreaming, isRecording, pointCount: recordingSignalData.length }} config={{
+                  gestures, threshold, segmentDurationMs, featureSetId, sampleTarget, selectedChannelIndex,
+                  sourceMode: signalSourceMode, displayWindowMs, sensitivity: activityDisplaySensitivity,
+                  activityReference, testingSettings: { ...testingSettings, trialPeriodMs: Math.max(testingSettings.trialPeriodMs, segmentDurationMs + 1000) },
+                }} />
                 <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
                   <div>
                     <p className="text-sm font-medium text-white/90">Signal Source</p>
@@ -2094,6 +2179,7 @@ export default function TrainingScreen() {
                   <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-slate-950/50 p-1">
                     <button
                       onClick={() => handleSignalSourceChange('mock')}
+                      disabled={!!studyConfig}
                       className={`flex-1 px-3 py-1.5 text-sm rounded-md transition-colors ${
                         signalSourceMode === 'mock'
                           ? 'bg-cyan-400/15 text-cyan-300'
@@ -2105,6 +2191,7 @@ export default function TrainingScreen() {
                     </button>
                     <button
                       onClick={() => handleSignalSourceChange('live')}
+                      disabled={!!studyConfig}
                       className={`flex-1 px-3 py-1.5 text-sm rounded-md transition-colors ${
                         signalSourceMode === 'live'
                           ? 'bg-cyan-400/15 text-cyan-300'
@@ -2180,6 +2267,7 @@ export default function TrainingScreen() {
                   )}
                 </div>
 
+                <fieldset disabled={!!studyConfig} className="flex min-w-0 flex-col gap-6 disabled:opacity-60">
                 <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4">
                   <div className="flex items-start justify-between gap-4">
                     <div>
@@ -2448,6 +2536,7 @@ export default function TrainingScreen() {
                   </div>
                 </div>
 
+                </fieldset>
                 <details className="rounded-xl border border-white/10 bg-white/5 p-4">
                   <summary className="cursor-pointer list-none text-sm font-medium text-white/90">
                     Live Diagnostics
@@ -2856,21 +2945,16 @@ export default function TrainingScreen() {
         </div>
 
         {/* 3. Capture Feedback */}
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={feedbackState}
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 10 }}
-            transition={{ duration: 0.3 }}
+          <div
             className="flex flex-col gap-3 items-center"
+            data-recording-controls
           >
             <div className="flex flex-col items-center gap-3">
               <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-slate-900/50 px-3 py-2 backdrop-blur-sm">
                 <button
                   type="button"
                   onClick={() => handleSignalSourceChange('mock')}
-                  disabled={signalSourceMode === 'mock'}
+                  disabled={!!studyConfig || signalSourceMode === 'mock'}
                   className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-default ${
                     signalSourceMode === 'mock'
                       ? 'border-cyan-400/30 bg-cyan-400/10 text-cyan-300'
@@ -2882,7 +2966,7 @@ export default function TrainingScreen() {
                 <button
                   type="button"
                   onClick={() => handleSignalSourceChange('live')}
-                  disabled={!isBluetoothAvailable || signalSourceMode === 'live'}
+                  disabled={!!studyConfig || !isBluetoothAvailable || signalSourceMode === 'live'}
                   className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                     signalSourceMode === 'live'
                       ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'
@@ -2901,12 +2985,18 @@ export default function TrainingScreen() {
                 <p className="text-xs text-white/45">{sourceModeDescription}</p>
               </div>
             </div>
-            <div className="flex items-center gap-4">
+            <div className="flex flex-wrap justify-center items-center gap-4">
+              {studyConfig && <button type="button" className="h-20 w-44 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-5 py-4 text-white disabled:opacity-50"
+                disabled={!captureEnabled || !canStartRecording || studyCondition !== 'A'}
+                title="Record Sample (Space)"
+                onClick={triggerManualCapture}>
+                {isRecording ? 'Recording Sample' : studyCondition === 'A' ? 'Record Sample' : 'Signal Start Armed'}
+              </button>}
               <button
                 type="button"
                 onClick={handleMainStreamToggle}
                 disabled={liveConnectionStatus === 'connecting'}
-                className={`px-8 py-4 rounded-xl border ${feedback.borderColor} ${feedback.bgColor} backdrop-blur-sm transition-colors disabled:cursor-not-allowed disabled:opacity-70 hover:bg-white/10`}
+                className={`h-20 w-40 px-4 py-4 rounded-xl border ${feedback.borderColor} ${feedback.bgColor} backdrop-blur-sm transition-colors disabled:cursor-not-allowed disabled:opacity-70 hover:bg-white/10`}
               >
                 <p className={`text-2xl font-medium ${feedback.color}`}>
                   {mainStreamControlLabel}
@@ -2951,21 +3041,20 @@ export default function TrainingScreen() {
                   </div>
                 </div>
               </div>
-              {isAllSamplesCollected && (
                 <button
                   type="button"
                   onClick={handleStartTesting}
-                  className="px-8 py-4 rounded-xl border border-cyan-400/30 bg-cyan-400/10 backdrop-blur-sm transition-colors hover:bg-cyan-400/15"
+                  disabled={!isAllSamplesCollected || (!!studyConfig && !canRunHoldoutEvaluation) || isRecording || study.blocked}
+                  className="h-20 w-28 px-4 py-4 rounded-xl border border-cyan-400/30 bg-cyan-400/10 backdrop-blur-sm transition-colors hover:bg-cyan-400/15 disabled:opacity-40"
                 >
                   <p className="text-2xl font-medium text-cyan-400">Test</p>
                 </button>
-              )}
             </div>
-            <p className="text-lg text-white/60 font-light">
+            <p className="min-h-14 text-center text-lg text-white/60 font-light">
               {feedback.instruction}
             </p>
-          </motion.div>
-        </AnimatePresence>
+            {studyConfig && <p role="status" className="min-h-10 text-center text-sm text-amber-300">{captureFailure ? `Sample not saved (${captureFailure.replaceAll('_', ' ')}). Relax and try again.` : '\u00a0'}</p>}
+          </div>
 
         {/* 4. Interactive Sample Slots */}
         <div className="flex flex-col gap-4">

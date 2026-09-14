@@ -40,7 +40,7 @@ export function calculateResultStats(session: TestingSessionData): ResultStats {
   return {
     totalPredictions: predictions.length,
     overallConfidence: session.overallConfidence,
-    mostPredictedGesture: mostPredicted?.gesture.name ?? '—',
+    mostPredictedGesture: mostPredicted?.predictionCount ? mostPredicted.gesture.name : 'No recognized gesture',
     lowConfidenceCount: predictions.filter((prediction) => prediction.confidenceStatus === 'low')
       .length,
     gestureStats,
