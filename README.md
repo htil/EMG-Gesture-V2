@@ -1,7 +1,19 @@
 
 # EMG Gesture V2
 
-EMG Gesture V2 is an EMG training and data-collection interface for testing gesture capture with either mock data or a live OpenBCI Ganglion signal.
+EMG Gesture V2 is a biosignal capture study interface for comparing threshold-triggered and participant button-triggered recording with either mock data or a live OpenBCI Ganglion signal.
+
+## Study flow
+
+The primary workflow is organized around three stages:
+
+1. `Capture`: collect matched threshold and button trials while monitoring the live activity envelope and raw signal.
+2. `Review`: inspect every captured waveform in paired, trigger-aligned cards.
+3. `Compare`: compare capture counts, sample usability, RMS, peak, range, and window duration between methods.
+
+Both trigger methods use the same pre-trigger buffer and fixed-duration recorder. The exported JSON includes study settings, trigger metadata, summary metrics, and the raw points for every capture.
+
+The top of the interface is an interactive node canvas: live signal connects to threshold and button capture, both feed captured-pair review, and review feeds comparison. You can drag nodes, pan/zoom, delete an edge, and reconnect valid ports. Disconnecting live signal from a capture method disarms that method. Disconnecting a method from review removes its samples from the canvas preview without deleting the underlying trial data; reconnecting restores them. The full-size live activity/raw graphs and captured waveform review remain in the workspace beneath the canvas.
 
 ## Run the app
 
