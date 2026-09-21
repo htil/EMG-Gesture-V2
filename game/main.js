@@ -48,6 +48,13 @@ camera.position.set(0, 2, 3);
 camera.lookAt(0, 2, 0);
 
 let mixer = null;
+let runAction = null;
+let jumpAction = null;
+let slideAction = null;
+// prevents jumping/sliding while mid-jump
+let isJumping = false;
+let isSliding = false;
+
 const clock = new THREE.Clock()
 
 const loader = new GLTFLoader();
@@ -55,29 +62,115 @@ loader.load(
   '/models/runner.glb',
   (gltf) => {
     const model = gltf.scene;
-    model.position.set(-1, 0, 0);
+    model.position.set(0, 0, 0);
     model.rotation.y = Math.PI;
     // model.scale.setScalar(1);
     scene.add(model);
 
     // Animation
     mixer = new THREE.AnimationMixer(model);
-    const clips = gltf.animations;
+    
+    const runClip =
+      THREE.AnimationClip.findByName(gltf.animations, 'Running') || gltf.animations[0];
 
-    const runClip = THREE.AnimationClip.findByName(clips, 'Running') || clips[0];
+    runAction = mixer.clipAction(runClip);
+    runAction.play();
 
-    if (runClip) {
-      const action = mixer.clipAction(runClip);
-      action.play();
-    } else {
-      console.warn('No animations found on this model.');
-    }
+    mixer.addEventListener('finished', (event) => {
+      if (event.action == jumpAction) {
+        isJumping = false;
+        jumpAction.fadeOut(0.15);
+        runAction.reset().fadeIn(0.15).play();
+      }
+      if (event.action == slideAction) {
+        isSliding = false;
+        slideAction.fadeOut(0.15);
+        runAction.reset().fadeIn(0.15).play();
+      }
+    });
+
+    loader.load(
+      '/models/jump.glb',
+      (jumpGltf) => {
+        const jumpClip =
+          THREE.AnimationClip.findByName(jumpGltf.animations, 'Running Jump') || jumpGltf.animations[0];
+
+        lockRootXZ(jumpClip)
+
+        jumpAction = mixer.clipAction(jumpClip);
+        jumpAction.setLoop(THREE.LoopOnce, 1);
+        jumpAction.clampWhenFinished = true;
+      },
+      undefined,
+      (error) => {
+        console.error('Failed to load jump:', error);
+      }
+    );
+    
+    loader.load(
+      '/models/slide.glb',
+      (slideGltf) => {
+        const slideClip =
+          THREE.AnimationClip.findByName(slideGltf.animations, 'Running Slide') || slideGltf.animations[0];
+        
+        lockRootXZ(slideClip)
+
+        slideAction = mixer.clipAction(slideClip);
+        slideAction.setLoop(THREE.LoopOnce, 1);
+        slideAction.clampWhenFinished = true;
+      },
+      undefined,
+      (error) => {
+        console.error('Failed to load slide', error);
+      }
+    );
   },
   undefined,
   (error) => {
     console.error('Failed to load model:', error);
   }
 );
+
+// Event Listener for jump action
+window.addEventListener('keydown', (event) => {
+  if (event.repeat) return;
+  if (event.code == 'ArrowUp') startJump();
+  if (event.code == 'ArrowDown') startSlide();
+})
+
+// Removes horizontal movement from jump/slide animations
+function lockRootXZ(clip) {
+  for (const track of clip.tracks) {
+    if (!track.name.endsWith('Hips.position')) continue;
+
+    const values = track.values;
+    const baseX = values[0];
+    const baseZ = values[1];
+
+    for (let i = 0; i < values.length; i += 3) {
+      values[i] = baseX;
+      values[i+1] = baseZ;
+    }
+  }
+}
+
+function startJump() {
+  if (isJumping || isSliding || !jumpAction || !runAction) return;
+
+  isJumping = true;
+  jumpAction.reset();
+  jumpAction.crossFadeFrom(runAction, 0.1, false);
+  jumpAction.play()
+}
+
+function startSlide() {
+  if (isSliding || isJumping || !slideAction || !runAction) return;
+
+  isSliding = true;
+  slideAction.reset();
+  slideAction.crossFadeFrom(runAction, 0.1, false);
+  slideAction.play()
+}
 
 function createGroundTexture() {
   const size = 256;
