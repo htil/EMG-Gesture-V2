@@ -55,12 +55,8 @@ for (let i = 0; i < HURDLE_COUNT; i++) {
   high_hurdles.push(hurdle)
 }
 
-const camera = new THREE.PerspectiveCamera( 75, window.innerWidth / window.innerHeight, 0.1, 1000 );
-
-const renderer = new THREE.WebGLRenderer();
-renderer.setSize( window.innerWidth, window.innerHeight );
-renderer.setAnimationLoop( animate );
-document.body.appendChild( renderer.domElement );
+const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
+let activeRenderer = null;
 
 const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.2);
 hemiLight.position.set(0, 20, 0);
@@ -158,12 +154,42 @@ loader.load(
   }
 );
 
-// Event Listener for jump action
-window.addEventListener('keydown', (event) => {
-  if (event.repeat) return;
-  if (event.code == 'ArrowUp') startJump();
-  if (event.code == 'ArrowDown') startSlide();
-})
+export function mountGame(container) {
+  const resizeRenderer = () => {
+    const width = container.clientWidth || window.innerWidth;
+    const height = container.clientHeight || window.innerHeight;
+    camera.aspect = width / Math.max(height, 1);
+    camera.updateProjectionMatrix();
+    activeRenderer?.setSize(width, height);
+  };
+
+  const renderer = new THREE.WebGLRenderer();
+  renderer.domElement.style.display = 'block';
+  activeRenderer = renderer;
+  container.appendChild(renderer.domElement);
+  resizeRenderer();
+  renderer.setAnimationLoop(animate);
+  clock.getDelta();
+
+  const onKeyDown = (event) => {
+    if (event.repeat) return;
+    if (event.code == 'ArrowUp') startJump();
+    if (event.code == 'ArrowDown') startSlide();
+  };
+  window.addEventListener('keydown', onKeyDown);
+
+  const resizeObserver = new ResizeObserver(resizeRenderer);
+  resizeObserver.observe(container);
+
+  return () => {
+    renderer.setAnimationLoop(null);
+    window.removeEventListener('keydown', onKeyDown);
+    resizeObserver.disconnect();
+    renderer.domElement.remove();
+    renderer.dispose();
+    if (activeRenderer === renderer) activeRenderer = null;
+  };
+}
 
 // Removes horizontal movement from jump/slide animations
 function lockRootXZ(clip) {
@@ -317,5 +343,5 @@ function animate() {
     }
   }
 
-  renderer.render(scene, camera);
+  activeRenderer?.render(scene, camera);
 }

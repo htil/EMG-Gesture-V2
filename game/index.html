@@ -7,6 +7,9 @@
     </style>
   </head>
   <body>
-    <script type="module" src="/main.js"></script>
+    <script type="module">
+      import { mountGame } from './main.js';
+      mountGame(document.body);
+    </script>
   </body>
 </html>
