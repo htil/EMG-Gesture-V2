@@ -6,6 +6,13 @@ const SEGMENT_LENGTH = 20;
 const SEGMENT_COUNT = 4;
 const RUN_SPEED = 10;
 
+const HURDLE_WIDTH = 2.4;
+const SHORT_HURDLE_HEIGHT = 0.45;
+const HIGH_HURDLE_HEIGHT = 1.0;
+const HURDLE_COUNT = 3; // Same constant is used for short and tall hurdles
+const HURDLE_SPACING = 40;
+const HURDLE_HIT_DEPTH = 0.35;
+
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
 scene.fog = new THREE.Fog(0x87ceeb, 15, 50);
@@ -26,6 +33,26 @@ for (let i = 0; i < SEGMENT_COUNT; i++) {
   scene.add(segment);
   // Segments are stored for cycling
   groundSegments.push(segment);
+}
+
+const short_hurdles = [];
+
+// Initialize short hurdles
+for (let i = 0; i < HURDLE_COUNT; i++) {
+  const hurdle = createHurdle(SHORT_HURDLE_HEIGHT);
+  hurdle.position.z = -(i + 1) * HURDLE_SPACING;
+  scene.add(hurdle);
+  short_hurdles.push(hurdle);
+}
+
+const high_hurdles = [];
+
+// Initialize tall hurdles
+for (let i = 0; i < HURDLE_COUNT; i++) {
+  const hurdle = createHurdle(HIGH_HURDLE_HEIGHT);
+  hurdle.position.z = -(i + 1.5) * HURDLE_SPACING;
+  scene.add(hurdle);
+  high_hurdles.push(hurdle)
 }
 
 const camera = new THREE.PerspectiveCamera( 75, window.innerWidth / window.innerHeight, 0.1, 1000 );
@@ -200,15 +227,93 @@ function createGroundSegment() {
   return mesh;
 }
 
+// Same function will be used for short and tall hurdles
+function createHurdle(HURDLE_HEIGHT) {
+  const group = new THREE.Group();
+  const material = new THREE.MeshStandardMaterial({
+    color: 0xc4c4c4,
+    metalness: 0.35,
+    roughness: 0.45,
+  });
+
+  const postGeo = new THREE.BoxGeometry(0.08, HURDLE_HEIGHT, 0.08);
+  const barGeo = new THREE.BoxGeometry(HURDLE_WIDTH, 0.06, 0.06);
+
+  const leftPost = new THREE.Mesh(postGeo, material);
+  leftPost.position.set(-HURDLE_WIDTH/2, HURDLE_HEIGHT/2, 0);
+
+  const rightPost = new THREE.Mesh(postGeo, material);
+  rightPost.position.set(HURDLE_WIDTH/2, HURDLE_HEIGHT/2, 0);
+
+  const bar = new THREE.Mesh(barGeo, material);
+  bar.position.set(0, HURDLE_HEIGHT, 0);
+
+  group.add(leftPost, rightPost, bar);
+  return group;
+}
+
+function resetGame() {
+  isJumping = false;
+  isSliding = false;
+
+  if (jumpAction) {
+    jumpAction.stop();
+    jumpAction.reset();
+  }
+  if (slideAction) {
+    slideAction.stop();
+    slideAction.reset();
+  }
+  if (runAction) {
+    runAction.reset().fadeIn(0.1).play();
+  }
+
+  for (let i = 0; i < groundSegments.length; i++) {
+    groundSegments[i].position.z = -i * SEGMENT_LENGTH;
+  }
+
+  for (let i = 0; i < short_hurdles.length; i++) {
+    short_hurdles[i].position.z = -(i + 1) * HURDLE_SPACING;
+  }
+  for (let i = 0; i < high_hurdles.length; i++) {
+    high_hurdles[i].position.z = -(i + 1.5) * HURDLE_SPACING;
+  }
+}
+
 function animate() {
   const delta = clock.getDelta();
   if (mixer) mixer.update(delta);
 
+  // Recycle ground segments
   for (const segment of groundSegments) {
     segment.position.z += RUN_SPEED * delta;
 
     if (segment.position.z > SEGMENT_LENGTH) {
       segment.position.z -= SEGMENT_COUNT * SEGMENT_LENGTH;
+    }
+  }
+
+  // Recycle hurdles
+  for (const hurdle of short_hurdles) {
+    hurdle.position.z += RUN_SPEED * delta;
+
+    if (hurdle.position.z > SEGMENT_LENGTH) {
+      hurdle.position.z -= HURDLE_COUNT * HURDLE_SPACING;
+    }
+    if (Math.abs(hurdle.position.z) < HURDLE_HIT_DEPTH && !isJumping) {
+      resetGame();
+      return;
+    }
+  }
+  for (const hurdle of high_hurdles) {
+    hurdle.position.z += RUN_SPEED * delta;
+
+    if (hurdle.position.z > SEGMENT_LENGTH) {
+      hurdle.position.z -= HURDLE_COUNT * HURDLE_SPACING;
+    }
+    if (Math.abs(hurdle.position.z) < HURDLE_HIT_DEPTH && !isSliding) {
+      resetGame();
+      return;
     }
   }
 
