@@ -6,7 +6,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
-    "typecheck": "tsc --noEmit --jsx react-jsx --module esnext --moduleResolution bundler --target es2020 --skipLibCheck --allowSyntheticDefaultImports src/app/StudyFlowCanvas.tsx src/app/FlowBasedCaptureScreen.tsx src/app/openbci-utilities.d.ts"
+    "typecheck": "tsc --noEmit --jsx react-jsx --module esnext --moduleResolution bundler --target es2020 --skipLibCheck --allowSyntheticDefaultImports src/app/App.tsx src/app/StudyFlowCanvas.tsx src/app/FlowBasedCaptureScreen.tsx src/app/study/api.ts src/app/study/ParticipantGate.tsx src/app/study/StudySession.tsx src/app/admin/AdminApp.tsx src/app/openbci-utilities.d.ts"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",

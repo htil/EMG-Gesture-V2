@@ -5,15 +5,35 @@ EMG Gesture V2 is a biosignal capture study interface for comparing threshold-tr
 
 ## Study flow
 
-The primary workflow is organized around three stages:
+Participants receive an ID and enter it on the site. The ID is looked up in `data/participants.csv` and assigned to either the button version or the threshold version. The session itself does not say which version is running.
 
-1. `Capture`: collect matched threshold and button trials while monitoring the live activity envelope and raw signal.
-2. `Review`: inspect every captured waveform in paired, trigger-aligned cards.
-3. `Compare`: compare capture counts, sample usability, RMS, peak, range, and window duration between methods.
+Each round is the same three steps:
 
-Both trigger methods use the same pre-trigger buffer and fixed-duration recorder. The exported JSON includes study settings, trigger metadata, summary metrics, and the raw points for every capture.
+1. `Capture`: record the configured number of gestures with the assigned version.
+2. `Review`: inspect the waveforms from that round.
+3. `Compare`: look across those captures, then start the next round.
 
-The top of the interface is an interactive node canvas: live signal connects to threshold and button capture, both feed captured-pair review, and review feeds comparison. You can drag nodes, pan/zoom, delete an edge, and reconnect valid ports. Disconnecting live signal from a capture method disarms that method. Disconnecting a method from review removes its samples from the canvas preview without deleting the underlying trial data; reconnecting restores them. The full-size live activity/raw graphs and captured waveform review remain in the workspace beneath the canvas.
+After Compare, the round loops back to Capture until the experiment's repetition count is finished. Full waveforms for each finished round are written to `data/sessions/`.
+
+The paired lab canvas, with both trigger methods visible, remains at `/lab`.
+
+## Run a blinded session
+
+From the project root:
+
+```bash
+npm install
+npm run dev
+```
+
+Open the local Vite URL.
+
+- Participants use `/` and enter the ID they were given.
+- Organizers use `/admin`. The default pin is `emg-admin` (`data/settings.json`).
+- The admin desk creates experiments, sets how many times the three-step loop repeats, generates IDs, and assigns each ID to button or threshold.
+- Do not show `data/participants.csv` to participants. That file is the assignment list.
+
+Sample IDs for the seeded experiment are `K7M2QP`, `H4N8LR`, `P3W6TX`, and `Q9C2VD`. Their assignments are visible only in the admin desk.
 
 ## Run the app
 

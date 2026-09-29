@@ -8,6 +8,7 @@ import {
   CircleDot,
   Download,
   FlaskConical,
+  Gamepad2,
   Hand,
   Pause,
   Play,
@@ -37,7 +38,7 @@ import { useGestureRecorder, type CaptureTriggerMode } from './useGestureRecorde
 import { useSignalSource, type SignalPoint, type SignalSourceMode } from './useSignalSource';
 import StudyFlowCanvas from './StudyFlowCanvas';
 
-type FlowStage = 'capture' | 'review' | 'compare';
+type FlowStage = 'capture' | 'review' | 'game' | 'compare';
 type TrialQuality = 'usable' | 'review';
 
 interface CapturedTrial {
@@ -96,7 +97,8 @@ const FLOW_STAGES: Array<{
 }> = [
   { id: 'capture', eyebrow: '01', label: 'Capture', description: 'Run matched trials' },
   { id: 'review', eyebrow: '02', label: 'Review', description: 'Inspect paired signals' },
-  { id: 'compare', eyebrow: '03', label: 'Compare', description: 'Evaluate methods' },
+  { id: 'game', eyebrow: '03', label: 'Play', description: 'Three.js review game' },
+  { id: 'compare', eyebrow: '04', label: 'Compare', description: 'Evaluate methods' },
 ];
 
 function calculateMetrics(points: Array<{ time: number; value: number }>) {
@@ -593,20 +595,20 @@ export default function FlowBasedCaptureScreen() {
             </div>
           </div>
 
-          <nav className="hidden items-center gap-1 rounded-2xl border border-white/8 bg-white/[0.025] p-1 md:flex" aria-label="Study flow">
+          <nav className="hidden min-w-0 items-center gap-1 overflow-x-auto rounded-2xl border border-white/8 bg-white/[0.025] p-1 md:flex" aria-label="Study flow">
             {FLOW_STAGES.map((item, index) => {
               const active = stage === item.id;
-              const available = item.id === 'capture' || trials.length > 0;
+              const available = item.id === 'capture' || item.id === 'game' || trials.length > 0;
               return (
                 <button
                   key={item.id}
                   type="button"
                   disabled={!available}
                   onClick={() => setStage(item.id)}
-                  className={`flex items-center gap-3 rounded-xl px-4 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-35 ${active ? 'bg-white/8 text-white' : 'text-slate-500 hover:bg-white/5 hover:text-slate-300'}`}
+                  className={`flex shrink-0 items-center gap-3 rounded-xl px-3 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-35 ${active ? 'bg-white/8 text-white' : 'text-slate-500 hover:bg-white/5 hover:text-slate-300'}`}
                 >
                   <span className={`flex h-6 w-6 items-center justify-center rounded-full text-[10px] ${active ? 'bg-cyan-300 text-slate-950' : 'border border-white/10'}`}>
-                    {index < FLOW_STAGES.findIndex((flowStage) => flowStage.id === stage) ? <Check className="h-3.5 w-3.5" /> : item.eyebrow}
+                    {trials.length > 0 && index < FLOW_STAGES.findIndex((flowStage) => flowStage.id === stage) ? <Check className="h-3.5 w-3.5" /> : item.eyebrow}
                   </span>
                   <span><span className="block text-xs font-medium">{item.label}</span><span className="block text-[10px] text-slate-600">{item.description}</span></span>
                 </button>
@@ -661,7 +663,7 @@ export default function FlowBasedCaptureScreen() {
 
         <div className="mb-5 flex items-center gap-2 overflow-x-auto md:hidden">
           {FLOW_STAGES.map((item) => (
-            <button key={item.id} type="button" disabled={item.id !== 'capture' && trials.length === 0} onClick={() => setStage(item.id)} className={`whitespace-nowrap rounded-full border px-4 py-2 text-xs ${stage === item.id ? 'border-cyan-300/30 bg-cyan-300/10 text-cyan-300' : 'border-white/8 text-slate-500'} disabled:opacity-30`}>{item.label}</button>
+            <button key={item.id} type="button" disabled={item.id !== 'capture' && item.id !== 'game' && trials.length === 0} onClick={() => setStage(item.id)} className={`whitespace-nowrap rounded-full border px-4 py-2 text-xs ${stage === item.id ? 'border-cyan-300/30 bg-cyan-300/10 text-cyan-300' : 'border-white/8 text-slate-500'} disabled:opacity-30`}>{item.label}</button>
           ))}
         </div>
 
@@ -790,7 +792,7 @@ export default function FlowBasedCaptureScreen() {
               <div><p className="text-xs font-medium uppercase tracking-[0.2em] text-cyan-300/70">Captured evidence</p><h1 className="mt-2 text-3xl font-light text-white">Paired signal review</h1><p className="mt-2 text-sm text-slate-500">Compare trigger-aligned waveforms without losing the raw shape of each capture.</p></div>
               <div className="flex gap-2">
                 <button type="button" onClick={() => setStage('capture')} className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-300 hover:bg-white/5">Continue capture</button>
-                <button type="button" onClick={() => setStage('compare')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950">Compare methods <ArrowRight className="h-3.5 w-3.5" /></button>
+                <button type="button" onClick={() => setStage('game')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950">Open review game <ArrowRight className="h-3.5 w-3.5" /></button>
               </div>
             </section>
 
@@ -816,6 +818,32 @@ export default function FlowBasedCaptureScreen() {
               );
             })}
           </div>
+        )}
+
+        {stage === 'game' && (
+          <section className="overflow-hidden rounded-[28px] border border-dashed border-emerald-300/30 bg-slate-950/55">
+            <div className="flex flex-col gap-4 border-b border-white/8 p-5 md:flex-row md:items-end md:justify-between md:p-7">
+              <div>
+                <p className="text-xs font-medium uppercase tracking-[0.2em] text-emerald-300/80">In development</p>
+                <h1 className="mt-2 text-3xl font-light text-white">Review game</h1>
+                <p className="mt-2 max-w-xl text-sm leading-6 text-slate-500">This step is reserved for a Three.js game. Participants will review the collected trials here with the trained model. The game is still being built.</p>
+              </div>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setStage('review')} className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-300 hover:bg-white/5">Back to signals</button>
+                <button type="button" onClick={() => setStage('compare')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950">Compare methods <ArrowRight className="h-3.5 w-3.5" /></button>
+              </div>
+            </div>
+            <div className="p-4 md:p-6">
+              <div className="flex min-h-[460px] flex-col items-center justify-center rounded-[22px] border border-dashed border-emerald-300/25 bg-[linear-gradient(rgba(110,231,183,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(110,231,183,0.05)_1px,transparent_1px),rgba(0,0,0,0.25)] bg-[size:28px_28px,28px_28px,auto] text-center">
+                <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-emerald-300/20 bg-emerald-300/10 text-emerald-300">
+                  <Gamepad2 className="h-5 w-5" />
+                </span>
+                <p className="mt-5 text-[11px] font-medium uppercase tracking-[0.22em] text-emerald-300/80">Three.js canvas placeholder</p>
+                <p className="mt-2 max-w-md text-sm leading-6 text-slate-500">Reserved space for the review game. Captured threshold and button trials will be playable here once the game is connected.</p>
+                <p className="mt-6 text-xs tabular-nums text-slate-600">{trials.length === 0 ? 'No trials captured yet' : `${trials.length} trial${trials.length === 1 ? '' : 's'} waiting`}</p>
+              </div>
+            </div>
+          </section>
         )}
 
         {stage === 'compare' && (

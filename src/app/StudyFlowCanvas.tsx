@@ -15,11 +15,11 @@ import {
   type Node,
   type NodeProps,
 } from '@xyflow/react';
-import { Activity, ArrowRight, BarChart3, Hand, RotateCcw, Waves, Zap } from 'lucide-react';
+import { Activity, ArrowRight, BarChart3, Gamepad2, Hand, RotateCcw, Waves, Zap } from 'lucide-react';
 import type { CaptureTriggerMode } from './useGestureRecorder';
 import type { SignalPoint } from './useSignalSource';
 
-type Stage = 'capture' | 'review' | 'compare';
+type Stage = 'capture' | 'review' | 'game' | 'compare';
 
 export interface FlowTrialPreview {
   id: string;
@@ -54,7 +54,8 @@ const allowedPairs = new Set([
   'signal:button',
   'threshold:review',
   'button:review',
-  'review:compare',
+  'review:game',
+  'game:compare',
 ]);
 
 export const STUDY_INITIAL_EDGES: Edge[] = [
@@ -62,15 +63,17 @@ export const STUDY_INITIAL_EDGES: Edge[] = [
   { id: 'signal-button', source: 'signal', target: 'button', type: 'smoothstep' },
   { id: 'threshold-review', source: 'threshold', target: 'review', type: 'smoothstep' },
   { id: 'button-review', source: 'button', target: 'review', type: 'smoothstep' },
-  { id: 'review-compare', source: 'review', target: 'compare', type: 'smoothstep' },
+  { id: 'review-game', source: 'review', target: 'game', type: 'smoothstep' },
+  { id: 'game-compare', source: 'game', target: 'compare', type: 'smoothstep' },
 ];
 
 const initialNodes: StudyNode[] = [
-  { id: 'signal', type: 'signalNode', position: { x: 0, y: 140 }, data: { label: 'Live signal' } },
-  { id: 'threshold', type: 'triggerNode', position: { x: 400, y: 30 }, data: { label: 'Threshold', method: 'threshold' } },
-  { id: 'button', type: 'triggerNode', position: { x: 400, y: 310 }, data: { label: 'Button', method: 'button' } },
-  { id: 'review', type: 'reviewNode', position: { x: 765, y: 140 }, data: { label: 'Captured pairs' } },
-  { id: 'compare', type: 'compareNode', position: { x: 1125, y: 95 }, data: { label: 'Comparison' } },
+  { id: 'signal', type: 'signalNode', position: { x: 0, y: 180 }, data: { label: 'Live signal' } },
+  { id: 'threshold', type: 'triggerNode', position: { x: 420, y: 24 }, data: { label: 'Threshold', method: 'threshold' } },
+  { id: 'button', type: 'triggerNode', position: { x: 420, y: 390 }, data: { label: 'Button', method: 'button' } },
+  { id: 'review', type: 'reviewNode', position: { x: 800, y: 180 }, data: { label: 'Captured pairs' } },
+  { id: 'game', type: 'gameNode', position: { x: 1180, y: 150 }, data: { label: 'Review game' } },
+  { id: 'compare', type: 'compareNode', position: { x: 1580, y: 175 }, data: { label: 'Comparison' } },
 ];
 
 function pointsToPolyline(values: number[], width: number, height: number, min?: number, max?: number) {
@@ -164,6 +167,30 @@ function ReviewNode({ data }: NodeProps<StudyNode>) {
   );
 }
 
+function GameNode({ data }: NodeProps<StudyNode>) {
+  const trialCount = data.trials?.length ?? 0;
+  return (
+    <div className="study-node study-node-game">
+      <Handle type="target" position={Position.Left} id="game-in" className="study-handle" />
+      <div className="study-node-heading">
+        <span className="study-node-icon emerald"><Gamepad2 size={17} /></span>
+        <div><strong>Review game</strong><small>Three.js · in development</small></div>
+      </div>
+      <div className="study-node-inner">
+        <div className="study-game-slot">
+          <span>Reserved canvas</span>
+          <small>{trialCount > 0 ? `${trialCount} captured trials ready` : 'Collected trials will load here'}</small>
+        </div>
+        <p className="study-node-note">Participants review captured signals against the trained model inside the game.</p>
+        <button className="study-node-action nodrag" type="button" onClick={data.onOpen}>
+          Open placeholder <ArrowRight size={13} />
+        </button>
+      </div>
+      <Handle type="source" position={Position.Right} id="game-out" className="study-handle" />
+    </div>
+  );
+}
+
 function CompareNode({ data }: NodeProps<StudyNode>) {
   const threshold = (data.trials ?? []).filter((trial) => trial.method === 'threshold').length;
   const button = (data.trials ?? []).filter((trial) => trial.method === 'button').length;
@@ -188,6 +215,7 @@ const nodeTypes = {
   signalNode: SignalNode,
   triggerNode: TriggerNode,
   reviewNode: ReviewNode,
+  gameNode: GameNode,
   compareNode: CompareNode,
 };
 
@@ -224,6 +252,7 @@ export default function StudyFlowCanvas({
   const [edges, setEdges, onEdgesChange] = useEdgesState(STUDY_INITIAL_EDGES);
   const hasConnection = useCallback((source: string, target: string) => edges.some((edge) => edge.source === source && edge.target === target), [edges]);
   const routedTrials = useMemo(() => trials.filter((trial) => hasConnection(trial.method, 'review')), [hasConnection, trials]);
+  const gameTrials = useMemo(() => (hasConnection('review', 'game') ? routedTrials : []), [hasConnection, routedTrials]);
 
   useEffect(() => {
     onConnectivityChange({
@@ -245,18 +274,21 @@ export default function StudyFlowCanvas({
         gestureName,
         activeMethod,
         trials: node.id === 'compare'
-          ? hasConnection('review', 'compare') ? routedTrials : []
-          : node.id === 'review' ? routedTrials : trials,
+          ? hasConnection('game', 'compare') ? gameTrials : []
+          : node.id === 'game' ? gameTrials
+            : node.id === 'review' ? routedTrials : trials,
         connected: hasConnection('signal', node.id),
         trialCount: trials.filter((trial) => trial.method === node.id).length,
         triggerEnabled: buttonTriggerEnabled && hasConnection('signal', 'button'),
         onOpen: node.id === 'threshold' || node.id === 'button'
           ? () => onOpenStage('capture', node.id as CaptureTriggerMode)
-          : node.id === 'review' ? () => onOpenStage('review') : () => onOpenStage('compare'),
+          : node.id === 'review' ? () => onOpenStage('review')
+            : node.id === 'game' ? () => onOpenStage('game')
+              : () => onOpenStage('compare'),
         onTrigger: onButtonTrigger,
       },
     })));
-  }, [activeMethod, buttonTriggerEnabled, gestureName, hasConnection, isRecording, isStreaming, onButtonTrigger, onOpenStage, rawData, routedTrials, setNodes, signalData, threshold, trials]);
+  }, [activeMethod, buttonTriggerEnabled, gameTrials, gestureName, hasConnection, isRecording, isStreaming, onButtonTrigger, onOpenStage, rawData, routedTrials, setNodes, signalData, threshold, trials]);
 
   const onConnect = useCallback((connection: Connection) => {
     if (!connection.source || !connection.target || !allowedPairs.has(`${connection.source}:${connection.target}`)) return;
@@ -270,7 +302,7 @@ export default function StudyFlowCanvas({
   const styledEdges = useMemo(() => edges.map((edge) => ({
     ...edge,
     animated: isStreaming && edge.source === 'signal',
-    style: { stroke: edge.source === 'button' ? '#a78bfa' : edge.source === 'threshold' ? '#22d3ee' : '#5f7795', strokeWidth: 2.2 },
+    style: { stroke: edge.source === 'button' ? '#a78bfa' : edge.source === 'threshold' ? '#22d3ee' : edge.source === 'game' || edge.target === 'game' ? '#6ee7b7' : '#5f7795', strokeWidth: 2.2 },
   })), [edges, isStreaming]);
 
   return (
@@ -291,6 +323,7 @@ export default function StudyFlowCanvas({
           onNodeClick={(_, node) => {
             if (node.id === 'threshold' || node.id === 'button') onOpenStage('capture', node.id as CaptureTriggerMode);
             else if (node.id === 'review') onOpenStage('review');
+            else if (node.id === 'game') onOpenStage('game');
             else if (node.id === 'compare') onOpenStage('compare');
           }}
           fitView
@@ -302,10 +335,10 @@ export default function StudyFlowCanvas({
         >
           <Background variant={BackgroundVariant.Dots} gap={22} size={1.3} color="rgba(148,163,184,0.15)" />
           <Controls showInteractive={false} />
-          <MiniMap nodeColor={(node) => node.id === 'button' ? '#a78bfa' : node.id === 'threshold' ? '#22d3ee' : '#334155'} maskColor="rgba(5,8,18,0.65)" />
+          <MiniMap nodeColor={(node) => node.id === 'button' ? '#a78bfa' : node.id === 'threshold' ? '#22d3ee' : node.id === 'game' ? '#6ee7b7' : '#334155'} maskColor="rgba(5,8,18,0.65)" />
         </ReactFlow>
       </div>
-      <div className="study-flow-caption"><span><span className="study-flow-legend cyan" /> Signal / threshold path</span><span><span className="study-flow-legend violet" /> Button path</span><span>Delete a selected connection to disconnect; drag between ports to restore it.</span></div>
+      <div className="study-flow-caption"><span><span className="study-flow-legend cyan" /> Signal / threshold path</span><span><span className="study-flow-legend violet" /> Button path</span><span><span className="study-flow-legend emerald" /> Review game</span><span>Delete a selected connection to disconnect; drag between ports to restore it.</span></div>
     </section>
   );
 }
