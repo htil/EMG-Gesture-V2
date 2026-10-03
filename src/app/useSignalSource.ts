@@ -45,7 +45,7 @@ const ACTIVE_REFERENCE_SMOOTHING = 0.18;
 const ACTIVE_REFERENCE_HEADROOM = 1.1;
 
 const clampSignalValue = (value: number) => Math.max(0, Math.min(1, value));
-const trimPointsToTimeWindow = (points: SignalPoint[], windowMs: number) => {
+const trimPointsToTimeWindow = <T extends { time: number }>(points: T[], windowMs: number): T[] => {
   if (points.length === 0) {
     return points;
   }

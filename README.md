@@ -1,7 +1,39 @@
 
 # EMG Gesture V2
 
-EMG Gesture V2 is an EMG training and data-collection interface for testing gesture capture with either mock data or a live OpenBCI Ganglion signal.
+EMG Gesture V2 is a biosignal capture study interface for comparing threshold-triggered and participant button-triggered recording with either mock data or a live OpenBCI Ganglion signal.
+
+## Study flow
+
+Participants receive an ID and enter it on the site. The ID is looked up in `data/participants.csv` and assigned to either the button version or the threshold version. The session itself does not say which version is running.
+
+Each round is the same three steps:
+
+1. `Capture`: record the configured number of gestures with the assigned version.
+2. `Review`: inspect the waveforms from that round.
+3. `Compare`: look across those captures, then start the next round.
+
+After Compare, the round loops back to Capture until the experiment's repetition count is finished. Full waveforms for each finished round are written to `data/sessions/`.
+
+The paired lab canvas, with both trigger methods visible, remains at `/lab`.
+
+## Run a blinded session
+
+From the project root:
+
+```bash
+npm install
+npm run dev
+```
+
+Open the local Vite URL.
+
+- Participants use `/` and enter the ID they were given.
+- Organizers use `/admin`. The default pin is `emg-admin` (`data/settings.json`).
+- The admin desk creates experiments, sets how many times the three-step loop repeats, generates IDs, and assigns each ID to button or threshold.
+- Do not show `data/participants.csv` to participants. That file is the assignment list.
+
+Sample IDs for the seeded experiment are `K7M2QP`, `H4N8LR`, `P3W6TX`, and `Q9C2VD`. Their assignments are visible only in the admin desk.
 
 ## Run the app
 

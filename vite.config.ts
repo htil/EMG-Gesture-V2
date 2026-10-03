@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 import path from 'path'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
+import { studyApiPlugin } from './server/study-api.mjs'
 
 
 function figmaAssetResolver() {
@@ -18,6 +19,7 @@ function figmaAssetResolver() {
 
 export default defineConfig({
   plugins: [
+    studyApiPlugin(path.resolve(__dirname, 'data')),
     figmaAssetResolver(),
     // The React and Tailwind plugins are both required for Make, even if
     // Tailwind is not being actively used – do not remove them

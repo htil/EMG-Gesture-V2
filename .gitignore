@@ -32,3 +32,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Study records written while a session runs
+data/rounds.csv
+data/sessions/*
+!data/sessions/.gitkeep
