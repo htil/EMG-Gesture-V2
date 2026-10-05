@@ -2,20 +2,28 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 const TRACK_WIDTH = 10;
+const LANE_WIDTH = 2.2;
+const LANE_OFFSET = 1.5;
 const SEGMENT_LENGTH = 20;
 const SEGMENT_COUNT = 4;
 const RUN_SPEED = 10;
 
 const HURDLE_WIDTH = 2.4;
-const SHORT_HURDLE_HEIGHT = 0.45;
-const HIGH_HURDLE_HEIGHT = 1.0;
-const HURDLE_COUNT = 3; // Same constant is used for short and tall hurdles
+const HURDLE_HEIGHT = 0.45;
+const HURDLE_COUNT = 6;
 const HURDLE_SPACING = 40;
 const HURDLE_HIT_DEPTH = 0.35;
+
+const JUMP_SCALE = 2; // Edit jump height
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
 scene.fog = new THREE.Fog(0x87ceeb, 15, 50);
+
+const roadMaterial = new THREE.MeshStandardMaterial({
+  color: 0x8d8d8d,
+  roughness: 1,
+})
 
 const groundTexture = createGroundTexture();
 const groundMaterial = new THREE.MeshStandardMaterial({
@@ -35,24 +43,14 @@ for (let i = 0; i < SEGMENT_COUNT; i++) {
   groundSegments.push(segment);
 }
 
-const short_hurdles = [];
+const hurdles = [];
 
-// Initialize short hurdles
+// Initialize hurdles
 for (let i = 0; i < HURDLE_COUNT; i++) {
-  const hurdle = createHurdle(SHORT_HURDLE_HEIGHT);
+  const hurdle = createHurdle();
   hurdle.position.z = -(i + 1) * HURDLE_SPACING;
   scene.add(hurdle);
-  short_hurdles.push(hurdle);
-}
-
-const high_hurdles = [];
-
-// Initialize tall hurdles
-for (let i = 0; i < HURDLE_COUNT; i++) {
-  const hurdle = createHurdle(HIGH_HURDLE_HEIGHT);
-  hurdle.position.z = -(i + 1.5) * HURDLE_SPACING;
-  scene.add(hurdle);
-  high_hurdles.push(hurdle)
+  hurdles.push(hurdle);
 }
 
 const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
@@ -79,80 +77,134 @@ let isJumping = false;
 let isSliding = false;
 
 const clock = new THREE.Clock()
-
 const loader = new GLTFLoader();
-loader.load(
-  '/models/runner.glb',
-  (gltf) => {
-    const model = gltf.scene;
-    model.position.set(0, 0, 0);
-    model.rotation.y = Math.PI;
-    // model.scale.setScalar(1);
-    scene.add(model);
 
-    // Animation
-    mixer = new THREE.AnimationMixer(model);
-    
-    const runClip =
-      THREE.AnimationClip.findByName(gltf.animations, 'Running') || gltf.animations[0];
+const atlas = new THREE.TextureLoader().load('/models/Atlas_Pirate.png');
+atlas.colorSpace = THREE.SRGBColorSpace;
+atlas.flipY = false;
 
-    runAction = mixer.clipAction(runClip);
-    runAction.play();
+const characters = [
+  '/models/Anne.glb',
+  '/models/Captain.glb',
+  '/models/Henry.glb',
+  '/models/Skeleton.glb',
+];
 
-    mixer.addEventListener('finished', (event) => {
-      if (event.action == jumpAction) {
+let characterModel = null;
+let loadId = 0;
+
+let characterRoot = null;
+let laneIndex = 0;
+let isSwitching = false;
+let switchFrom = -LANE_OFFSET;
+let switchTo = -LANE_OFFSET;
+let switchElapsed = 0;
+
+const LANE_SWITCH_TIME = 0.3;
+
+function findClip(animations, actionName) {
+  return animations.find((clip) => clip.name.split('|').includes(actionName));
+}
+
+function clearCharacter() {
+  loadId += 1;
+  if (characterRoot) {
+    scene.remove(characterRoot);
+    characterModel = null;
+  }
+  characterRoot = null;
+  laneIndex = 0;
+  isSwitching = false;
+
+  mixer = null;
+  runAction = null;
+
+  jumpAction = null;
+  isJumping = false;
+
+  slideAction = null;
+  isSliding = false;
+}
+
+function scaleJumpHeight(clip) {
+  const bodyTrack = clip.tracks.find((track) => track.name === 'Body.position');
+  if (!bodyTrack) return;
+  const baseY = bodyTrack.values[1];
+  const times = bodyTrack.times;
+  const values = new Float32Array(times.length * 3);
+  for (let i = 0; i < times.length; i++) {
+    const rise = Math.max(0, bodyTrack.values[i * 3 + 1] - baseY);
+    values[i * 3 + 1] = rise * (JUMP_SCALE - 1);
+  }
+  clip.tracks = clip.tracks.filter((track) => track.name !== 'Root.position');
+  clip.tracks.push(new THREE.VectorKeyframeTrack('Root.position', times, values));
+}
+
+function loadCharacter() {
+  const requestId = ++loadId;
+  const characterUrl = characters[Math.floor(Math.random() * characters.length)];
+
+  loader.load(
+    characterUrl,
+    (gltf) => {
+      if (requestId !== loadId) return;
+
+      const model = gltf.scene;
+      model.traverse((child) => {
+        if (!child.isMesh) return;
+        child.material = new THREE.MeshLambertMaterial({
+          map: atlas,
+          side: THREE.DoubleSide,
+        });
+      });
+      model.position.set(0, 0, 0);
+      model.rotation.y = Math.PI;
+
+      const root = new THREE.Group();
+      root.position.set(-LANE_OFFSET, 0, 0);
+      root.add(model);
+      scene.add(root);
+      characterRoot = root;
+      characterModel = model;
+
+      mixer = new THREE.AnimationMixer(model);
+
+      const runClip = findClip(gltf.animations, 'Run');
+      if (!runClip) {
+        console.error('No Run clip in', characterUrl);
+        return;
+      }
+
+      runAction = mixer.clipAction(runClip);
+      runAction.play();
+
+      const jumpClip = findClip(gltf.animations, 'Jump');
+      if (!jumpClip) {
+        console.error('No Jump clip in', characterUrl);
+        return;
+      }
+
+      scaleJumpHeight(jumpClip);
+
+      jumpAction = mixer.clipAction(jumpClip);
+      jumpAction.timeScale = 0.75;
+      jumpAction.setLoop(THREE.LoopOnce, 1);
+      jumpAction.clampWhenFinished = true;
+
+      mixer.addEventListener('finished', (event) => {
+        if (event.action !== jumpAction) return;
+
         isJumping = false;
         jumpAction.fadeOut(0.15);
         runAction.reset().fadeIn(0.15).play();
-      }
-      if (event.action == slideAction) {
-        isSliding = false;
-        slideAction.fadeOut(0.15);
-        runAction.reset().fadeIn(0.15).play();
-      }
-    });
-
-    loader.load(
-      '/models/jump.glb',
-      (jumpGltf) => {
-        const jumpClip =
-          THREE.AnimationClip.findByName(jumpGltf.animations, 'Running Jump') || jumpGltf.animations[0];
-
-        lockRootXZ(jumpClip)
-
-        jumpAction = mixer.clipAction(jumpClip);
-        jumpAction.setLoop(THREE.LoopOnce, 1);
-        jumpAction.clampWhenFinished = true;
-      },
-      undefined,
-      (error) => {
-        console.error('Failed to load jump:', error);
-      }
-    );
-    
-    loader.load(
-      '/models/slide.glb',
-      (slideGltf) => {
-        const slideClip =
-          THREE.AnimationClip.findByName(slideGltf.animations, 'Running Slide') || slideGltf.animations[0];
-        
-        lockRootXZ(slideClip)
-
-        slideAction = mixer.clipAction(slideClip);
-        slideAction.setLoop(THREE.LoopOnce, 1);
-        slideAction.clampWhenFinished = true;
-      },
-      undefined,
-      (error) => {
-        console.error('Failed to load slide', error);
-      }
-    );
-  },
-  undefined,
-  (error) => {
-    console.error('Failed to load model:', error);
-  }
-);
+      })
+    },
+    undefined,
+    (error) => {
+      console.error('Failed to load model:', error);
+    }
+  )
+}
 
 export function mountGame(container) {
   const resizeRenderer = () => {
@@ -162,6 +214,8 @@ export function mountGame(container) {
     camera.updateProjectionMatrix();
     activeRenderer?.setSize(width, height);
   };
+
+  loadCharacter();
 
   const renderer = new THREE.WebGLRenderer();
   renderer.domElement.style.display = 'block';
@@ -174,7 +228,8 @@ export function mountGame(container) {
   const onKeyDown = (event) => {
     if (event.repeat) return;
     if (event.code == 'ArrowUp') startJump();
-    if (event.code == 'ArrowDown') startSlide();
+    if (event.code == 'ArrowLeft') startLaneSwitch(-1);
+    if (event.code == 'ArrowRight') startLaneSwitch(1);
   };
   window.addEventListener('keydown', onKeyDown);
 
@@ -188,27 +243,12 @@ export function mountGame(container) {
     renderer.domElement.remove();
     renderer.dispose();
     if (activeRenderer === renderer) activeRenderer = null;
+    clearCharacter();
   };
 }
 
-// Removes horizontal movement from jump/slide animations
-function lockRootXZ(clip) {
-  for (const track of clip.tracks) {
-    if (!track.name.endsWith('Hips.position')) continue;
-
-    const values = track.values;
-    const baseX = values[0];
-    const baseZ = values[1];
-
-    for (let i = 0; i < values.length; i += 3) {
-      values[i] = baseX;
-      values[i+1] = baseZ;
-    }
-  }
-}
-
-function startJump() {
-  if (isJumping || isSliding || !jumpAction || !runAction) return;
+export function startJump() {
+  if (isJumping || isSliding || isSwitching || !jumpAction || !runAction) return;
 
   isJumping = true;
   jumpAction.reset();
@@ -216,13 +256,17 @@ function startJump() {
   jumpAction.play()
 }
 
-function startSlide() {
-  if (isSliding || isJumping || !slideAction || !runAction) return;
+export function startLaneSwitch(direction) {
+  if (isSwitching || isJumping || !characterRoot) return;
 
-  isSliding = true;
-  slideAction.reset();
-  slideAction.crossFadeFrom(runAction, 0.1, false);
-  slideAction.play()
+  const next = laneIndex + direction;
+  if (next < 0 || next > 1) return;
+
+  laneIndex = next;
+  switchFrom = characterRoot.position.x;
+  switchTo = next === 0 ? -LANE_OFFSET : LANE_OFFSET;
+  switchElapsed = 0;
+  isSwitching = true;
 }
 
 function createGroundTexture() {
@@ -247,17 +291,32 @@ function createGroundTexture() {
 }
 
 function createGroundSegment() {
-  const geometry = new THREE.PlaneGeometry(TRACK_WIDTH, SEGMENT_LENGTH);
-  const mesh = new THREE.Mesh(geometry, groundMaterial);
-  mesh.rotation.x = -Math.PI/2;
-  return mesh;
+  const segment = new THREE.Group();
+
+  const grass = new THREE.Mesh(
+    new THREE.PlaneGeometry(TRACK_WIDTH, SEGMENT_LENGTH),
+    groundMaterial,
+  );
+  grass.rotation.x = -Math.PI/2
+  segment.add(grass);
+
+  for (const x of [-LANE_OFFSET, LANE_OFFSET]) {
+    const road = new THREE.Mesh(
+      new THREE.PlaneGeometry(LANE_WIDTH, SEGMENT_LENGTH),
+      roadMaterial,
+    );
+    road.rotation.x = -Math.PI / 2;
+    road.position.set(x, 0.02, 0);
+    segment.add(road);
+  }
+
+  return segment;
 }
 
-// Same function will be used for short and tall hurdles
-function createHurdle(HURDLE_HEIGHT) {
+function createHurdle() {
   const group = new THREE.Group();
   const material = new THREE.MeshStandardMaterial({
-    color: 0xc4c4c4,
+    color: 0xFF0000,
     metalness: 0.35,
     roughness: 0.45,
   });
@@ -265,20 +324,38 @@ function createHurdle(HURDLE_HEIGHT) {
   const postGeo = new THREE.BoxGeometry(0.08, HURDLE_HEIGHT, 0.08);
   const barGeo = new THREE.BoxGeometry(HURDLE_WIDTH, 0.06, 0.06);
 
-  const leftPost = new THREE.Mesh(postGeo, material);
-  leftPost.position.set(-HURDLE_WIDTH/2, HURDLE_HEIGHT/2, 0);
+  // Create left lane hurdle
+  const leftPostL = new THREE.Mesh(postGeo, material);
+  leftPostL.position.set(-HURDLE_WIDTH/2 - LANE_OFFSET, HURDLE_HEIGHT/2, 0);
 
-  const rightPost = new THREE.Mesh(postGeo, material);
-  rightPost.position.set(HURDLE_WIDTH/2, HURDLE_HEIGHT/2, 0);
+  const rightPostL = new THREE.Mesh(postGeo, material);
+  rightPostL.position.set(HURDLE_WIDTH/2 - LANE_OFFSET, HURDLE_HEIGHT/2, 0);
 
-  const bar = new THREE.Mesh(barGeo, material);
-  bar.position.set(0, HURDLE_HEIGHT, 0);
+  const barL = new THREE.Mesh(barGeo, material);
+  barL.position.set(-LANE_OFFSET, HURDLE_HEIGHT, 0);
 
-  group.add(leftPost, rightPost, bar);
+  // Create right lane hurdle
+  const leftPostR = new THREE.Mesh(postGeo, material);
+  leftPostR.position.set(-HURDLE_WIDTH/2 + LANE_OFFSET, HURDLE_HEIGHT/2, 0);
+
+  const rightPostR = new THREE.Mesh(postGeo, material);
+  rightPostR.position.set(HURDLE_WIDTH/2 + LANE_OFFSET, HURDLE_HEIGHT/2, 0);
+
+  const barR = new THREE.Mesh(barGeo, material);
+  barR.position.set(LANE_OFFSET, HURDLE_HEIGHT, 0);
+
+  group.add(leftPostL, rightPostL, barL, leftPostR, rightPostR, barR);
   return group;
 }
 
 function resetGame() {
+  laneIndex = 0;
+  isSwitching = false;
+  if (characterRoot) {
+    characterRoot.position.set(-LANE_OFFSET, 0, 0);
+    characterRoot.rotation.set(0, 0, 0);
+  }
+
   isJumping = false;
   isSliding = false;
 
@@ -298,17 +375,35 @@ function resetGame() {
     groundSegments[i].position.z = -i * SEGMENT_LENGTH;
   }
 
-  for (let i = 0; i < short_hurdles.length; i++) {
-    short_hurdles[i].position.z = -(i + 1) * HURDLE_SPACING;
-  }
-  for (let i = 0; i < high_hurdles.length; i++) {
-    high_hurdles[i].position.z = -(i + 1.5) * HURDLE_SPACING;
+  for (let i = 0; i < hurdles.length; i++) {
+    hurdles[i].position.z = -(i + 1) * HURDLE_SPACING;
   }
 }
 
 function animate() {
   const delta = clock.getDelta();
   if (mixer) mixer.update(delta);
+
+  // Ease lane switch animation
+  if (isSwitching && characterRoot) {
+    switchElapsed += delta;
+    const t = Math.min(switchElapsed / LANE_SWITCH_TIME, 1);
+    const eased = t * t * (3-2 * t);
+    
+    characterRoot.position.x = switchFrom + (switchTo - switchFrom) * eased;
+    characterRoot.position.y = Math.sin(t * Math.PI) * 0.15;
+
+    const direction = Math.sign(switchTo - switchFrom);
+    const lean = Math.sin(t * Math.PI);
+
+    characterRoot.rotation.z = -direction * lean * 0.35;
+    characterRoot.rotation.y = direction * lean * 0.2;
+
+    if (t === 1) {
+      isSwitching = false;
+      characterRoot.position.set(switchTo, 0, 0);
+    }
+  }
 
   // Recycle ground segments
   for (const segment of groundSegments) {
@@ -320,24 +415,13 @@ function animate() {
   }
 
   // Recycle hurdles
-  for (const hurdle of short_hurdles) {
+  for (const hurdle of hurdles) {
     hurdle.position.z += RUN_SPEED * delta;
 
     if (hurdle.position.z > SEGMENT_LENGTH) {
       hurdle.position.z -= HURDLE_COUNT * HURDLE_SPACING;
     }
     if (Math.abs(hurdle.position.z) < HURDLE_HIT_DEPTH && !isJumping) {
-      resetGame();
-      return;
-    }
-  }
-  for (const hurdle of high_hurdles) {
-    hurdle.position.z += RUN_SPEED * delta;
-
-    if (hurdle.position.z > SEGMENT_LENGTH) {
-      hurdle.position.z -= HURDLE_COUNT * HURDLE_SPACING;
-    }
-    if (Math.abs(hurdle.position.z) < HURDLE_HIT_DEPTH && !isSliding) {
       resetGame();
       return;
     }

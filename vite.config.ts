@@ -29,7 +29,10 @@ function serveGameModels() {
       }
 
       res.statusCode = 200
-      res.setHeader('Content-Type', 'model/gltf-binary')
+      const contentType = filePath.toLowerCase().endsWith('.png')
+        ? 'image/png'
+        : 'model/gltf-binary';
+      res.setHeader('Content-Type', contentType);
       res.setHeader('Content-Length', stat.size)
       fs.createReadStream(filePath).pipe(res)
     })
