@@ -36,6 +36,7 @@ import { DEFAULT_GESTURES, getChannelMockSignalValue } from './pipeline';
 import { useGestureRecorder, type CaptureTriggerMode } from './useGestureRecorder';
 import { useSignalSource, type SignalPoint, type SignalSourceMode } from './useSignalSource';
 import DarkSelect from './study/DarkSelect';
+import { alignWaveform, sharedWaveDomain, type WaveDomain } from './study/waveScale';
 import StudyFlowCanvas from './StudyFlowCanvas';
 
 type FlowStage = 'capture' | 'review' | 'game' | 'compare';
@@ -123,16 +124,11 @@ function formatSignalValue(value: number) {
   return value.toFixed(4);
 }
 
-function normalizeWaveform(trial: CapturedTrial) {
-  const triggerOffset = trial.points[trial.preTriggerPointCount]?.time ?? trial.triggeredAt;
-  return trial.points.map((point) => ({
-    time: Math.round(point.time - triggerOffset),
-    value: point.value,
-  }));
-}
-
-function MiniWaveform({ trial, height = 112 }: { trial: CapturedTrial; height?: number }) {
-  const data = useMemo(() => normalizeWaveform(trial), [trial]);
+function MiniWaveform({ trial, domain, height = 112 }: { trial: CapturedTrial; domain: WaveDomain; height?: number }) {
+  const data = useMemo(
+    () => alignWaveform(trial.points, trial.preTriggerPointCount, trial.triggeredAt),
+    [trial],
+  );
   const color = trial.method === 'threshold' ? '#22d3ee' : '#a78bfa';
 
   return (
@@ -148,8 +144,8 @@ function MiniWaveform({ trial, height = 112 }: { trial: CapturedTrial; height?: 
             dot={false}
             isAnimationActive={false}
           />
-          <XAxis dataKey="time" type="number" domain={['dataMin', 'dataMax']} hide />
-          <YAxis domain={['auto', 'auto']} hide />
+          <XAxis dataKey="time" type="number" domain={[domain.xMin, domain.xMax]} hide allowDataOverflow />
+          <YAxis domain={[domain.yMin, domain.yMax]} hide allowDataOverflow />
         </LineChart>
       </ResponsiveContainer>
     </div>
@@ -290,11 +286,13 @@ function LiveSignalPanel({
 
 function SampleCard({
   trial,
+  domain,
   selected,
   onSelect,
   onDelete,
 }: {
   trial: CapturedTrial;
+  domain: WaveDomain;
   selected?: boolean;
   onSelect?: () => void;
   onDelete?: () => void;
@@ -322,10 +320,12 @@ function SampleCard({
             {trial.quality}
           </span>
         </div>
-        <MiniWaveform trial={trial} />
+        <MiniWaveform trial={trial} domain={domain} />
       </button>
-      <div className="flex items-center justify-between border-t border-white/6 px-4 py-2.5">
-        <span className="text-[11px] tabular-nums text-slate-500">{trial.metrics.durationMs.toFixed(0)} ms · {trial.points.length} pts</span>
+      <div className="flex items-center justify-between gap-3 border-t border-white/6 px-4 py-2.5">
+        <span className="text-[11px] tabular-nums text-slate-400">
+          RMS {formatSignalValue(trial.metrics.rms)} · Peak {formatSignalValue(trial.metrics.peak)} · Range {formatSignalValue(trial.metrics.range)}
+        </span>
         {onDelete && (
           <button type="button" onClick={onDelete} className="rounded-lg p-1.5 text-slate-600 transition hover:bg-rose-400/10 hover:text-rose-300" aria-label="Delete trial">
             <Trash2 className="h-3.5 w-3.5" />
@@ -519,6 +519,9 @@ export default function FlowBasedCaptureScreen() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [currentMethod, isCaptureArmed, recorderState]);
 
+  const waveDomain = useMemo(() => sharedWaveDomain(
+    trials.map((trial) => alignWaveform(trial.points, trial.preTriggerPointCount, trial.triggeredAt)),
+  ), [trials]);
   const selectedTrial = trials.find((trial) => trial.id === selectedTrialId) ?? trials[trials.length - 1] ?? null;
   const latestTrials = [...trials].slice(-4).reverse();
   const thresholdCount = trials.filter((trial) => trial.method === 'threshold').length;
@@ -706,7 +709,7 @@ export default function FlowBasedCaptureScreen() {
                 </div>
                 {latestTrials.length ? (
                   <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                    {latestTrials.map((trial) => <SampleCard key={trial.id} trial={trial} selected={trial.id === selectedTrial?.id} onSelect={() => setSelectedTrialId(trial.id)} />)}
+                    {latestTrials.map((trial) => <SampleCard key={trial.id} trial={trial} domain={waveDomain} selected={trial.id === selectedTrial?.id} onSelect={() => setSelectedTrialId(trial.id)} />)}
                   </div>
                 ) : (
                   <div className="mt-4 flex min-h-36 items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/10 text-center">
@@ -814,8 +817,8 @@ export default function FlowBasedCaptureScreen() {
                 <section key={pairIndex} className="rounded-[28px] border border-white/8 bg-white/[0.02] p-4 md:p-6">
                   <div className="mb-4 flex items-center justify-between"><div><p className="text-[10px] uppercase tracking-[0.2em] text-slate-600">{currentGesture.name}</p><h2 className="mt-1 text-sm font-medium text-white">Trial pair {pairIndex}</h2></div><span className={`rounded-full px-3 py-1 text-[10px] ${thresholdTrial && buttonTrial ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'}`}>{thresholdTrial && buttonTrial ? 'Complete pair' : 'Missing match'}</span></div>
                   <div className="grid gap-4 lg:grid-cols-2">
-                    {thresholdTrial ? <SampleCard trial={thresholdTrial} selected={selectedTrialId === thresholdTrial.id} onSelect={() => setSelectedTrialId(thresholdTrial.id)} onDelete={() => deleteTrial(thresholdTrial.id)} /> : <div className="flex min-h-52 items-center justify-center rounded-2xl border border-dashed border-cyan-300/15 text-xs text-slate-600">Threshold capture missing</div>}
-                    {buttonTrial ? <SampleCard trial={buttonTrial} selected={selectedTrialId === buttonTrial.id} onSelect={() => setSelectedTrialId(buttonTrial.id)} onDelete={() => deleteTrial(buttonTrial.id)} /> : <div className="flex min-h-52 items-center justify-center rounded-2xl border border-dashed border-violet-300/15 text-xs text-slate-600">Button capture missing</div>}
+                    {thresholdTrial ? <SampleCard trial={thresholdTrial} domain={waveDomain} selected={selectedTrialId === thresholdTrial.id} onSelect={() => setSelectedTrialId(thresholdTrial.id)} onDelete={() => deleteTrial(thresholdTrial.id)} /> : <div className="flex min-h-52 items-center justify-center rounded-2xl border border-dashed border-cyan-300/15 text-xs text-slate-600">Threshold capture missing</div>}
+                    {buttonTrial ? <SampleCard trial={buttonTrial} domain={waveDomain} selected={selectedTrialId === buttonTrial.id} onSelect={() => setSelectedTrialId(buttonTrial.id)} onDelete={() => deleteTrial(buttonTrial.id)} /> : <div className="flex min-h-52 items-center justify-center rounded-2xl border border-dashed border-violet-300/15 text-xs text-slate-600">Button capture missing</div>}
                   </div>
                 </section>
               );

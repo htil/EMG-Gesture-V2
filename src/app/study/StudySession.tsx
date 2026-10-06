@@ -28,6 +28,8 @@ import { DEFAULT_GESTURES, getChannelMockSignalValue } from '../pipeline';
 import { useGestureRecorder, type CaptureTriggerMode } from '../useGestureRecorder';
 import { useSignalSource, type SignalPoint, type SignalSourceMode } from '../useSignalSource';
 import DarkSelect from './DarkSelect';
+import { gestureQuotas, keptForGesture, sampleNumber, samplesComplete } from './samplePlan';
+import { alignWaveform, sharedWaveDomain, type WaveDomain } from './waveScale';
 import {
   clearClientSession,
   loadClientSession,
@@ -67,17 +69,6 @@ function calculateMetrics(points: Array<{ time: number; value: number }>) {
     range: Math.max(...values) - Math.min(...values),
     durationMs: Math.max(0, points[points.length - 1].time - points[0].time),
   };
-}
-
-function formatSignalValue(value: number) {
-  if (Math.abs(value) >= 100) return value.toFixed(0);
-  if (Math.abs(value) >= 1) return value.toFixed(2);
-  return value.toFixed(4);
-}
-
-function average(trials: StoredTrial[], key: keyof StoredTrial['metrics']) {
-  if (trials.length === 0) return 0;
-  return trials.reduce((sum, trial) => sum + trial.metrics[key], 0) / trials.length;
 }
 
 function StepMap({
@@ -281,43 +272,44 @@ function LivePanel({
   );
 }
 
-function TrialWave({ trial }: { trial: StoredTrial }) {
-  const data = useMemo(() => {
-    const triggerOffset = trial.points[trial.preTriggerPointCount]?.time ?? trial.triggeredAt;
-    return trial.points.map((point) => ({ time: Math.round(point.time - triggerOffset), value: point.value }));
-  }, [trial]);
+function TrialWave({ trial, domain }: { trial: StoredTrial; domain: WaveDomain }) {
+  const data = useMemo(
+    () => alignWaveform(trial.points, trial.preTriggerPointCount, trial.triggeredAt),
+    [trial],
+  );
   return (
     <div className="h-28 w-full">
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={data} margin={{ top: 8, right: 4, bottom: 4, left: 4 }}>
           <ReferenceLine x={0} stroke="#22d3ee" strokeDasharray="3 3" opacity={0.45} />
           <Line type="monotone" dataKey="value" stroke="#22d3ee" strokeWidth={1.8} dot={false} isAnimationActive={false} />
-          <XAxis dataKey="time" type="number" domain={['dataMin', 'dataMax']} hide />
-          <YAxis domain={['auto', 'auto']} hide />
+          <XAxis dataKey="time" type="number" domain={[domain.xMin, domain.xMax]} hide allowDataOverflow />
+          <YAxis domain={[domain.yMin, domain.yMax]} hide allowDataOverflow />
         </LineChart>
       </ResponsiveContainer>
     </div>
   );
 }
 
-function TrialCard({ trial }: { trial: StoredTrial }) {
+function TrialCard({
+  trial,
+  sampleIndex,
+  kept,
+  required,
+  domain,
+}: {
+  trial: StoredTrial;
+  sampleIndex: number;
+  kept: number;
+  required: number;
+  domain: WaveDomain;
+}) {
   return (
     <article className="rounded-2xl border border-white/10 bg-slate-950/50 p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="text-xs text-slate-500">Trial {trial.pairIndex}</p>
-          <p className="mt-1 text-sm font-medium text-white">{trial.gestureName}</p>
-        </div>
-        <span className={`rounded-full px-2 py-1 text-[10px] uppercase tracking-wider ${
-          trial.quality === 'usable' ? 'bg-emerald-400/10 text-emerald-300' : 'bg-amber-400/10 text-amber-300'
-        }`}>
-          {trial.quality}
-        </span>
-      </div>
-      <TrialWave trial={trial} />
-      <p className="text-[11px] tabular-nums text-slate-500">
-        {trial.metrics.durationMs.toFixed(0)} ms · peak {formatSignalValue(trial.metrics.peak)}
-      </p>
+      <p className="text-xs text-slate-500">Sample {sampleIndex}</p>
+      <p className="mt-1 text-sm font-medium text-white">{trial.gestureName}</p>
+      <p className="mt-1 text-[11px] tabular-nums text-slate-400">{kept}/{required} kept</p>
+      <TrialWave trial={trial} domain={domain} />
     </article>
   );
 }
@@ -370,8 +362,14 @@ export default function StudySession() {
   const stage = session?.stage ?? 'capture';
   const manualTrigger = session?.manualTrigger ?? false;
   const triggerMode: CaptureTriggerMode = manualTrigger ? 'button' : 'threshold';
-  const goalReached = trials.length >= (session?.capturesPerRound ?? 1);
-  const armed = stage === 'capture' && isStreaming && !goalReached;
+  const requiredPerGesture = session?.capturesPerRound ?? 1;
+  const selectedKept = keptForGesture(trials, gestureId);
+  const selectedFull = selectedKept >= requiredPerGesture;
+  const roundComplete = samplesComplete(DEFAULT_GESTURES, trials, requiredPerGesture);
+  const armed = stage === 'capture' && isStreaming && !selectedFull;
+  const waveDomain = useMemo(() => sharedWaveDomain(
+    trials.map((trial) => alignWaveform(trial.points, trial.preTriggerPointCount, trial.triggeredAt)),
+  ), [trials]);
 
   const {
     recorderState,
@@ -402,14 +400,14 @@ export default function StudySession() {
     if (!current) return;
     handledSegment.current = completedSegment;
     const metrics = calculateMetrics(completedSegment.points);
-    const savedCount = current.trials.length + 1;
+    const savedForGesture = keptForGesture(current.trials, gesture.id) + 1;
     setSession((previous) => {
       if (!previous) return previous;
       const trial: StoredTrial = {
         id: `${gesture.id}-${previous.round}-${completedSegment.completedAt}`,
         gestureId: gesture.id,
         gestureName: gesture.name,
-        pairIndex: previous.trials.length + 1,
+        pairIndex: keptForGesture(previous.trials, gesture.id) + 1,
         capturedAt: Date.now(),
         triggeredAt: completedSegment.triggeredAt,
         completedAt: completedSegment.completedAt,
@@ -420,7 +418,7 @@ export default function StudySession() {
       };
       return { ...previous, trials: [...previous.trials, trial] };
     });
-    setNotice(`Trial saved. ${Math.min(savedCount, current.capturesPerRound)} of ${current.capturesPerRound} this round.`);
+    setNotice(`${gesture.name} sample ${Math.min(savedForGesture, current.capturesPerRound)} of ${current.capturesPerRound} kept.`);
     acknowledgeCompletedSegment();
   }, [acknowledgeCompletedSegment, completedSegment, gesture.id, gesture.name]);
 
@@ -440,8 +438,24 @@ export default function StudySession() {
   if (!session) return null;
 
   const signalValue = signalData[signalData.length - 1]?.normalizedActivity ?? 0;
-  const usable = trials.filter((trial) => trial.quality === 'usable').length;
+  const quotas = gestureQuotas(DEFAULT_GESTURES, trials, session.capturesPerRound);
+  const missingQuotas = quotas.filter((row) => row.missing > 0);
+  const cappedKept = quotas.reduce((sum, row) => sum + Math.min(row.kept, row.required), 0);
+  const totalRequired = DEFAULT_GESTURES.length * session.capturesPerRound;
   const reachedIndex = flowIndex(session.unlockedThrough ?? stage);
+  const renderTrial = (trial: StoredTrial) => {
+    const quota = quotas.find((row) => row.gesture.id === trial.gestureId);
+    return (
+      <TrialCard
+        key={trial.id}
+        trial={trial}
+        sampleIndex={sampleNumber(trials, trial.id)}
+        kept={quota?.kept ?? 0}
+        required={session.capturesPerRound}
+        domain={waveDomain}
+      />
+    );
+  };
 
   const canVisit = (next: FlowStage) => {
     if (stage === 'done') return false;
@@ -449,8 +463,8 @@ export default function StudySession() {
     if (target <= reachedIndex) return true;
     if (target !== reachedIndex + 1) return false;
     if (next === 'review') return trials.length > 0;
-    if (next === 'game') return reachedIndex >= flowIndex('review');
-    return reachedIndex >= flowIndex('game');
+    if (next === 'game') return roundComplete && reachedIndex >= flowIndex('review');
+    return roundComplete && reachedIndex >= flowIndex('game');
   };
 
   const goTo = (next: FlowStage) => {
@@ -559,11 +573,18 @@ export default function StudySession() {
               <section className="rounded-[24px] border border-white/8 bg-white/[0.025] p-4">
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="text-sm font-medium text-white">This round</h2>
-                  <span className="text-xs tabular-nums text-slate-500">{trials.length}/{session.capturesPerRound}</span>
+                  <span className="text-xs tabular-nums text-slate-500">{cappedKept}/{totalRequired}</span>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {quotas.map((row) => (
+                    <span key={row.gesture.id} className="rounded-full border border-white/10 px-3 py-1 text-[11px] text-slate-300">
+                      {row.gesture.name} <span className="tabular-nums text-slate-100">{row.kept}/{row.required}</span>
+                    </span>
+                  ))}
                 </div>
                 {trials.length > 0 ? (
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                    {trials.map((trial) => <TrialCard key={trial.id} trial={trial} />)}
+                    {trials.map((trial) => renderTrial(trial))}
                   </div>
                 ) : (
                   <div className="mt-4 flex min-h-28 items-center justify-center rounded-2xl border border-dashed border-white/10 text-sm text-slate-500">
@@ -576,11 +597,11 @@ export default function StudySession() {
             <aside className="space-y-4">
               <section className="rounded-[28px] border border-white/10 bg-slate-950/70 p-5">
                 <div className="flex items-center justify-between text-[11px] text-slate-500">
-                  <span>Round progress</span>
-                  <span className="tabular-nums">{trials.length}/{session.capturesPerRound}</span>
+                  <span>Examples kept</span>
+                  <span className="tabular-nums">{cappedKept}/{totalRequired}</span>
                 </div>
                 <div className="mt-3 h-1 overflow-hidden rounded-full bg-white/10">
-                  <div className="h-full rounded-full bg-cyan-300" style={{ width: `${Math.min(100, (trials.length / session.capturesPerRound) * 100)}%` }} />
+                  <div className="h-full rounded-full bg-cyan-300" style={{ width: `${Math.min(100, (cappedKept / totalRequired) * 100)}%` }} />
                 </div>
 
                 <label className="mt-5 block text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">Gesture</label>
@@ -620,7 +641,7 @@ export default function StudySession() {
 
                 <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
                   <p className="text-xs font-medium text-cyan-100">
-                    {!isStreaming ? 'Waiting for the stream' : isRecording ? 'Recording' : recorderState === 'cooldown' ? 'Short pause' : goalReached ? 'Round target reached' : 'Ready'}
+                    {!isStreaming ? 'Waiting for the stream' : isRecording ? 'Recording' : recorderState === 'cooldown' ? 'Short pause' : selectedFull ? `${gesture.name} has its examples` : roundComplete ? 'Required examples kept' : 'Ready'}
                   </p>
                   <p className="mt-2 text-xs leading-5 text-slate-400">
                     {manualTrigger ? 'Press Capture at the start of the gesture.' : 'Recording begins when you perform the gesture.'}
@@ -682,11 +703,23 @@ export default function StudySession() {
               </div>
               <div className="flex gap-2">
                 <button type="button" onClick={() => goTo('capture')} className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-300">Back to capture</button>
-                <button type="button" onClick={() => goTo('game')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950">Play <ArrowRight className="h-3.5 w-3.5" /></button>
+                <button type="button" disabled={!roundComplete} onClick={() => goTo('game')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950 disabled:cursor-not-allowed disabled:opacity-35">Play <ArrowRight className="h-3.5 w-3.5" /></button>
               </div>
             </div>
+            <div className="flex flex-wrap gap-2">
+              {quotas.map((row) => (
+                <span key={row.gesture.id} className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-xs text-slate-200">
+                  {row.gesture.name} <span className="tabular-nums">{row.kept}/{row.required} kept</span>
+                </span>
+              ))}
+            </div>
+            {missingQuotas.length > 0 && (
+              <div className="rounded-2xl border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
+                Still needed: {missingQuotas.map((row) => `${row.gesture.name} ${row.missing}`).join(', ')}. Collect those examples before playing.
+              </div>
+            )}
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {trials.map((trial) => <TrialCard key={trial.id} trial={trial} />)}
+              {trials.map((trial) => renderTrial(trial))}
             </div>
           </section>
         )}
@@ -725,23 +758,15 @@ export default function StudySession() {
               </div>
               <button type="button" onClick={() => goTo('game')} className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-300">Back to play</button>
             </div>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {[
-                ['Captures', String(trials.length)],
-                ['Usable', String(usable)],
-                ['Average RMS', formatSignalValue(average(trials, 'rms'))],
-                ['Average peak', formatSignalValue(average(trials, 'peak'))],
-                ['Average range', formatSignalValue(average(trials, 'range'))],
-                ['Window', `${average(trials, 'durationMs').toFixed(0)} ms`],
-              ].map(([label, value]) => (
-                <div key={label} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-                  <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">{label}</p>
-                  <p className="mt-2 text-xl tabular-nums text-white">{value}</p>
-                </div>
+            <div className="flex flex-wrap gap-2">
+              {quotas.map((row) => (
+                <span key={row.gesture.id} className="rounded-full border border-white/10 px-3 py-1.5 text-xs text-slate-200">
+                  {row.gesture.name} <span className="tabular-nums">{row.kept}/{row.required} kept</span>
+                </span>
               ))}
             </div>
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {trials.map((trial) => <TrialCard key={trial.id} trial={trial} />)}
+              {trials.map((trial) => renderTrial(trial))}
             </div>
             {saveError && <p className="text-sm text-rose-300">{saveError}</p>}
             <button

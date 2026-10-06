@@ -281,7 +281,7 @@ export default function AdminApp() {
                 <Field label="Loop count (n)">
                   <input type="number" min={1} max={30} value={draftRepetitions} onChange={(event) => setDraftRepetitions(Number(event.target.value))} className={inputClass} />
                 </Field>
-                <Field label="Captures per round">
+                <Field label="Samples required per gesture">
                   <input type="number" min={1} max={20} value={draftCaptures} onChange={(event) => setDraftCaptures(Number(event.target.value))} className={inputClass} />
                 </Field>
                 <Field label="Session access">
