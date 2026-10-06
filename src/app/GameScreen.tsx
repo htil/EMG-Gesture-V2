@@ -38,11 +38,11 @@ export default function GameScreen({
   return (
     <div className="fixed inset-0 bg-black">
       <div ref={containerRef} className="h-full w-full" />
-      <div className="absolute left-4 top-4 z-10 flex gap-2">
+      <div className="fixed left-4 top-20 z-50 flex gap-2">
         <button
           type="button"
           onClick={onExit}
-          className="rounded-lg border border-white/20 bg-slate-950/80 px-3 py-2 text-sm text-white"
+          className="rounded-lg border border-slate-600 bg-slate-950 px-3 py-2 text-sm font-medium text-white shadow-lg"
         >
           {exitLabel}
         </button>
@@ -50,7 +50,7 @@ export default function GameScreen({
           <button
             type="button"
             onClick={onSecondary}
-            className="rounded-lg border border-white/20 bg-slate-950/80 px-3 py-2 text-sm text-white"
+            className="rounded-lg border border-slate-600 bg-slate-950 px-3 py-2 text-sm font-medium text-white shadow-lg"
           >
             {secondaryLabel}
           </button>
