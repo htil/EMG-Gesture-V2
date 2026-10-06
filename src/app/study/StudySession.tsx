@@ -5,7 +5,6 @@ import {
   ArrowRight,
   Check,
   CircleDot,
-  Gamepad2,
   Hand,
   Pause,
   Play,
@@ -35,6 +34,7 @@ import {
   type ConditionModelState,
   type ModelStatus,
 } from './conditionTraining';
+import GameScreen from '../GameScreen';
 import DarkSelect from './DarkSelect';
 import { DEFAULT_DIFFICULTY, registerGameRunListener, type StoredGameRun } from './gameHandoff';
 import ResultsPanel from './ResultsPanel';
@@ -869,31 +869,31 @@ export default function StudySession() {
           </section>
         )}
 
-        {stage === 'game' && (
+        {stage === 'game' && modelReady && (
+          <GameScreen
+            onExit={() => goTo('review')}
+            exitLabel="Back to review"
+            onSecondary={() => goTo('results')}
+            secondaryLabel="Results"
+          />
+        )}
+
+        {stage === 'game' && !modelReady && (
           <section className="overflow-hidden rounded-[28px] border border-dashed border-emerald-300/30 bg-slate-950/55">
             <div className="flex flex-wrap items-end justify-between gap-3 border-b border-white/8 p-5 md:p-6">
               <div>
-                <p className="text-xs uppercase tracking-[0.18em] text-emerald-300/80">In development</p>
+                <p className="text-xs uppercase tracking-[0.18em] text-emerald-300/80">Play</p>
                 <h2 className="mt-1 text-2xl font-light text-white">Review game</h2>
-                <p className="mt-2 max-w-xl text-sm leading-6 text-slate-500">This step will use the game from the gamification branch. Testing stays closed until this condition’s model is ready. The game reports its score and each gesture attempt when the run ends.</p>
+                <p className="mt-2 max-w-xl text-sm leading-6 text-slate-500">Testing stays closed until this condition’s model is ready.</p>
               </div>
               <div className="flex gap-2">
                 <button type="button" onClick={() => goTo('review')} className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-300">Back to review</button>
-                <button type="button" disabled={!modelReady && !hasRunThisRound} onClick={() => goTo('results')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950 disabled:cursor-not-allowed disabled:opacity-35">Results <ArrowRight className="h-3.5 w-3.5" /></button>
+                <button type="button" disabled={!hasRunThisRound} onClick={() => goTo('results')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950 disabled:cursor-not-allowed disabled:opacity-35">Results <ArrowRight className="h-3.5 w-3.5" /></button>
               </div>
             </div>
             <div className="space-y-4 p-4 md:p-6">
               {modelState && <ModelStatusNote state={modelState} />}
-              {!modelReady && (
-                <p className="text-sm text-amber-100">Testing is closed until this condition’s model is ready and matches the kept examples.</p>
-              )}
-              <div className="flex min-h-[420px] flex-col items-center justify-center rounded-[22px] border border-dashed border-emerald-300/25 bg-[linear-gradient(rgba(110,231,183,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(110,231,183,0.05)_1px,transparent_1px),rgba(0,0,0,0.25)] bg-[size:28px_28px,28px_28px,auto] text-center">
-                <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-emerald-300/20 bg-emerald-300/10 text-emerald-300">
-                  <Gamepad2 className="h-5 w-5" />
-                </span>
-                <p className="mt-5 text-[11px] font-medium uppercase tracking-[0.22em] text-emerald-300/80">Game from the gamification branch</p>
-                <p className="mt-2 max-w-md text-sm leading-6 text-slate-500">Reserved for the existing game. It should call submitGameRun with the score and each gesture attempt. A second game is not built here.</p>
-              </div>
+              <p className="text-sm text-amber-100">Testing is closed until this condition’s model is ready and matches the kept examples.</p>
             </div>
           </section>
         )}

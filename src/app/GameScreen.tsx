@@ -1,6 +1,16 @@
 import { useEffect, useRef } from 'react';
 
-export default function GameScreen({ onExit }: { onExit: () => void }) {
+export default function GameScreen({
+  onExit,
+  exitLabel = 'Back to training',
+  onSecondary,
+  secondaryLabel,
+}: {
+  onExit: () => void;
+  exitLabel?: string;
+  onSecondary?: () => void;
+  secondaryLabel?: string;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -28,13 +38,24 @@ export default function GameScreen({ onExit }: { onExit: () => void }) {
   return (
     <div className="fixed inset-0 bg-black">
       <div ref={containerRef} className="h-full w-full" />
-      <button
-        type="button"
-        onClick={onExit}
-        className="absolute left-4 top-4 z-10 rounded-lg border border-white/20 bg-slate-950/80 px-3 py-2 text-sm text-white"
-      >
-        Back to training
-      </button>
+      <div className="absolute left-4 top-4 z-10 flex gap-2">
+        <button
+          type="button"
+          onClick={onExit}
+          className="rounded-lg border border-white/20 bg-slate-950/80 px-3 py-2 text-sm text-white"
+        >
+          {exitLabel}
+        </button>
+        {onSecondary && secondaryLabel && (
+          <button
+            type="button"
+            onClick={onSecondary}
+            className="rounded-lg border border-white/20 bg-slate-950/80 px-3 py-2 text-sm text-white"
+          >
+            {secondaryLabel}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

@@ -11,10 +11,10 @@ Each round is the same path:
 
 1. `Capture`: record the required examples of each gesture with the assigned version.
 2. `Review`: inspect those waveforms, delete an example if needed, and train once the set is complete.
-3. `Play`: use the trained model in the game. Testing stays closed until that condition's model is ready.
+3. `Play`: John's runner from the gamification branch. Arrow keys jump and switch lanes. Testing stays closed until that condition's model is ready.
 4. `Results`: see the game score against the previous run at the same difficulty, plus recognition accuracy. Then continue to the next round.
 
-After Results, the round loops back to Capture until the experiment's repetition count is finished. Full waveforms for each finished round are written to `data/sessions/`. The play step is reserved for the game on the `gamification` branch. That game should report a score and each gesture attempt; this branch does not ship a second game.
+After Results, the round loops back to Capture until the experiment's repetition count is finished. Full waveforms for each finished round are written to `data/sessions/`. The play step uses the game merged from the `gamification` branch. That game does not report a score yet. When it does, it should call `submitGameRun` with the score and each gesture attempt.
 
 The paired lab canvas, with both trigger methods visible, remains at `/lab`.
 

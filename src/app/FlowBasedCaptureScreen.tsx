@@ -7,7 +7,6 @@ import {
   CircleDot,
   Download,
   FlaskConical,
-  Gamepad2,
   Hand,
   Pause,
   Play,
@@ -36,6 +35,7 @@ import { DEFAULT_GESTURES, getChannelMockSignalValue } from './pipeline';
 import { useGestureRecorder, type CaptureTriggerMode } from './useGestureRecorder';
 import { useSignalSource, type SignalPoint, type SignalSourceMode } from './useSignalSource';
 import { markDatasetChanged } from './study/conditionTraining';
+import GameScreen from './GameScreen';
 import DarkSelect from './study/DarkSelect';
 import { alignWaveform, sharedWaveDomain, type WaveDomain } from './study/waveScale';
 import StudyFlowCanvas from './StudyFlowCanvas';
@@ -872,29 +872,12 @@ export default function FlowBasedCaptureScreen() {
         )}
 
         {stage === 'game' && (
-          <section className="overflow-hidden rounded-[28px] border border-dashed border-emerald-300/30 bg-slate-950/55">
-            <div className="flex flex-col gap-4 border-b border-white/8 p-5 md:flex-row md:items-end md:justify-between md:p-7">
-              <div>
-                <p className="text-xs font-medium uppercase tracking-[0.2em] text-emerald-300/80">In development</p>
-                <h1 className="mt-2 text-3xl font-light text-white">Review game</h1>
-                <p className="mt-2 max-w-xl text-sm leading-6 text-slate-500">This step is reserved for a Three.js game. Participants will review the collected trials here with the trained model. The game is still being built.</p>
-              </div>
-              <div className="flex gap-2">
-                <button type="button" onClick={() => setStage('review')} className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-300 hover:bg-white/5">Back to signals</button>
-                <button type="button" onClick={() => setStage('compare')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950">Compare methods <ArrowRight className="h-3.5 w-3.5" /></button>
-              </div>
-            </div>
-            <div className="p-4 md:p-6">
-              <div className="flex min-h-[460px] flex-col items-center justify-center rounded-[22px] border border-dashed border-emerald-300/25 bg-[linear-gradient(rgba(110,231,183,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(110,231,183,0.05)_1px,transparent_1px),rgba(0,0,0,0.25)] bg-[size:28px_28px,28px_28px,auto] text-center">
-                <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-emerald-300/20 bg-emerald-300/10 text-emerald-300">
-                  <Gamepad2 className="h-5 w-5" />
-                </span>
-                <p className="mt-5 text-[11px] font-medium uppercase tracking-[0.22em] text-emerald-300/80">Three.js canvas placeholder</p>
-                <p className="mt-2 max-w-md text-sm leading-6 text-slate-500">Reserved space for the review game. Captured threshold and button trials will be playable here once the game is connected.</p>
-                <p className="mt-6 text-xs tabular-nums text-slate-600">{trials.length === 0 ? 'No trials captured yet' : `${trials.length} trial${trials.length === 1 ? '' : 's'} waiting`}</p>
-              </div>
-            </div>
-          </section>
+          <GameScreen
+            onExit={() => setStage('review')}
+            exitLabel="Back to signals"
+            onSecondary={() => setStage('compare')}
+            secondaryLabel="Compare methods"
+          />
         )}
 
         {stage === 'compare' && (

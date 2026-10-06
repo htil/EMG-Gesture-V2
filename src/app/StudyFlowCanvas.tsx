@@ -174,16 +174,16 @@ function GameNode({ data }: NodeProps<StudyNode>) {
       <Handle type="target" position={Position.Left} id="game-in" className="study-handle" />
       <div className="study-node-heading">
         <span className="study-node-icon emerald"><Gamepad2 size={17} /></span>
-        <div><strong>Review game</strong><small>Three.js · in development</small></div>
+        <div><strong>Review game</strong><small>John's runner</small></div>
       </div>
       <div className="study-node-inner">
         <div className="study-game-slot">
-          <span>Reserved canvas</span>
-          <small>{trialCount > 0 ? `${trialCount} captured trials ready` : 'Collected trials will load here'}</small>
+          <span>Runner</span>
+          <small>{trialCount > 0 ? `${trialCount} captured trials ready` : 'Arrow keys jump and switch lanes'}</small>
         </div>
         <p className="study-node-note">Participants review captured signals against the trained model inside the game.</p>
         <button className="study-node-action nodrag" type="button" onClick={data.onOpen}>
-          Open placeholder <ArrowRight size={13} />
+          Open game <ArrowRight size={13} />
         </button>
       </div>
       <Handle type="source" position={Position.Right} id="game-out" className="study-handle" />
