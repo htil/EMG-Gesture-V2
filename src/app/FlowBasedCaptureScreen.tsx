@@ -35,6 +35,7 @@ import {
 import { DEFAULT_GESTURES, getChannelMockSignalValue } from './pipeline';
 import { useGestureRecorder, type CaptureTriggerMode } from './useGestureRecorder';
 import { useSignalSource, type SignalPoint, type SignalSourceMode } from './useSignalSource';
+import { markDatasetChanged } from './study/conditionTraining';
 import DarkSelect from './study/DarkSelect';
 import { alignWaveform, sharedWaveDomain, type WaveDomain } from './study/waveScale';
 import StudyFlowCanvas from './StudyFlowCanvas';
@@ -500,6 +501,11 @@ export default function FlowBasedCaptureScreen() {
     };
 
     setTrials((previous) => [...previous, trial]);
+    markDatasetChanged(
+      'lab',
+      trial.method,
+      [...trials.filter((item) => item.method === trial.method).map((item) => item.id), trial.id],
+    );
     setSelectedTrialId(trial.id);
     setNotice(`${METHOD_META[trial.method].shortLabel} trial ${pairIndex} captured. Pair it with the other method.`);
     setCurrentMethod(trial.method === 'threshold' ? 'button' : 'threshold');
@@ -568,7 +574,18 @@ export default function FlowBasedCaptureScreen() {
   };
 
   const deleteTrial = (trialId: string) => {
-    setTrials((previous) => previous.filter((trial) => trial.id !== trialId));
+    setTrials((previous) => {
+      const removed = previous.find((trial) => trial.id === trialId);
+      const next = previous.filter((trial) => trial.id !== trialId);
+      if (removed) {
+        markDatasetChanged(
+          'lab',
+          removed.method,
+          next.filter((trial) => trial.method === removed.method).map((trial) => trial.id),
+        );
+      }
+      return next;
+    });
     if (selectedTrialId === trialId) setSelectedTrialId(null);
   };
 

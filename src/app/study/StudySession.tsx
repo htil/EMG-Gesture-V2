@@ -10,6 +10,7 @@ import {
   Pause,
   Play,
   Radio,
+  Trash2,
   Waves,
 } from 'lucide-react';
 import {
@@ -27,6 +28,13 @@ import {
 import { DEFAULT_GESTURES, getChannelMockSignalValue } from '../pipeline';
 import { useGestureRecorder, type CaptureTriggerMode } from '../useGestureRecorder';
 import { useSignalSource, type SignalPoint, type SignalSourceMode } from '../useSignalSource';
+import {
+  isModelReady,
+  markDatasetChanged,
+  trainConditionModel,
+  type ConditionModelState,
+  type ModelStatus,
+} from './conditionTraining';
 import DarkSelect from './DarkSelect';
 import { gestureQuotas, keptForGesture, sampleNumber, samplesComplete } from './samplePlan';
 import { alignWaveform, sharedWaveDomain, type WaveDomain } from './waveScale';
@@ -35,6 +43,7 @@ import {
   loadClientSession,
   saveClientSession,
   saveRound,
+  type Assignment,
   type ClientSession,
   type FlowStage,
   type StoredTrial,
@@ -297,20 +306,73 @@ function TrialCard({
   kept,
   required,
   domain,
+  onDelete,
 }: {
   trial: StoredTrial;
   sampleIndex: number;
   kept: number;
   required: number;
   domain: WaveDomain;
+  onDelete?: () => void;
 }) {
   return (
     <article className="rounded-2xl border border-white/10 bg-slate-950/50 p-4">
-      <p className="text-xs text-slate-500">Sample {sampleIndex}</p>
-      <p className="mt-1 text-sm font-medium text-white">{trial.gestureName}</p>
-      <p className="mt-1 text-[11px] tabular-nums text-slate-400">{kept}/{required} kept</p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs text-slate-500">Sample {sampleIndex}</p>
+          <p className="mt-1 text-sm font-medium text-white">{trial.gestureName}</p>
+          <p className="mt-1 text-[11px] tabular-nums text-slate-400">{kept}/{required} kept</p>
+        </div>
+        {onDelete && (
+          <button
+            type="button"
+            onClick={onDelete}
+            className="rounded-lg p-1.5 text-slate-500 transition hover:bg-rose-400/10 hover:text-rose-200"
+            aria-label={`Delete ${trial.gestureName} sample ${sampleIndex}`}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
       <TrialWave trial={trial} domain={domain} />
     </article>
+  );
+}
+
+function ModelStatusNote({ state }: { state: ConditionModelState }) {
+  const copy: Record<ModelStatus, { title: string; detail: string; tone: string }> = {
+    incomplete: {
+      title: 'Incomplete',
+      detail: 'Collect the required examples, then train this condition.',
+      tone: 'border-white/10 bg-white/[0.03] text-slate-300',
+    },
+    training: {
+      title: 'Training',
+      detail: 'This condition’s model is training.',
+      tone: 'border-cyan-300/30 bg-cyan-300/10 text-cyan-50',
+    },
+    ready: {
+      title: 'Ready',
+      detail: 'This condition’s model matches the kept examples.',
+      tone: 'border-emerald-300/30 bg-emerald-300/10 text-emerald-50',
+    },
+    error: {
+      title: 'Error',
+      detail: state.error || 'This condition’s model could not be trained.',
+      tone: 'border-rose-300/30 bg-rose-400/10 text-rose-50',
+    },
+    outdated: {
+      title: 'Out of date',
+      detail: 'A sample changed, so this condition’s model cannot be tested until you train again.',
+      tone: 'border-amber-300/30 bg-amber-300/10 text-amber-50',
+    },
+  };
+  const status = copy[state.status];
+  return (
+    <div className={`rounded-2xl border px-4 py-3 ${status.tone}`}>
+      <p className="text-xs font-medium uppercase tracking-[0.16em]">Model {status.title}</p>
+      <p className="mt-1 text-sm leading-6">{status.detail}</p>
+    </div>
   );
 }
 
@@ -324,6 +386,8 @@ export default function StudySession() {
   const [notice, setNotice] = useState('Start the stream, then perform the gesture.');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
+  const [modelState, setModelState] = useState<ConditionModelState | null>(null);
+  const [training, setTraining] = useState(false);
 
   useEffect(() => {
     if (!session) navigate('/', { replace: true });
@@ -435,9 +499,22 @@ export default function StudySession() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [armed, manualTrigger, recorderState]);
 
+  useEffect(() => {
+    if (!session) return;
+    const condition: Assignment = session.manualTrigger ? 'button' : 'threshold';
+    setModelState(markDatasetChanged(
+      session.participantId,
+      condition,
+      session.trials.map((trial) => trial.id),
+    ));
+  }, [session]);
+
   if (!session) return null;
 
   const signalValue = signalData[signalData.length - 1]?.normalizedActivity ?? 0;
+  const condition: Assignment = session.manualTrigger ? 'button' : 'threshold';
+  const trialIds = trials.map((trial) => trial.id);
+  const modelReady = isModelReady(session.participantId, condition, trialIds);
   const quotas = gestureQuotas(DEFAULT_GESTURES, trials, session.capturesPerRound);
   const missingQuotas = quotas.filter((row) => row.missing > 0);
   const cappedKept = quotas.reduce((sum, row) => sum + Math.min(row.kept, row.required), 0);
@@ -453,6 +530,7 @@ export default function StudySession() {
         kept={quota?.kept ?? 0}
         required={session.capturesPerRound}
         domain={waveDomain}
+        onDelete={() => deleteKeptTrial(trial.id)}
       />
     );
   };
@@ -463,8 +541,29 @@ export default function StudySession() {
     if (target <= reachedIndex) return true;
     if (target !== reachedIndex + 1) return false;
     if (next === 'review') return trials.length > 0;
-    if (next === 'game') return roundComplete && reachedIndex >= flowIndex('review');
-    return roundComplete && reachedIndex >= flowIndex('game');
+    if (next === 'game') return roundComplete && modelReady && reachedIndex >= flowIndex('review');
+    return roundComplete && modelReady && reachedIndex >= flowIndex('game');
+  };
+
+  const deleteKeptTrial = (trialId: string) => {
+    setSession((current) => {
+      if (!current) return current;
+      return { ...current, trials: current.trials.filter((trial) => trial.id !== trialId) };
+    });
+    setNotice('Example removed. Return to Capture if that gesture is now short.');
+  };
+
+  const trainModel = async () => {
+    if (!roundComplete || training) return;
+    setTraining(true);
+    setModelState((current) => (current ? { ...current, status: 'training', error: '' } : current));
+    try {
+      const next = await trainConditionModel(session.participantId, condition, trials, DEFAULT_GESTURES);
+      setModelState(next);
+      setNotice(next.status === 'ready' ? 'Model ready for this condition.' : next.error || 'The model is not ready.');
+    } finally {
+      setTraining(false);
+    }
   };
 
   const goTo = (next: FlowStage) => {
@@ -701,11 +800,15 @@ export default function StudySession() {
                 <p className="text-xs uppercase tracking-[0.18em] text-cyan-300/70">Review</p>
                 <h2 className="mt-1 text-2xl font-light text-white">Captures from this round</h2>
               </div>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <button type="button" onClick={() => goTo('capture')} className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-300">Back to capture</button>
-                <button type="button" disabled={!roundComplete} onClick={() => goTo('game')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950 disabled:cursor-not-allowed disabled:opacity-35">Play <ArrowRight className="h-3.5 w-3.5" /></button>
+                <button type="button" disabled={!roundComplete || training} onClick={() => void trainModel()} className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-100 disabled:cursor-not-allowed disabled:opacity-35">
+                  {modelState?.status === 'training' || training ? 'Training' : modelState?.status === 'ready' ? 'Retrain' : 'Train model'}
+                </button>
+                <button type="button" disabled={!roundComplete || !modelReady} onClick={() => goTo('game')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950 disabled:cursor-not-allowed disabled:opacity-35">Play <ArrowRight className="h-3.5 w-3.5" /></button>
               </div>
             </div>
+            {modelState && <ModelStatusNote state={modelState} />}
             <div className="flex flex-wrap gap-2">
               {quotas.map((row) => (
                 <span key={row.gesture.id} className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-xs text-slate-200">
@@ -714,8 +817,18 @@ export default function StudySession() {
               ))}
             </div>
             {missingQuotas.length > 0 && (
-              <div className="rounded-2xl border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
-                Still needed: {missingQuotas.map((row) => `${row.gesture.name} ${row.missing}`).join(', ')}. Collect those examples before playing.
+              <div className="rounded-2xl border border-amber-300/20 bg-amber-300/10 px-4 py-4 text-sm text-amber-50">
+                <p className="font-medium">Missing examples</p>
+                <ul className="mt-2 space-y-1">
+                  {missingQuotas.map((row) => (
+                    <li key={row.gesture.id}>
+                      {row.gesture.name} needs {row.missing} more {row.missing === 1 ? 'example' : 'examples'} ({row.kept}/{row.required} kept)
+                    </li>
+                  ))}
+                </ul>
+                <button type="button" onClick={() => goTo('capture')} className="mt-3 rounded-xl bg-amber-100 px-4 py-2 text-xs font-medium text-slate-950">
+                  Return to Capture
+                </button>
               </div>
             )}
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -730,14 +843,18 @@ export default function StudySession() {
               <div>
                 <p className="text-xs uppercase tracking-[0.18em] text-emerald-300/80">In development</p>
                 <h2 className="mt-1 text-2xl font-light text-white">Review game</h2>
-                <p className="mt-2 max-w-xl text-sm leading-6 text-slate-500">This step is reserved for a Three.js game. You will review the signals from this round with the trained model here once the game is connected.</p>
+                <p className="mt-2 max-w-xl text-sm leading-6 text-slate-500">This step is reserved for the existing game. Testing stays closed until this condition’s model is ready.</p>
               </div>
               <div className="flex gap-2">
                 <button type="button" onClick={() => goTo('review')} className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-300">Back to review</button>
                 <button type="button" onClick={() => goTo('compare')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950">Compare <ArrowRight className="h-3.5 w-3.5" /></button>
               </div>
             </div>
-            <div className="p-4 md:p-6">
+            <div className="space-y-4 p-4 md:p-6">
+              {modelState && <ModelStatusNote state={modelState} />}
+              {!modelReady && (
+                <p className="text-sm text-amber-100">Testing is closed until this condition’s model is ready and matches the kept examples.</p>
+              )}
               <div className="flex min-h-[420px] flex-col items-center justify-center rounded-[22px] border border-dashed border-emerald-300/25 bg-[linear-gradient(rgba(110,231,183,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(110,231,183,0.05)_1px,transparent_1px),rgba(0,0,0,0.25)] bg-[size:28px_28px,28px_28px,auto] text-center">
                 <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-emerald-300/20 bg-emerald-300/10 text-emerald-300">
                   <Gamepad2 className="h-5 w-5" />
