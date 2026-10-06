@@ -11,6 +11,7 @@ export default function ResultsPanel({
   tryAgainEnabled,
   onReview,
   onContinue,
+  continueEnabled,
   continueLabel,
   saving,
   saveError,
@@ -22,6 +23,7 @@ export default function ResultsPanel({
   tryAgainEnabled: boolean;
   onReview: () => void;
   onContinue: () => void;
+  continueEnabled: boolean;
   continueLabel: string;
   saving: boolean;
   saveError: string;
@@ -113,7 +115,7 @@ export default function ResultsPanel({
         </button>
         <button
           type="button"
-          disabled={saving}
+          disabled={saving || !continueEnabled}
           onClick={onContinue}
           className="flex items-center gap-2 rounded-xl bg-white px-4 py-2.5 text-xs font-medium text-slate-950 disabled:opacity-50"
         >
@@ -123,6 +125,9 @@ export default function ResultsPanel({
       </div>
       {!tryAgainEnabled && (
         <p className="text-xs text-amber-100">Try Again stays closed until this condition’s model is ready.</p>
+      )}
+      {!continueEnabled && (
+        <p className="text-xs text-amber-100">Continue stays closed until every gesture has its required examples again.</p>
       )}
       <p className="text-xs leading-5 text-slate-500">When retries and retraining are allowed during the measured study is still open.</p>
       {saveError && <p className="text-sm text-rose-300">{saveError}</p>}

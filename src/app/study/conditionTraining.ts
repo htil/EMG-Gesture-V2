@@ -24,6 +24,7 @@ export interface ConditionModelState {
 
 const engines = new Map<string, ReturnType<typeof createPredictionEngine>>();
 const trainTokens = new Map<string, number>();
+const trainingInFlight = new Map<string, number>();
 
 function storageKey(scopeId: string, condition: Assignment) {
   return `emg-condition-model:${scopeId}:${condition}`;
@@ -87,7 +88,16 @@ export function markDatasetChanged(scopeId: string, condition: Assignment, trial
     engines.delete(key);
   }
 
-  if (current.status === 'training' && datasetSame) return current;
+  const trainingStillRunning = trainingInFlight.get(key) === trainTokens.get(key);
+  if (current.status === 'training' && datasetSame && trainingStillRunning) return current;
+  if (current.status === 'training' && datasetSame) {
+    engines.delete(key);
+    return writeModelState(scopeId, condition, {
+      ...current,
+      status: current.trainedTrialIds.length > 0 ? 'outdated' : 'error',
+      error: 'Training stopped before the model was ready.',
+    });
+  }
   if (current.status === 'error' && datasetSame) return current;
 
   let next: ConditionModelState;
@@ -164,6 +174,7 @@ export async function trainConditionModel(
   const key = storageKey(scopeId, condition);
   const token = (trainTokens.get(key) ?? 0) + 1;
   trainTokens.set(key, token);
+  trainingInFlight.set(key, token);
   const trialIds = trials.map((trial) => trial.id);
   const previous = readModelState(scopeId, condition);
   writeModelState(scopeId, condition, {
@@ -174,12 +185,12 @@ export async function trainConditionModel(
     error: '',
   });
 
-  await new Promise((resolve) => {
-    window.setTimeout(resolve, 250);
-  });
-  if (trainTokens.get(key) !== token) return readModelState(scopeId, condition);
-
   try {
+    await new Promise((resolve) => {
+      window.setTimeout(resolve, 250);
+    });
+    if (trainTokens.get(key) !== token) return readModelState(scopeId, condition);
+
     const engine = createPredictionEngine(toTrainingSession(trials, gestures));
     if (trainTokens.get(key) !== token) return readModelState(scopeId, condition);
     if (!engine.getModelDebugSummary().isReady) {
@@ -213,5 +224,7 @@ export async function trainConditionModel(
       error: error instanceof Error ? error.message : 'The model could not be trained.',
       trainedAt: null,
     });
+  } finally {
+    if (trainingInFlight.get(key) === token) trainingInFlight.delete(key);
   }
 }

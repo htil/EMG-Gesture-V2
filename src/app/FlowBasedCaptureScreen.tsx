@@ -664,19 +664,47 @@ export default function FlowBasedCaptureScreen() {
               <input className="mt-3 w-full accent-amber-300" type="range" min="0.2" max="0.9" step="0.02" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} />
             </label>
             <label className="text-xs text-slate-400">Capture window
-              <select value={segmentDurationMs} onChange={(event) => setSegmentDurationMs(Number(event.target.value))} className="mt-2 w-full rounded-xl border border-white/8 bg-black/20 px-3 py-2 text-sm text-slate-200 outline-none">
-                <option value={800}>0.8 seconds</option><option value={1200}>1.2 seconds</option><option value={1600}>1.6 seconds</option><option value={2000}>2.0 seconds</option>
-              </select>
+              <div className="mt-2">
+                <DarkSelect
+                  label="Capture window"
+                  value={String(segmentDurationMs)}
+                  options={[
+                    { value: '800', label: '0.8 seconds' },
+                    { value: '1200', label: '1.2 seconds' },
+                    { value: '1600', label: '1.6 seconds' },
+                    { value: '2000', label: '2.0 seconds' },
+                  ]}
+                  onChange={(value) => setSegmentDurationMs(Number(value))}
+                  triggerClassName="rounded-xl py-2 text-sm"
+                />
+              </div>
             </label>
             <label className="text-xs text-slate-400">Signal channel
-              <select value={selectedChannelIndex} onChange={(event) => setSelectedChannelIndex(Number(event.target.value))} className="mt-2 w-full rounded-xl border border-white/8 bg-black/20 px-3 py-2 text-sm text-slate-200 outline-none">
-                <option value={0}>Channel 1</option><option value={1}>Channel 2</option><option value={2}>Channel 3</option><option value={3}>Channel 4</option>
-              </select>
+              <div className="mt-2">
+                <DarkSelect
+                  label="Signal channel"
+                  value={String(selectedChannelIndex)}
+                  options={[0, 1, 2, 3].map((index) => ({ value: String(index), label: `Channel ${index + 1}` }))}
+                  onChange={(value) => setSelectedChannelIndex(Number(value))}
+                  triggerClassName="rounded-xl py-2 text-sm"
+                />
+              </div>
             </label>
             <label className="text-xs text-slate-400">Pairs per gesture
-              <select value={trialsPerMethod} onChange={(event) => setTrialsPerMethod(Number(event.target.value))} className="mt-2 w-full rounded-xl border border-white/8 bg-black/20 px-3 py-2 text-sm text-slate-200 outline-none">
-                <option value={1}>1 pair</option><option value={3}>3 pairs</option><option value={5}>5 pairs</option><option value={10}>10 pairs</option>
-              </select>
+              <div className="mt-2">
+                <DarkSelect
+                  label="Pairs per gesture"
+                  value={String(trialsPerMethod)}
+                  options={[
+                    { value: '1', label: '1 pair' },
+                    { value: '3', label: '3 pairs' },
+                    { value: '5', label: '5 pairs' },
+                    { value: '10', label: '10 pairs' },
+                  ]}
+                  onChange={(value) => setTrialsPerMethod(Number(value))}
+                  triggerClassName="rounded-xl py-2 text-sm"
+                />
+              </div>
             </label>
           </section>
         )}

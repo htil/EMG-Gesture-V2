@@ -615,6 +615,7 @@ export default function StudySession() {
   };
 
   const finishRound = async () => {
+    if (!roundComplete) return;
     setSaving(true);
     setSaveError('');
     try {
@@ -758,14 +759,16 @@ export default function StudySession() {
                     </button>
                   ))}
                 </div>
-                <label className="mt-3 block text-[10px] uppercase tracking-[0.16em] text-slate-500">Channel
-                  <select value={channelIndex} onChange={(event) => setChannelIndex(Number(event.target.value))} className="mt-2 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm normal-case tracking-normal text-slate-200 outline-none">
-                    <option value={0}>Channel 1</option>
-                    <option value={1}>Channel 2</option>
-                    <option value={2}>Channel 3</option>
-                    <option value={3}>Channel 4</option>
-                  </select>
-                </label>
+                <label className="mt-3 block text-[10px] uppercase tracking-[0.16em] text-slate-500">Channel</label>
+                <div className="mt-2">
+                  <DarkSelect
+                    label="Channel"
+                    value={String(channelIndex)}
+                    options={[0, 1, 2, 3].map((index) => ({ value: String(index), label: `Channel ${index + 1}` }))}
+                    onChange={(value) => setChannelIndex(Number(value))}
+                    triggerClassName="rounded-xl py-2 text-sm"
+                  />
+                </div>
 
                 <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
                   <p className="text-xs font-medium text-cyan-100">
@@ -906,6 +909,7 @@ export default function StudySession() {
             onTryAgain={() => goTo('game')}
             onReview={() => goTo('review')}
             onContinue={() => void finishRound()}
+            continueEnabled={roundComplete}
             continueLabel={session.round >= session.repetitions ? 'Finish session' : 'Continue'}
             saving={saving}
             saveError={saveError}

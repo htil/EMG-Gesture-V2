@@ -8,6 +8,7 @@ import {
   RefreshCw,
   Trash2,
 } from 'lucide-react';
+import DarkSelect from '../study/DarkSelect';
 import {
   clearAdminPin,
   createExperiment,
@@ -285,13 +286,19 @@ export default function AdminApp() {
                   <input type="number" min={1} max={20} value={draftCaptures} onChange={(event) => setDraftCaptures(Number(event.target.value))} className={inputClass} />
                 </Field>
                 <Field label="Session access">
-                  <select value={selected.status} onChange={(event) => void run(async () => {
-                    await updateExperiment(pin, selected.id, { status: event.target.value as Experiment['status'] });
-                    await refreshExperiments(pin, selected.id);
-                  })} className={inputClass}>
-                    <option value="active">Open for IDs</option>
-                    <option value="closed">Closed</option>
-                  </select>
+                  <DarkSelect
+                    label="Session access"
+                    value={selected.status}
+                    options={[
+                      { value: 'active', label: 'Open for IDs' },
+                      { value: 'closed', label: 'Closed' },
+                    ]}
+                    onChange={(value) => void run(async () => {
+                      await updateExperiment(pin, selected.id, { status: value as Experiment['status'] });
+                      await refreshExperiments(pin, selected.id);
+                    })}
+                    triggerClassName="rounded-xl py-2.5 text-sm"
+                  />
                 </Field>
               </div>
               <Field label="Notes">
@@ -349,11 +356,19 @@ export default function AdminApp() {
                   <input type="number" min={1} max={200} value={generateCount} onChange={(event) => setGenerateCount(Number(event.target.value))} className={`${inputClass} w-28`} />
                 </Field>
                 <Field label="Assignment">
-                  <select value={assignment} onChange={(event) => setAssignment(event.target.value as typeof assignment)} className={`${inputClass} w-44`}>
-                    <option value="balanced">Balanced</option>
-                    <option value="button">Button only</option>
-                    <option value="threshold">Threshold only</option>
-                  </select>
+                  <div className="w-44">
+                    <DarkSelect
+                      label="Assignment"
+                      value={assignment}
+                      options={[
+                        { value: 'balanced', label: 'Balanced' },
+                        { value: 'button', label: 'Button only' },
+                        { value: 'threshold', label: 'Threshold only' },
+                      ]}
+                      onChange={(value) => setAssignment(value as typeof assignment)}
+                      triggerClassName="rounded-xl py-2.5 text-sm"
+                    />
+                  </div>
                 </Field>
                 <button
                   type="button"
@@ -386,19 +401,22 @@ export default function AdminApp() {
                       <tr key={participant.id} className="border-t border-white/8">
                         <td className="py-3 font-mono tracking-wider text-white">{participant.id}</td>
                         <td className="py-3">
-                          <select
-                            value={participant.condition}
-                            disabled={participant.status !== 'assigned' || busy}
-                            onChange={(event) => void run(async () => {
-                              await updateParticipant(pin, participant.id, event.target.value as Assignment);
-                              await refreshParticipants(pin, selected.id);
-                              await refreshExperiments(pin, selected.id);
-                            })}
-                            className="rounded-lg border border-white/10 bg-black/30 px-2 py-1.5 text-xs capitalize text-slate-200 disabled:opacity-60"
-                          >
-                            <option value="button">Button</option>
-                            <option value="threshold">Threshold</option>
-                          </select>
+                          <div className={`w-36 ${participant.status !== 'assigned' || busy ? 'pointer-events-none opacity-60' : ''}`}>
+                            <DarkSelect
+                              label={`Assignment for ${participant.id}`}
+                              value={participant.condition}
+                              options={[
+                                { value: 'button', label: 'Button' },
+                                { value: 'threshold', label: 'Threshold' },
+                              ]}
+                              onChange={(value) => void run(async () => {
+                                await updateParticipant(pin, participant.id, value as Assignment);
+                                await refreshParticipants(pin, selected.id);
+                                await refreshExperiments(pin, selected.id);
+                              })}
+                              triggerClassName="rounded-lg px-2 py-1.5 text-xs"
+                            />
+                          </div>
                         </td>
                         <td className="py-3 text-slate-300">{STATUS_LABEL[participant.status]}</td>
                         <td className="py-3 tabular-nums text-slate-300">
