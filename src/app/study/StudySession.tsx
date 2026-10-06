@@ -4,7 +4,6 @@ import {
   Activity,
   ArrowRight,
   Check,
-  ChevronDown,
   CircleDot,
   Gamepad2,
   Hand,
@@ -28,6 +27,7 @@ import {
 import { DEFAULT_GESTURES, getChannelMockSignalValue } from '../pipeline';
 import { useGestureRecorder, type CaptureTriggerMode } from '../useGestureRecorder';
 import { useSignalSource, type SignalPoint, type SignalSourceMode } from '../useSignalSource';
+import DarkSelect from './DarkSelect';
 import {
   clearClientSession,
   loadClientSession,
@@ -584,11 +584,13 @@ export default function StudySession() {
                 </div>
 
                 <label className="mt-5 block text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">Gesture</label>
-                <div className="relative mt-2">
-                  <select value={gestureId} onChange={(event) => setGestureId(event.target.value)} className="w-full appearance-none rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-white outline-none">
-                    {DEFAULT_GESTURES.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                  </select>
-                  <ChevronDown className="pointer-events-none absolute right-4 top-3.5 h-4 w-4 text-slate-500" />
+                <div className="mt-2">
+                  <DarkSelect
+                    label="Gesture"
+                    value={gestureId}
+                    options={DEFAULT_GESTURES.map((item) => ({ value: item.id, label: item.name }))}
+                    onChange={setGestureId}
+                  />
                 </div>
 
                 <div className="mt-4 grid grid-cols-2 gap-2">

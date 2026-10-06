@@ -4,7 +4,6 @@ import {
   ArrowRight,
   BarChart3,
   Check,
-  ChevronDown,
   CircleDot,
   Download,
   FlaskConical,
@@ -36,6 +35,7 @@ import {
 import { DEFAULT_GESTURES, getChannelMockSignalValue } from './pipeline';
 import { useGestureRecorder, type CaptureTriggerMode } from './useGestureRecorder';
 import { useSignalSource, type SignalPoint, type SignalSourceMode } from './useSignalSource';
+import DarkSelect from './study/DarkSelect';
 import StudyFlowCanvas from './StudyFlowCanvas';
 
 type FlowStage = 'capture' | 'review' | 'game' | 'compare';
@@ -728,11 +728,14 @@ export default function FlowBasedCaptureScreen() {
 
                 <div className="p-5">
                   <label className="text-[10px] font-medium uppercase tracking-[0.2em] text-slate-500">Gesture</label>
-                  <div className="relative mt-2">
-                    <select value={currentGestureId} onChange={(event) => setCurrentGestureId(event.target.value)} className="w-full appearance-none rounded-2xl border border-white/10 bg-white/[0.035] px-4 py-3 text-lg font-light text-white outline-none focus:border-cyan-300/40">
-                      {DEFAULT_GESTURES.map((gesture) => <option key={gesture.id} value={gesture.id}>{gesture.name}</option>)}
-                    </select>
-                    <ChevronDown className="pointer-events-none absolute right-4 top-4 h-4 w-4 text-slate-500" />
+                  <div className="mt-2">
+                    <DarkSelect
+                      label="Gesture"
+                      value={currentGestureId}
+                      options={DEFAULT_GESTURES.map((gesture) => ({ value: gesture.id, label: gesture.name }))}
+                      onChange={setCurrentGestureId}
+                      triggerClassName="py-3 text-lg font-light"
+                    />
                   </div>
 
                   <div className="mt-5 grid grid-cols-2 gap-2">
