@@ -7,13 +7,14 @@ EMG Gesture V2 is a biosignal capture study interface for comparing threshold-tr
 
 Participants receive an ID and enter it on the site. The ID is looked up in `data/participants.csv` and assigned to either the button version or the threshold version. The session itself does not say which version is running.
 
-Each round is the same three steps:
+Each round is the same path:
 
-1. `Capture`: record the configured number of gestures with the assigned version.
-2. `Review`: inspect the waveforms from that round.
-3. `Compare`: look across those captures, then start the next round.
+1. `Capture`: record the required examples of each gesture with the assigned version.
+2. `Review`: inspect those waveforms, delete an example if needed, and train once the set is complete.
+3. `Play`: use the trained model in the game. Testing stays closed until that condition's model is ready.
+4. `Results`: see the game score against the previous run at the same difficulty, plus recognition accuracy. Then continue to the next round.
 
-After Compare, the round loops back to Capture until the experiment's repetition count is finished. Full waveforms for each finished round are written to `data/sessions/`.
+After Results, the round loops back to Capture until the experiment's repetition count is finished. Full waveforms for each finished round are written to `data/sessions/`. The play step is reserved for the game on the `gamification` branch. That game should report a score and each gesture attempt; this branch does not ship a second game.
 
 The paired lab canvas, with both trigger methods visible, remains at `/lab`.
 

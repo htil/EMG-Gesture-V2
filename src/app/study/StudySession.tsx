@@ -36,12 +36,15 @@ import {
   type ModelStatus,
 } from './conditionTraining';
 import DarkSelect from './DarkSelect';
+import { DEFAULT_DIFFICULTY, registerGameRunListener, type StoredGameRun } from './gameHandoff';
+import ResultsPanel from './ResultsPanel';
 import { gestureQuotas, keptForGesture, sampleNumber, samplesComplete } from './samplePlan';
 import { alignWaveform, sharedWaveDomain, type WaveDomain } from './waveScale';
 import {
   clearClientSession,
   loadClientSession,
   saveClientSession,
+  saveGameRun,
   saveRound,
   type Assignment,
   type ClientSession,
@@ -54,13 +57,13 @@ const DISPLAY_WINDOW_MS = 5000;
 const SEGMENT_DURATION_MS = 1200;
 const ACTIVITY_GUIDE = 0.6;
 
-const FLOW: FlowStage[] = ['capture', 'review', 'game', 'compare'];
+const FLOW: FlowStage[] = ['capture', 'review', 'game', 'results'];
 
 const STEPS: Array<{ id: FlowStage; label: string; detail: string }> = [
   { id: 'capture', label: 'Capture', detail: 'Record the gesture' },
   { id: 'review', label: 'Review', detail: 'Inspect each signal' },
   { id: 'game', label: 'Play', detail: 'Use the captures' },
-  { id: 'compare', label: 'Compare', detail: 'Look across this round' },
+  { id: 'results', label: 'Results', detail: 'Score and recognition' },
 ];
 
 function flowIndex(stage: StudyStage) {
@@ -101,7 +104,7 @@ function StepMap({
       <div className="mb-4 flex items-end justify-between gap-3">
         <div>
           <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-cyan-300/80">Round {round} of {repetitions}</p>
-          <h1 className="mt-1 text-2xl font-light text-white">Capture, review, play, then compare</h1>
+          <h1 className="mt-1 text-2xl font-light text-white">Capture, review, play, then see results</h1>
         </div>
       </div>
       <ol className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -501,7 +504,7 @@ export default function StudySession() {
 
   useEffect(() => {
     if (!session) return;
-    const condition: Assignment = session.manualTrigger ? 'button' : 'threshold';
+    const condition: Assignment = session.condition;
     setModelState(markDatasetChanged(
       session.participantId,
       condition,
@@ -509,10 +512,37 @@ export default function StudySession() {
     ));
   }, [session]);
 
+  useEffect(() => registerGameRunListener((handoff) => {
+    const current = sessionRef.current;
+    if (!current || handoff.condition !== current.condition) return;
+    if (!isModelReady(current.participantId, current.condition, current.trials.map((trial) => trial.id))) return;
+    const run: StoredGameRun = {
+      id: `${current.participantId}-${Date.now()}`,
+      round: current.round,
+      recordedAt: Date.now(),
+      condition: current.condition,
+      difficulty: handoff.difficulty || DEFAULT_DIFFICULTY,
+      gameScore: handoff.gameScore,
+      outcomes: handoff.outcomes,
+    };
+    setSession((previous) => {
+      if (!previous) return previous;
+      return {
+        ...previous,
+        runs: [...previous.runs, run],
+        stage: 'results',
+        unlockedThrough: 'results',
+      };
+    });
+    void saveGameRun(current.participantId, run).catch(() => {
+      setSaveError('The game result could not be saved.');
+    });
+  }), []);
+
   if (!session) return null;
 
   const signalValue = signalData[signalData.length - 1]?.normalizedActivity ?? 0;
-  const condition: Assignment = session.manualTrigger ? 'button' : 'threshold';
+  const condition: Assignment = session.condition;
   const trialIds = trials.map((trial) => trial.id);
   const modelReady = isModelReady(session.participantId, condition, trialIds);
   const quotas = gestureQuotas(DEFAULT_GESTURES, trials, session.capturesPerRound);
@@ -535,14 +565,13 @@ export default function StudySession() {
     );
   };
 
+  const hasRunThisRound = session.runs.some((run) => run.round === session.round && run.condition === condition);
   const canVisit = (next: FlowStage) => {
     if (stage === 'done') return false;
-    const target = flowIndex(next);
-    if (target <= reachedIndex) return true;
-    if (target !== reachedIndex + 1) return false;
-    if (next === 'review') return trials.length > 0;
-    if (next === 'game') return roundComplete && modelReady && reachedIndex >= flowIndex('review');
-    return roundComplete && modelReady && reachedIndex >= flowIndex('game');
+    if (next === 'capture') return true;
+    if (next === 'review') return trials.length > 0 || stage === 'review' || stage === 'game' || stage === 'results';
+    if (next === 'game') return roundComplete && modelReady;
+    return hasRunThisRound || (roundComplete && modelReady && reachedIndex >= flowIndex('game'));
   };
 
   const deleteKeptTrial = (trialId: string) => {
@@ -843,11 +872,11 @@ export default function StudySession() {
               <div>
                 <p className="text-xs uppercase tracking-[0.18em] text-emerald-300/80">In development</p>
                 <h2 className="mt-1 text-2xl font-light text-white">Review game</h2>
-                <p className="mt-2 max-w-xl text-sm leading-6 text-slate-500">This step is reserved for the existing game. Testing stays closed until this condition’s model is ready.</p>
+                <p className="mt-2 max-w-xl text-sm leading-6 text-slate-500">This step will use the game from the gamification branch. Testing stays closed until this condition’s model is ready. The game reports its score and each gesture attempt when the run ends.</p>
               </div>
               <div className="flex gap-2">
                 <button type="button" onClick={() => goTo('review')} className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-300">Back to review</button>
-                <button type="button" onClick={() => goTo('compare')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950">Compare <ArrowRight className="h-3.5 w-3.5" /></button>
+                <button type="button" disabled={!modelReady && !hasRunThisRound} onClick={() => goTo('results')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950 disabled:cursor-not-allowed disabled:opacity-35">Results <ArrowRight className="h-3.5 w-3.5" /></button>
               </div>
             </div>
             <div className="space-y-4 p-4 md:p-6">
@@ -859,43 +888,28 @@ export default function StudySession() {
                 <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-emerald-300/20 bg-emerald-300/10 text-emerald-300">
                   <Gamepad2 className="h-5 w-5" />
                 </span>
-                <p className="mt-5 text-[11px] font-medium uppercase tracking-[0.22em] text-emerald-300/80">Three.js canvas placeholder</p>
-                <p className="mt-2 max-w-md text-sm leading-6 text-slate-500">Reserved space for the review game. Captures from this round will be playable here.</p>
+                <p className="mt-5 text-[11px] font-medium uppercase tracking-[0.22em] text-emerald-300/80">Game from the gamification branch</p>
+                <p className="mt-2 max-w-md text-sm leading-6 text-slate-500">Reserved for the existing game. It should call submitGameRun with the score and each gesture attempt. A second game is not built here.</p>
               </div>
             </div>
           </section>
         )}
 
-        {stage === 'compare' && (
-          <section className="space-y-4">
-            <div className="flex flex-wrap items-end justify-between gap-3">
-              <div>
-                <p className="text-xs uppercase tracking-[0.18em] text-cyan-300/70">Compare</p>
-                <h2 className="mt-1 text-2xl font-light text-white">This round, side by side</h2>
-              </div>
-              <button type="button" onClick={() => goTo('game')} className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-300">Back to play</button>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {quotas.map((row) => (
-                <span key={row.gesture.id} className="rounded-full border border-white/10 px-3 py-1.5 text-xs text-slate-200">
-                  {row.gesture.name} <span className="tabular-nums">{row.kept}/{row.required} kept</span>
-                </span>
-              ))}
-            </div>
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {trials.map((trial) => renderTrial(trial))}
-            </div>
-            {saveError && <p className="text-sm text-rose-300">{saveError}</p>}
-            <button
-              type="button"
-              disabled={saving}
-              onClick={() => void finishRound()}
-              className="flex items-center gap-2 rounded-2xl bg-white px-5 py-3 text-sm font-medium text-slate-950 disabled:opacity-50"
-            >
-              {saving ? 'Saving round' : session.round >= session.repetitions ? 'Finish session' : `Start round ${session.round + 1}`}
-              {!saving && <ArrowRight className="h-4 w-4" />}
-            </button>
-          </section>
+        {stage === 'results' && (
+          <ResultsPanel
+            runs={session.runs}
+            currentRun={session.runs
+              .filter((run) => run.round === session.round && run.condition === condition)
+              .sort((left, right) => right.recordedAt - left.recordedAt)[0] ?? null}
+            gestures={DEFAULT_GESTURES}
+            tryAgainEnabled={roundComplete && modelReady}
+            onTryAgain={() => goTo('game')}
+            onReview={() => goTo('review')}
+            onContinue={() => void finishRound()}
+            continueLabel={session.round >= session.repetitions ? 'Finish session' : 'Continue'}
+            saving={saving}
+            saveError={saveError}
+          />
         )}
       </main>
     </div>

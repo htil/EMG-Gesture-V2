@@ -195,6 +195,21 @@ export function createStudyDesk(dataDir) {
   const saveExperiments = (records) => writeTable(experimentsPath, EXPERIMENT_HEADERS, records);
   const saveParticipants = (records) => writeTable(participantsPath, PARTICIPANT_HEADERS, records);
   const saveRounds = (records) => writeTable(roundsPath, ROUND_HEADERS, records);
+  const runsFile = (participantId) => path.join(sessionsDir, `${participantId}-runs.json`);
+  const readRuns = (participantId) => {
+    const filePath = runsFile(participantId);
+    if (!fs.existsSync(filePath)) return [];
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+  const writeRuns = (participantId, runs) => {
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.writeFileSync(runsFile(participantId), `${JSON.stringify(runs, null, 2)}\n`);
+  };
 
   const requireAdmin = (headers, state) => {
     const pin = headers['x-admin-pin'] ?? headers['X-Admin-Pin'];
@@ -240,7 +255,9 @@ export function createStudyDesk(dataDir) {
               repetitions: Number(experiment.repetitions),
               capturesPerRound: Number(experiment.captures_per_round),
               round: Number(experiment.repetitions),
+              condition: participant.condition,
               status: 'completed',
+              runs: readRuns(participant.id),
             },
           };
         }
@@ -258,10 +275,43 @@ export function createStudyDesk(dataDir) {
             repetitions: Number(experiment.repetitions),
             capturesPerRound: Number(experiment.captures_per_round),
             round: Number(participant.current_round) || 1,
+            condition: participant.condition,
             manualTrigger: participant.condition === 'button',
             status: 'in_progress',
+            runs: readRuns(participant.id),
           },
         };
+      }
+
+      if (route === 'POST /runs') {
+        const id = normalizeId(body.id);
+        const participant = state.participants.find((entry) => entry.id === id);
+        if (!participant) throw Object.assign(new Error('That ID was not recognized.'), { status: 404 });
+        const run = body.run;
+        const allowed = new Set(['correct', 'wrong', 'unknown', 'recording_failure']);
+        if (!run || run.condition !== participant.condition || !Number.isFinite(Number(run.gameScore)) || !Array.isArray(run.outcomes)) {
+          throw Object.assign(new Error('That game result does not belong to this session.'), { status: 400 });
+        }
+        const stored = {
+          id: String(run.id || randomId(8, 'RUN-')),
+          round: Number(run.round) || Number(participant.current_round) || 1,
+          recordedAt: Number(run.recordedAt) || Date.now(),
+          condition: participant.condition,
+          difficulty: String(run.difficulty || 'standard'),
+          gameScore: Number(run.gameScore),
+          outcomes: run.outcomes.filter((outcome) => outcome && allowed.has(outcome.result)).map((outcome) => ({
+            attemptId: String(outcome.attemptId || ''),
+            expectedGestureId: String(outcome.expectedGestureId || ''),
+            expectedGestureName: String(outcome.expectedGestureName || ''),
+            result: outcome.result,
+            predictedGestureId: outcome.predictedGestureId == null ? null : String(outcome.predictedGestureId),
+            predictedGestureName: outcome.predictedGestureName == null ? null : String(outcome.predictedGestureName),
+          })),
+        };
+        const runs = readRuns(participant.id).filter((entry) => entry.id !== stored.id);
+        runs.push(stored);
+        writeRuns(participant.id, runs);
+        return { status: 200, body: { ok: true } };
       }
 
       if (route === 'POST /progress') {

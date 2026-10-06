@@ -1,7 +1,9 @@
+import type { StoredGameRun } from './gameHandoff';
+
 export type ParticipantStatus = 'assigned' | 'in_progress' | 'completed';
 export type ExperimentStatus = 'active' | 'closed';
 export type Assignment = 'button' | 'threshold';
-export type StudyStage = 'capture' | 'review' | 'game' | 'compare' | 'done';
+export type StudyStage = 'capture' | 'review' | 'game' | 'results' | 'done';
 export type FlowStage = Exclude<StudyStage, 'done'>;
 
 export interface Experiment {
@@ -63,11 +65,13 @@ export interface ClientSession {
   repetitions: number;
   capturesPerRound: number;
   round: number;
+  condition: Assignment;
   manualTrigger: boolean;
   status: ParticipantStatus;
   stage: StudyStage;
   unlockedThrough: FlowStage;
   trials: StoredTrial[];
+  runs: StoredGameRun[];
 }
 
 const SESSION_KEY = 'emg-study-session';
@@ -77,7 +81,25 @@ export function loadClientSession(): ClientSession | null {
   const raw = sessionStorage.getItem(SESSION_KEY);
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as ClientSession;
+    const parsed = JSON.parse(raw) as Omit<ClientSession, 'stage' | 'unlockedThrough' | 'condition' | 'runs'> & {
+      stage?: string;
+      unlockedThrough?: string;
+      condition?: Assignment;
+      runs?: StoredGameRun[];
+    };
+    const stage = parsed.stage === 'compare' ? 'results' : parsed.stage;
+    const unlockedThrough = parsed.unlockedThrough === 'compare' ? 'results' : parsed.unlockedThrough;
+    if (stage !== 'capture' && stage !== 'review' && stage !== 'game' && stage !== 'results' && stage !== 'done') return null;
+    if (unlockedThrough !== 'capture' && unlockedThrough !== 'review' && unlockedThrough !== 'game' && unlockedThrough !== 'results') return null;
+    return {
+      ...parsed,
+      stage,
+      unlockedThrough,
+      condition: parsed.condition === 'button' || parsed.condition === 'threshold'
+        ? parsed.condition
+        : parsed.manualTrigger ? 'button' : 'threshold',
+      runs: Array.isArray(parsed.runs) ? parsed.runs : [],
+    };
   } catch {
     return null;
   }
@@ -116,9 +138,19 @@ async function request<T>(path: string, init?: RequestInit, pin?: string): Promi
 }
 
 export function joinStudy(id: string) {
-  return request<Omit<ClientSession, 'stage' | 'trials' | 'manualTrigger'> & { manualTrigger?: boolean }>('/api/study/join', {
+  return request<Omit<ClientSession, 'stage' | 'trials' | 'manualTrigger' | 'unlockedThrough'> & {
+    manualTrigger?: boolean;
+    runs?: StoredGameRun[];
+  }>('/api/study/join', {
     method: 'POST',
     body: JSON.stringify({ id }),
+  });
+}
+
+export function saveGameRun(id: string, run: StoredGameRun) {
+  return request<{ ok: boolean }>('/api/study/runs', {
+    method: 'POST',
+    body: JSON.stringify({ id, run }),
   });
 }
 

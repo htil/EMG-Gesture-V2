@@ -27,11 +27,20 @@ export default function ParticipantGate() {
         return;
       }
       const existing = loadClientSession();
+      const condition = joined.condition === 'button' || joined.condition === 'threshold'
+        ? joined.condition
+        : joined.manualTrigger ? 'button' : 'threshold';
       const session: ClientSession = existing
         && existing.participantId === joined.participantId
         && existing.round === joined.round
         && existing.status !== 'completed'
-        ? { ...existing, ...joined, manualTrigger: Boolean(joined.manualTrigger) }
+        ? {
+            ...existing,
+            ...joined,
+            condition,
+            manualTrigger: Boolean(joined.manualTrigger),
+            runs: existing.runs?.length ? existing.runs : joined.runs ?? [],
+          }
         : {
             participantId: joined.participantId,
             experimentId: joined.experimentId,
@@ -39,11 +48,13 @@ export default function ParticipantGate() {
             repetitions: joined.repetitions,
             capturesPerRound: joined.capturesPerRound,
             round: joined.round,
+            condition,
             manualTrigger: Boolean(joined.manualTrigger),
             status: 'in_progress',
             stage: 'capture',
             unlockedThrough: 'capture',
             trials: [],
+            runs: joined.runs ?? [],
           };
       saveClientSession(session);
       navigate('/session');
