@@ -45,9 +45,14 @@ for (let i = 0; i < SEGMENT_COUNT; i++) {
 
 const hurdles = [];
 
-// Initialize hurdles
+// Alternate jump hurdles with lane gates. A lane gate blocks one lane completely.
 for (let i = 0; i < HURDLE_COUNT; i++) {
-  const hurdle = createHurdle();
+  const isLaneGate = i % 2 === 1;
+  const openLane = Math.floor(i / 2) % 2 === 0 ? 1 : 0;
+  const hurdle = isLaneGate ? createLaneGate(openLane) : createHurdle();
+  hurdle.userData.obstacleType = isLaneGate ? 'switch' : 'jump';
+  hurdle.userData.openLane = isLaneGate ? openLane : null;
+  hurdle.userData.resolved = false;
   hurdle.position.z = -(i + 1) * HURDLE_SPACING;
   scene.add(hurdle);
   hurdles.push(hurdle);
@@ -59,6 +64,7 @@ let activeGameOptions = {};
 let lastCueUpdate = 0;
 let completeUntil = 0;
 let lastObstacleResult = null;
+let lastObstacleTarget = 'Jump';
 const previousHurdleZ = new WeakMap();
 
 const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.2);
@@ -355,6 +361,42 @@ function createHurdle() {
   return group;
 }
 
+function createLaneGate(openLane) {
+  const group = new THREE.Group();
+  const closedLane = openLane === 0 ? 1 : 0;
+  const closedX = closedLane === 0 ? -LANE_OFFSET : LANE_OFFSET;
+  const openX = openLane === 0 ? -LANE_OFFSET : LANE_OFFSET;
+  const wallMaterial = new THREE.MeshStandardMaterial({
+    color: 0xef4444,
+    emissive: 0x5f0a16,
+    metalness: 0.25,
+    roughness: 0.55,
+  });
+  const frameMaterial = new THREE.MeshStandardMaterial({
+    color: 0x22d3ee,
+    emissive: 0x083344,
+    metalness: 0.45,
+    roughness: 0.35,
+  });
+
+  const wall = new THREE.Mesh(new THREE.BoxGeometry(LANE_WIDTH, 2.6, 0.32), wallMaterial);
+  wall.position.set(closedX, 1.3, 0);
+  group.add(wall);
+
+  // Bright frame makes the single open lane readable from a distance.
+  const postGeometry = new THREE.BoxGeometry(0.1, 2.6, 0.12);
+  const topGeometry = new THREE.BoxGeometry(LANE_WIDTH, 0.12, 0.12);
+  const leftPost = new THREE.Mesh(postGeometry, frameMaterial);
+  const rightPost = new THREE.Mesh(postGeometry, frameMaterial);
+  const topBar = new THREE.Mesh(topGeometry, frameMaterial);
+  leftPost.position.set(openX - LANE_WIDTH / 2, 1.3, 0);
+  rightPost.position.set(openX + LANE_WIDTH / 2, 1.3, 0);
+  topBar.position.set(openX, 2.55, 0);
+  group.add(leftPost, rightPost, topBar);
+
+  return group;
+}
+
 function resetGame() {
   laneIndex = 0;
   isSwitching = false;
@@ -384,6 +426,7 @@ function resetGame() {
 
   for (let i = 0; i < hurdles.length; i++) {
     hurdles[i].position.z = -(i + 1) * HURDLE_SPACING;
+    hurdles[i].userData.resolved = false;
   }
 }
 
@@ -429,18 +472,38 @@ function animate() {
 
     if (hurdle.position.z > SEGMENT_LENGTH) {
       hurdle.position.z -= HURDLE_COUNT * HURDLE_SPACING;
+      hurdle.userData.resolved = false;
       previousHurdleZ.set(hurdle, hurdle.position.z);
     }
-    if (Math.abs(hurdle.position.z) < HURDLE_HIT_DEPTH && !isJumping) {
+
+    const isLaneGate = hurdle.userData.obstacleType === 'switch';
+    const passedCorrectly = isLaneGate
+      ? laneIndex === hurdle.userData.openLane
+      : isJumping;
+
+    if (
+      !hurdle.userData.resolved
+      && Math.abs(hurdle.position.z) < HURDLE_HIT_DEPTH
+      && !passedCorrectly
+    ) {
+      hurdle.userData.resolved = true;
       completeUntil = performance.now() + 700;
       lastObstacleResult = false;
+      lastObstacleTarget = isLaneGate ? 'Switch Lane' : 'Jump';
       activeGameOptions.onObstacleResult?.(false);
       resetGame();
       break;
     }
-    if (previousZ <= HURDLE_HIT_DEPTH && hurdle.position.z > HURDLE_HIT_DEPTH && isJumping) {
+    if (
+      !hurdle.userData.resolved
+      && previousZ <= HURDLE_HIT_DEPTH
+      && hurdle.position.z > HURDLE_HIT_DEPTH
+      && passedCorrectly
+    ) {
+      hurdle.userData.resolved = true;
       completeUntil = performance.now() + 700;
       lastObstacleResult = true;
+      lastObstacleTarget = isLaneGate ? 'Switch Lane' : 'Jump';
       activeGameOptions.onObstacleResult?.(true);
     }
   }
@@ -459,7 +522,7 @@ function updateObstacleCue() {
     activeGameOptions.onQteUpdate?.({
       status: 'complete',
       progress: 1,
-      targetGestureName: 'Jump',
+      targetGestureName: lastObstacleTarget,
       resultLabel: lastObstacleResult ? 'Correct — obstacle cleared' : 'Missed — return to rest',
     });
     return;
@@ -469,20 +532,23 @@ function updateObstacleCue() {
     .filter((hurdle) => hurdle.position.z <= 0)
     .sort((left, right) => right.position.z - left.position.z)[0];
   const distance = upcoming ? -upcoming.position.z : HURDLE_SPACING;
+  const targetGestureName = upcoming?.userData.obstacleType === 'switch'
+    ? (laneIndex === upcoming.userData.openLane ? 'Hold Lane' : 'Switch Lane')
+    : 'Jump';
 
   if (distance > 28) {
-    activeGameOptions.onQteUpdate?.({ status: 'rest', progress: 0, targetGestureName: 'Jump' });
+    activeGameOptions.onQteUpdate?.({ status: 'rest', progress: 0, targetGestureName });
   } else if (distance > 16) {
     activeGameOptions.onQteUpdate?.({
       status: 'ready',
       progress: Math.min(1, (28 - distance) / 12),
-      targetGestureName: 'Jump',
+      targetGestureName,
     });
   } else {
     activeGameOptions.onQteUpdate?.({
       status: 'recording',
       progress: Math.min(1, Math.max(0, (16 - distance) / 16)),
-      targetGestureName: 'Jump',
+      targetGestureName,
     });
   }
 }
