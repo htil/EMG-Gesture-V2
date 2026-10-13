@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, ArrowLeft, CheckCircle2, XCircle, Zap } from 'lucide-react';
+import {
+  DEFAULT_DIFFICULTY,
+  submitGameRun,
+  type GestureTestOutcome,
+} from './study/gameHandoff';
+import type { Gesture } from './pipeline';
 
 export type QteStatus = 'rest' | 'ready' | 'recording' | 'processing' | 'complete';
 
@@ -11,12 +17,24 @@ export interface GameQteViewState {
   resultLabel?: string | null;
   trialIndex?: number;
   trialCount?: number;
+  encounterId?: string;
+  expectedAction?: RunnerAction;
+  switchDirection?: number;
 }
+
+type RunnerAction = 'jump' | 'switch-lane';
 
 interface EmgDisplayPoint {
   time: number;
   normalizedActivity?: number;
   value?: number;
+  raw?: number;
+}
+
+interface GamePrediction {
+  predictedGestureId: string;
+  predictedGestureName: string;
+  confidence: number;
 }
 
 const QTE_COPY: Record<QteStatus, { label: string; hint: string; color: string }> = {
@@ -206,6 +224,9 @@ export default function GameScreen({
   streak,
   qteState,
   emgPoints = [],
+  actionGestures,
+  predictWindow,
+  condition,
 }: {
   onExit: () => void;
   exitLabel?: string;
@@ -215,6 +236,9 @@ export default function GameScreen({
   streak?: number;
   qteState?: GameQteViewState;
   emgPoints?: EmgDisplayPoint[];
+  actionGestures?: { jump: Gesture; switchLane: Gesture };
+  predictWindow?: (points: Array<{ time: number; raw: number }>) => GamePrediction | null;
+  condition?: 'button' | 'threshold';
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [runnerQteState, setRunnerQteState] = useState<GameQteViewState>({
@@ -228,6 +252,27 @@ export default function GameScreen({
   const [totalAttempts, setTotalAttempts] = useState(0);
   const [feedback, setFeedback] = useState<{ correct: boolean; id: number } | null>(null);
   const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const emgPointsRef = useRef(emgPoints);
+  const predictWindowRef = useRef(predictWindow);
+  const actionGesturesRef = useRef(actionGestures);
+  const gameModuleRef = useRef<typeof import('../../game/main.js') | null>(null);
+  const recordingStartRef = useRef<number | null>(null);
+  const previousQteStatusRef = useRef<QteStatus>('rest');
+  const processedEncountersRef = useRef(new Set<string>());
+  const predictionsRef = useRef(new Map<string, GamePrediction | null>());
+  const outcomesRef = useRef<GestureTestOutcome[]>([]);
+
+  useEffect(() => {
+    emgPointsRef.current = emgPoints;
+  }, [emgPoints]);
+
+  useEffect(() => {
+    predictWindowRef.current = predictWindow;
+  }, [predictWindow]);
+
+  useEffect(() => {
+    actionGesturesRef.current = actionGestures;
+  }, [actionGestures]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -238,9 +283,64 @@ export default function GameScreen({
 
     import('../../game/main.js').then((game) => {
       if (!cancelled) {
+        gameModuleRef.current = game;
         unmountGame = game.mountGame(container, {
-          onQteUpdate: setRunnerQteState,
-          onObstacleResult: (correct: boolean) => {
+          onQteUpdate: (nextState) => {
+            const gestures = actionGesturesRef.current;
+            const expectedGesture = nextState.expectedAction === 'switch-lane'
+              ? gestures?.switchLane
+              : gestures?.jump;
+            const displayState = {
+              ...nextState,
+              targetGestureName: expectedGesture?.name ?? nextState.targetGestureName,
+            };
+
+            if (
+              nextState.status === 'recording'
+              && previousQteStatusRef.current !== 'recording'
+            ) {
+              const points = emgPointsRef.current;
+              recordingStartRef.current = points[points.length - 1]?.time ?? Date.now();
+            }
+
+            if (
+              nextState.status === 'processing'
+              && nextState.encounterId
+              && !processedEncountersRef.current.has(nextState.encounterId)
+            ) {
+              processedEncountersRef.current.add(nextState.encounterId);
+              const startedAt = recordingStartRef.current ?? 0;
+              const inferencePoints = emgPointsRef.current
+                .filter((point) => point.time >= startedAt && typeof point.raw === 'number')
+                .map((point) => ({ time: point.time, raw: point.raw as number }));
+              const prediction = predictWindowRef.current?.(inferencePoints) ?? null;
+              predictionsRef.current.set(nextState.encounterId, prediction);
+
+              if (prediction && gestures) {
+                if (prediction.predictedGestureId === gestures.jump.id) {
+                  game.startJump();
+                } else if (
+                  prediction.predictedGestureId === gestures.switchLane.id
+                  && nextState.switchDirection
+                ) {
+                  game.startLaneSwitch(nextState.switchDirection);
+                }
+              }
+
+              displayState.resultLabel = prediction
+                ? `Predicted ${prediction.predictedGestureName} · ${prediction.confidence.toFixed(0)}%`
+                : 'No usable prediction';
+            } else if (nextState.status === 'processing' && nextState.encounterId) {
+              const prediction = predictionsRef.current.get(nextState.encounterId);
+              displayState.resultLabel = prediction
+                ? `Predicted ${prediction.predictedGestureName} · ${prediction.confidence.toFixed(0)}%`
+                : 'No usable prediction';
+            }
+
+            previousQteStatusRef.current = nextState.status;
+            setRunnerQteState(displayState);
+          },
+          onObstacleResult: ({ correct, encounterId, expectedAction }) => {
             setTotalAttempts((current) => current + 1);
             setFeedback({ correct, id: Date.now() });
             if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
@@ -252,6 +352,28 @@ export default function GameScreen({
             } else {
               setRunnerStreak(0);
             }
+
+            const gestures = actionGesturesRef.current;
+            const expectedGesture = expectedAction === 'switch-lane'
+              ? gestures?.switchLane
+              : gestures?.jump;
+            const prediction = predictionsRef.current.get(encounterId) ?? null;
+            if (expectedGesture) {
+              outcomesRef.current.push({
+                attemptId: encounterId,
+                expectedGestureId: expectedGesture.id,
+                expectedGestureName: expectedGesture.name,
+                result: !prediction
+                  ? 'recording_failure'
+                  : prediction.predictedGestureId === 'unknown'
+                    ? 'unknown'
+                    : correct
+                      ? 'correct'
+                      : 'wrong',
+                predictedGestureId: prediction?.predictedGestureId ?? null,
+                predictedGestureName: prediction?.predictedGestureName ?? null,
+              });
+            }
           },
         });
       }
@@ -260,6 +382,7 @@ export default function GameScreen({
     return () => {
       cancelled = true;
       unmountGame();
+      gameModuleRef.current = null;
       if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
     };
   }, []);
@@ -272,6 +395,19 @@ export default function GameScreen({
   const trialLabel = visibleQteState.trialIndex && visibleQteState.trialCount
     ? `${visibleQteState.trialIndex} / ${visibleQteState.trialCount}`
     : '—';
+
+  const finishRun = () => {
+    if (condition) {
+      const submitted = submitGameRun({
+        condition,
+        difficulty: DEFAULT_DIFFICULTY,
+        gameScore: visibleScore,
+        outcomes: [...outcomesRef.current],
+      });
+      if (submitted) return;
+    }
+    onSecondary?.();
+  };
 
   return (
     <div className="fixed inset-0 z-[100] overflow-hidden bg-slate-950 text-white">
@@ -354,7 +490,7 @@ export default function GameScreen({
         </section>
         <EmgTrace points={emgPoints} qteState={visibleQteState} />
         {onSecondary && secondaryLabel && (
-          <button type="button" onClick={onSecondary} className="pointer-events-auto self-end rounded-xl border border-white/10 bg-slate-950/80 px-4 py-2 text-xs font-medium text-slate-300 shadow-lg backdrop-blur-md transition hover:bg-white/10 hover:text-white">
+          <button type="button" onClick={finishRun} className="pointer-events-auto self-end rounded-xl border border-white/10 bg-slate-950/80 px-4 py-2 text-xs font-medium text-slate-300 shadow-lg backdrop-blur-md transition hover:bg-white/10 hover:text-white">
             {secondaryLabel}
           </button>
         )}

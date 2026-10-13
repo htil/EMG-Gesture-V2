@@ -53,6 +53,8 @@ for (let i = 0; i < HURDLE_COUNT; i++) {
   hurdle.userData.obstacleType = isLaneGate ? 'switch' : 'jump';
   hurdle.userData.openLane = isLaneGate ? openLane : null;
   hurdle.userData.resolved = false;
+  hurdle.userData.encounter = 0;
+  hurdle.userData.obstacleId = i;
   hurdle.position.z = -(i + 1) * HURDLE_SPACING;
   scene.add(hurdle);
   hurdles.push(hurdle);
@@ -65,6 +67,8 @@ let lastCueUpdate = 0;
 let completeUntil = 0;
 let lastObstacleResult = null;
 let lastObstacleTarget = 'Jump';
+let lastEncounterId = '';
+let lastExpectedAction = 'jump';
 const previousHurdleZ = new WeakMap();
 
 const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.2);
@@ -427,6 +431,7 @@ function resetGame() {
   for (let i = 0; i < hurdles.length; i++) {
     hurdles[i].position.z = -(i + 1) * HURDLE_SPACING;
     hurdles[i].userData.resolved = false;
+    hurdles[i].userData.encounter += 1;
   }
 }
 
@@ -473,6 +478,7 @@ function animate() {
     if (hurdle.position.z > SEGMENT_LENGTH) {
       hurdle.position.z -= HURDLE_COUNT * HURDLE_SPACING;
       hurdle.userData.resolved = false;
+      hurdle.userData.encounter += 1;
       previousHurdleZ.set(hurdle, hurdle.position.z);
     }
 
@@ -490,7 +496,13 @@ function animate() {
       completeUntil = performance.now() + 700;
       lastObstacleResult = false;
       lastObstacleTarget = isLaneGate ? 'Switch Lane' : 'Jump';
-      activeGameOptions.onObstacleResult?.(false);
+      lastExpectedAction = isLaneGate ? 'switch-lane' : 'jump';
+      lastEncounterId = `${hurdle.userData.obstacleId}:${hurdle.userData.encounter}`;
+      activeGameOptions.onObstacleResult?.({
+        correct: false,
+        encounterId: lastEncounterId,
+        expectedAction: lastExpectedAction,
+      });
       resetGame();
       break;
     }
@@ -504,7 +516,13 @@ function animate() {
       completeUntil = performance.now() + 700;
       lastObstacleResult = true;
       lastObstacleTarget = isLaneGate ? 'Switch Lane' : 'Jump';
-      activeGameOptions.onObstacleResult?.(true);
+      lastExpectedAction = isLaneGate ? 'switch-lane' : 'jump';
+      lastEncounterId = `${hurdle.userData.obstacleId}:${hurdle.userData.encounter}`;
+      activeGameOptions.onObstacleResult?.({
+        correct: true,
+        encounterId: lastEncounterId,
+        expectedAction: lastExpectedAction,
+      });
     }
   }
 
@@ -524,6 +542,8 @@ function updateObstacleCue() {
       progress: 1,
       targetGestureName: lastObstacleTarget,
       resultLabel: lastObstacleResult ? 'Correct — obstacle cleared' : 'Missed — return to rest',
+      encounterId: lastEncounterId,
+      expectedAction: lastExpectedAction,
     });
     return;
   }
@@ -535,20 +555,37 @@ function updateObstacleCue() {
   const targetGestureName = upcoming?.userData.obstacleType === 'switch'
     ? (laneIndex === upcoming.userData.openLane ? 'Hold Lane' : 'Switch Lane')
     : 'Jump';
+  const expectedAction = upcoming?.userData.obstacleType === 'switch' ? 'switch-lane' : 'jump';
+  const encounterId = upcoming
+    ? `${upcoming.userData.obstacleId}:${upcoming.userData.encounter}`
+    : '';
+  const switchDirection = upcoming?.userData.obstacleType === 'switch'
+    ? upcoming.userData.openLane - laneIndex
+    : 0;
+  const cueContext = { encounterId, expectedAction, switchDirection };
 
-  if (distance > 28) {
-    activeGameOptions.onQteUpdate?.({ status: 'rest', progress: 0, targetGestureName });
-  } else if (distance > 16) {
+  if (distance > 30) {
+    activeGameOptions.onQteUpdate?.({ status: 'rest', progress: 0, targetGestureName, ...cueContext });
+  } else if (distance > 22) {
     activeGameOptions.onQteUpdate?.({
       status: 'ready',
-      progress: Math.min(1, (28 - distance) / 12),
+      progress: Math.min(1, (30 - distance) / 8),
       targetGestureName,
+      ...cueContext,
+    });
+  } else if (distance > 10) {
+    activeGameOptions.onQteUpdate?.({
+      status: 'recording',
+      progress: Math.min(1, Math.max(0, (22 - distance) / 12)),
+      targetGestureName,
+      ...cueContext,
     });
   } else {
     activeGameOptions.onQteUpdate?.({
-      status: 'recording',
-      progress: Math.min(1, Math.max(0, (16 - distance) / 16)),
+      status: 'processing',
+      progress: 1,
       targetGestureName,
+      ...cueContext,
     });
   }
 }

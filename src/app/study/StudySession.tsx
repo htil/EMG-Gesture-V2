@@ -24,11 +24,12 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { DEFAULT_GESTURES, getChannelMockSignalValue } from '../pipeline';
+import { buildInferenceSample, DEFAULT_GESTURES, getChannelMockSignalValue } from '../pipeline';
 import { useGestureRecorder, type CaptureTriggerMode } from '../useGestureRecorder';
 import { useSignalSource, type SignalPoint, type SignalSourceMode } from '../useSignalSource';
 import {
   isModelReady,
+  getConditionPredictionEngine,
   markDatasetChanged,
   trainConditionModel,
   type ConditionModelState,
@@ -545,6 +546,17 @@ export default function StudySession() {
   const condition: Assignment = session.condition;
   const trialIds = trials.map((trial) => trial.id);
   const modelReady = isModelReady(session.participantId, condition, trialIds);
+  const gamePredictionEngine = getConditionPredictionEngine(
+    session.participantId,
+    condition,
+    trialIds,
+  );
+  const predictGameWindow = (points: Array<{ time: number; raw: number }>) => {
+    if (!gamePredictionEngine || points.length === 0) return null;
+    const durationMs = Math.max(0, points[points.length - 1].time - points[0].time);
+    const sample = buildInferenceSample(points, durationMs);
+    return sample ? gamePredictionEngine.predict(sample) : null;
+  };
   const quotas = gestureQuotas(DEFAULT_GESTURES, trials, session.capturesPerRound);
   const missingQuotas = quotas.filter((row) => row.missing > 0);
   const cappedKept = quotas.reduce((sum, row) => sum + Math.min(row.kept, row.required), 0);
@@ -874,8 +886,14 @@ export default function StudySession() {
             onExit={() => goTo('review')}
             exitLabel="Back to review"
             onSecondary={() => goTo('results')}
-            secondaryLabel="Results"
-            emgPoints={signalData}
+            secondaryLabel="Finish Run"
+            emgPoints={recordingSignalData}
+            actionGestures={{
+              jump: DEFAULT_GESTURES[0],
+              switchLane: DEFAULT_GESTURES[1],
+            }}
+            predictWindow={predictGameWindow}
+            condition={condition}
           />
         )}
 

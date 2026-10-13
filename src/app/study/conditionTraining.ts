@@ -141,6 +141,15 @@ export function isModelReady(scopeId: string, condition: Assignment, trialIds: s
     && engines.has(key);
 }
 
+export function getConditionPredictionEngine(
+  scopeId: string,
+  condition: Assignment,
+  trialIds: string[],
+) {
+  if (!isModelReady(scopeId, condition, trialIds)) return null;
+  return engines.get(storageKey(scopeId, condition)) ?? null;
+}
+
 function toTrainingSession(trials: TrainableTrial[], gestures: Gesture[]) {
   return {
     id: `condition-${Date.now()}`,

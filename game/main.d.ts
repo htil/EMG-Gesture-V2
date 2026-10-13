@@ -3,11 +3,20 @@ export interface GameQteUpdate {
   progress: number;
   targetGestureName: string;
   resultLabel?: string;
+  encounterId?: string;
+  expectedAction?: 'jump' | 'switch-lane';
+  switchDirection?: number;
+}
+
+export interface GameObstacleResult {
+  correct: boolean;
+  encounterId: string;
+  expectedAction: 'jump' | 'switch-lane';
 }
 
 export interface GameMountOptions {
   onQteUpdate?: (state: GameQteUpdate) => void;
-  onObstacleResult?: (correct: boolean) => void;
+  onObstacleResult?: (result: GameObstacleResult) => void;
 }
 
 export function mountGame(container: HTMLElement, options?: GameMountOptions): () => void;
