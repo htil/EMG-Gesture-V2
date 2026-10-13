@@ -7,14 +7,13 @@ const LANE_OFFSET = 1.5;
 const SEGMENT_LENGTH = 20;
 const SEGMENT_COUNT = 4;
 const RUN_SPEED = 10;
+const CHARACTER_SCALE = 4;
 
 const HURDLE_WIDTH = 2.4;
 const HURDLE_HEIGHT = 0.45;
 const HURDLE_COUNT = 6;
 const HURDLE_SPACING = 40;
 const HURDLE_HIT_DEPTH = 0.35;
-
-const JUMP_SCALE = 2; // Edit jump height
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
@@ -72,23 +71,11 @@ let mixer = null;
 let runAction = null;
 let jumpAction = null;
 let slideAction = null;
-// prevents jumping/sliding while mid-jump
+// prevents jumping while mid-jump
 let isJumping = false;
-let isSliding = false;
 
 const clock = new THREE.Clock()
 const loader = new GLTFLoader();
-
-const atlas = new THREE.TextureLoader().load('/models/Atlas_Pirate.png');
-atlas.colorSpace = THREE.SRGBColorSpace;
-atlas.flipY = false;
-
-const characters = [
-  '/models/Anne.glb',
-  '/models/Captain.glb',
-  '/models/Henry.glb',
-  '/models/Skeleton.glb',
-];
 
 let characterModel = null;
 let loadId = 0;
@@ -102,109 +89,61 @@ let switchElapsed = 0;
 
 const LANE_SWITCH_TIME = 0.3;
 
-function findClip(animations, actionName) {
-  return animations.find((clip) => clip.name.split('|').includes(actionName));
-}
+loader.load(
+  '/models/Football_Player.glb',
+  (gltf) => {
+    const model = gltf.scene;
+    model.position.set(0, 0, 0);
+    model.rotation.y = Math.PI;
+    model.scale.setScalar(CHARACTER_SCALE);
 
-function clearCharacter() {
-  loadId += 1;
-  if (characterRoot) {
-    scene.remove(characterRoot);
-    characterModel = null;
-  }
-  characterRoot = null;
-  laneIndex = 0;
-  isSwitching = false;
+    const root = new THREE.Group();
+    root.position.set(-LANE_OFFSET, 0, 0);
+    root.add(model);
+    scene.add(root);
+    characterRoot = root;
+    characterModel = model;
 
-  mixer = null;
-  runAction = null;
+    // Animation
+    mixer = new THREE.AnimationMixer(model);
 
-  jumpAction = null;
-  isJumping = false;
+    const runClip =
+      THREE.AnimationClip.findByName(gltf.animations, 'Running') || gltf.animations[0];
 
-  slideAction = null;
-  isSliding = false;
-}
+    runAction = mixer.clipAction(runClip);
+    runAction.play();
 
-function scaleJumpHeight(clip) {
-  const bodyTrack = clip.tracks.find((track) => track.name === 'Body.position');
-  if (!bodyTrack) return;
-  const baseY = bodyTrack.values[1];
-  const times = bodyTrack.times;
-  const values = new Float32Array(times.length * 3);
-  for (let i = 0; i < times.length; i++) {
-    const rise = Math.max(0, bodyTrack.values[i * 3 + 1] - baseY);
-    values[i * 3 + 1] = rise * (JUMP_SCALE - 1);
-  }
-  clip.tracks = clip.tracks.filter((track) => track.name !== 'Root.position');
-  clip.tracks.push(new THREE.VectorKeyframeTrack('Root.position', times, values));
-}
-
-function loadCharacter() {
-  const requestId = ++loadId;
-  const characterUrl = characters[Math.floor(Math.random() * characters.length)];
-
-  loader.load(
-    characterUrl,
-    (gltf) => {
-      if (requestId !== loadId) return;
-
-      const model = gltf.scene;
-      model.traverse((child) => {
-        if (!child.isMesh) return;
-        child.material = new THREE.MeshLambertMaterial({
-          map: atlas,
-          side: THREE.DoubleSide,
-        });
-      });
-      model.position.set(0, 0, 0);
-      model.rotation.y = Math.PI;
-
-      const root = new THREE.Group();
-      root.position.set(-LANE_OFFSET, 0, 0);
-      root.add(model);
-      scene.add(root);
-      characterRoot = root;
-      characterModel = model;
-
-      mixer = new THREE.AnimationMixer(model);
-
-      const runClip = findClip(gltf.animations, 'Run');
-      if (!runClip) {
-        console.error('No Run clip in', characterUrl);
-        return;
-      }
-
-      runAction = mixer.clipAction(runClip);
-      runAction.play();
-
-      const jumpClip = findClip(gltf.animations, 'Jump');
-      if (!jumpClip) {
-        console.error('No Jump clip in', characterUrl);
-        return;
-      }
-
-      scaleJumpHeight(jumpClip);
-
-      jumpAction = mixer.clipAction(jumpClip);
-      jumpAction.timeScale = 0.75;
-      jumpAction.setLoop(THREE.LoopOnce, 1);
-      jumpAction.clampWhenFinished = true;
-
-      mixer.addEventListener('finished', (event) => {
-        if (event.action !== jumpAction) return;
-
+    mixer.addEventListener('finished', (event) => {
+      if (event.action == jumpAction) {
         isJumping = false;
         jumpAction.fadeOut(0.15);
         runAction.reset().fadeIn(0.15).play();
-      })
-    },
-    undefined,
-    (error) => {
-      console.error('Failed to load model:', error);
-    }
-  )
-}
+      }
+    });
+
+    loader.load(
+      '/models/Jump.glb',
+      (jumpGltf) => {
+        const jumpClip =
+          THREE.AnimationClip.findByName(jumpGltf.animations, 'Running Jump') || jumpGltf.animations[0];
+
+        lockRootXZ(jumpClip)
+
+        jumpAction = mixer.clipAction(jumpClip);
+        jumpAction.setLoop(THREE.LoopOnce, 1);
+        jumpAction.clampWhenFinished = true;
+      },
+      undefined,
+      (error) => {
+        console.error('Failed to load jump:', error);
+      }
+    );
+  },
+  undefined,
+  (error) => {
+    console.error('Failed to load model:', error);
+  }
+);
 
 export function mountGame(container) {
   const resizeRenderer = () => {
@@ -214,8 +153,6 @@ export function mountGame(container) {
     camera.updateProjectionMatrix();
     activeRenderer?.setSize(width, height);
   };
-
-  loadCharacter();
 
   const renderer = new THREE.WebGLRenderer();
   renderer.domElement.style.display = 'block';
@@ -243,12 +180,27 @@ export function mountGame(container) {
     renderer.domElement.remove();
     renderer.dispose();
     if (activeRenderer === renderer) activeRenderer = null;
-    clearCharacter();
   };
 }
 
+// Removes horizontal movement from jump animations
+function lockRootXZ(clip) {
+  for (const track of clip.tracks) {
+    if (!track.name.endsWith('Hips.position')) continue;
+
+    const values = track.values;
+    const baseX = values[0];
+    const baseZ = values[1];
+
+    for (let i = 0; i < values.length; i += 3) {
+      values[i] = baseX;
+      values[i+1] = baseZ;
+    }
+  }
+}
+
 export function startJump() {
-  if (isJumping || isSliding || isSwitching || !jumpAction || !runAction) return;
+  if (isJumping || isSwitching || !jumpAction || !runAction) return;
 
   isJumping = true;
   jumpAction.reset();
@@ -357,15 +309,10 @@ function resetGame() {
   }
 
   isJumping = false;
-  isSliding = false;
 
   if (jumpAction) {
     jumpAction.stop();
     jumpAction.reset();
-  }
-  if (slideAction) {
-    slideAction.stop();
-    slideAction.reset();
   }
   if (runAction) {
     runAction.reset().fadeIn(0.1).play();
