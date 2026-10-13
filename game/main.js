@@ -13,6 +13,8 @@ const HURDLE_HEIGHT = 0.45;
 const HURDLE_COUNT = 6;
 const HURDLE_SPACING = 40;
 const HURDLE_HIT_DEPTH = 0.35;
+const JUMP_ACTION_DISTANCE = 4.5;
+const LANE_SWITCH_ACTION_DISTANCE = 3.5;
 
 const JUMP_SCALE = 2; // Edit jump height
 
@@ -69,6 +71,7 @@ let lastObstacleResult = null;
 let lastObstacleTarget = 'Jump';
 let lastEncounterId = '';
 let lastExpectedAction = 'jump';
+let pendingGestureAction = null;
 const previousHurdleZ = new WeakMap();
 
 const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.2);
@@ -286,6 +289,10 @@ export function startLaneSwitch(direction) {
   isSwitching = true;
 }
 
+export function queueGestureAction(action, direction, encounterId) {
+  pendingGestureAction = { action, direction, encounterId };
+}
+
 function createGroundTexture() {
   const size = 256;
   const canvas = document.createElement('canvas');
@@ -402,6 +409,7 @@ function createLaneGate(openLane) {
 }
 
 function resetGame() {
+  pendingGestureAction = null;
   laneIndex = 0;
   isSwitching = false;
   if (characterRoot) {
@@ -483,6 +491,20 @@ function animate() {
     }
 
     const isLaneGate = hurdle.userData.obstacleType === 'switch';
+    const encounterId = `${hurdle.userData.obstacleId}:${hurdle.userData.encounter}`;
+    if (pendingGestureAction?.encounterId === encounterId && hurdle.position.z <= 0) {
+      const actionDistance = pendingGestureAction.action === 'switch-lane'
+        ? LANE_SWITCH_ACTION_DISTANCE
+        : JUMP_ACTION_DISTANCE;
+      if (-hurdle.position.z <= actionDistance) {
+        if (pendingGestureAction.action === 'switch-lane') {
+          startLaneSwitch(pendingGestureAction.direction);
+        } else {
+          startJump();
+        }
+        pendingGestureAction = null;
+      }
+    }
     const passedCorrectly = isLaneGate
       ? laneIndex === hurdle.userData.openLane
       : isJumping;

@@ -22,3 +22,8 @@ export interface GameMountOptions {
 export function mountGame(container: HTMLElement, options?: GameMountOptions): () => void;
 export function startJump(): void;
 export function startLaneSwitch(direction: number): void;
+export function queueGestureAction(
+  action: 'jump' | 'switch-lane',
+  direction: number,
+  encounterId: string,
+): void;

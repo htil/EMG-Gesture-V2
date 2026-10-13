@@ -54,7 +54,7 @@ import {
   type StudyStage,
 } from './api';
 
-const DISPLAY_WINDOW_MS = 5000;
+const DISPLAY_WINDOW_MS = 4000;
 const SEGMENT_DURATION_MS = 1200;
 const ACTIVITY_GUIDE = 0.6;
 
@@ -190,6 +190,7 @@ function LivePanel({
   recordingStartTime,
   recordingProgress,
   showGuide,
+  thresholdGuideValue,
 }: {
   signalData: SignalPoint[];
   recordingSignalData: SignalPoint[];
@@ -197,6 +198,7 @@ function LivePanel({
   recordingStartTime: number | null;
   recordingProgress: number;
   showGuide: boolean;
+  thresholdGuideValue: number;
 }) {
   const chartEnd = Math.max(
     signalData[signalData.length - 1]?.time ?? 0,
@@ -222,7 +224,7 @@ function LivePanel({
           </div>
           <div>
             <h2 className="text-sm font-medium text-white">Live activity</h2>
-            <p className="text-xs text-slate-500">Rolling 5 second window</p>
+            <p className="text-xs text-slate-500">Fixed 4 second window</p>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -254,7 +256,7 @@ function LivePanel({
             <CartesianGrid vertical={false} stroke="rgba(148,163,184,0.08)" />
             <XAxis dataKey="time" type="number" domain={[chartStart, chartEnd]} hide />
             <YAxis domain={[0, 1]} hide />
-            {showGuide && <ReferenceLine y={ACTIVITY_GUIDE} stroke="#fbbf24" strokeDasharray="6 6" opacity={0.75} />}
+            {showGuide && <ReferenceLine y={thresholdGuideValue} stroke="#fbbf24" strokeDasharray="6 6" opacity={0.75} />}
             {recordingStartTime !== null && activeSegmentEnd !== null && (
               <ReferenceArea
                 x1={recordingStartTime}
@@ -264,7 +266,7 @@ function LivePanel({
                 ifOverflow="extendDomain"
               />
             )}
-            <Area type="monotone" dataKey="normalizedActivity" stroke="#22d3ee" strokeWidth={isRecording ? 3 : 2.4} fill="url(#sessionActivity)" isAnimationActive={false} />
+            <Area type="monotone" dataKey="value" stroke="#22d3ee" strokeWidth={isRecording ? 3 : 2.4} fill="url(#sessionActivity)" isAnimationActive={false} />
           </AreaChart>
         </ResponsiveContainer>
       </div>
@@ -424,6 +426,9 @@ export default function StudySession() {
     liveDeviceName,
     liveSampleRateHz,
     isBluetoothAvailable,
+    isDisplayScaleFrozen,
+    freezeDisplayScale,
+    getDisplayValueForNormalizedActivity,
   } = useSignalSource(generateMockSignalValue, DISPLAY_WINDOW_MS, channelIndex, 1);
 
   const trials = session?.trials ?? [];
@@ -457,6 +462,12 @@ export default function StudySession() {
     isArmed: armed,
     cooldownMs: 450,
   });
+
+  useEffect(() => {
+    if (signalMode === 'live' && isRecording && !isDisplayScaleFrozen) {
+      freezeDisplayScale();
+    }
+  }, [freezeDisplayScale, isDisplayScaleFrozen, isRecording, signalMode]);
 
   const sessionRef = useRef(session);
   sessionRef.current = session;
@@ -676,6 +687,9 @@ export default function StudySession() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <span className="rounded-full border border-cyan-300/15 bg-cyan-300/[0.06] px-3 py-2 text-[10px] font-medium uppercase tracking-[0.16em] text-cyan-100">
+              {session.condition === 'button' ? 'Button' : 'Threshold'} · Round {session.round}/{session.repetitions}
+            </span>
             <span className="hidden items-center gap-2 rounded-full border border-white/8 px-3 py-2 text-xs text-slate-400 sm:flex">
               <span className={`h-2 w-2 rounded-full ${isStreaming ? 'bg-emerald-300' : 'bg-slate-600'}`} />
               {isStreaming ? (signalMode === 'live' ? liveDeviceName ?? 'Device live' : 'Mock live') : 'Stream idle'}
@@ -710,6 +724,9 @@ export default function StudySession() {
                 recordingStartTime={recordingStartTime}
                 recordingProgress={recordingProgress}
                 showGuide={!manualTrigger}
+                thresholdGuideValue={signalMode === 'live'
+                  ? getDisplayValueForNormalizedActivity(ACTIVITY_GUIDE)
+                  : ACTIVITY_GUIDE}
               />
               <section className="rounded-[24px] border border-white/8 bg-white/[0.025] p-4">
                 <div className="flex items-center justify-between gap-3">
@@ -771,6 +788,16 @@ export default function StudySession() {
                     </button>
                   ))}
                 </div>
+                {signalMode === 'live' && (
+                  <button
+                    type="button"
+                    onClick={freezeDisplayScale}
+                    disabled={!isStreaming || isDisplayScaleFrozen}
+                    className="mt-3 w-full rounded-xl border border-white/10 px-3 py-2 text-xs text-slate-300 disabled:cursor-default disabled:opacity-50"
+                  >
+                    {isDisplayScaleFrozen ? 'Display scale locked' : 'Lock display scale'}
+                  </button>
+                )}
                 <label className="mt-3 block text-[10px] uppercase tracking-[0.16em] text-slate-500">Channel</label>
                 <div className="mt-2">
                   <DarkSelect

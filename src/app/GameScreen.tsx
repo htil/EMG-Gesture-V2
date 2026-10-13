@@ -114,20 +114,25 @@ function EmgTrace({
   const captureStartRef = useRef<number | null>(null);
   const captureEndRef = useRef<number | null>(null);
   const previousStatusRef = useRef<QteStatus>(qteState.status);
-  const visiblePoints = useMemo(() => points.slice(-100), [points]);
+  const visibleEnd = points[points.length - 1]?.time ?? Date.now();
+  const visibleStart = visibleEnd - 4000;
+  const visiblePoints = useMemo(
+    () => points.filter((point) => point.time >= visibleStart),
+    [points, visibleStart],
+  );
 
   const path = useMemo(() => {
     if (visiblePoints.length < 2) return '';
     return visiblePoints.map((point, index) => {
-      const activity = Math.max(0, Math.min(1, point.normalizedActivity ?? point.value ?? 0));
-      const x = (index / (visiblePoints.length - 1)) * 300;
+      const activity = Math.max(0, Math.min(1, point.value ?? 0));
+      const x = ((point.time - visibleStart) / 4000) * 300;
       const y = 58 - activity * 48;
       return `${index === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`;
     }).join(' ');
-  }, [visiblePoints]);
+  }, [visiblePoints, visibleStart]);
 
   const latest = points[points.length - 1];
-  const activity = Math.max(0, Math.min(1, latest?.normalizedActivity ?? latest?.value ?? 0));
+  const activity = Math.max(0, Math.min(1, latest?.value ?? 0));
 
   if (qteState.status === 'recording' && previousStatusRef.current !== 'recording') {
     captureStartRef.current = latest?.time ?? null;
@@ -137,26 +142,19 @@ function EmgTrace({
   }
   previousStatusRef.current = qteState.status;
 
-  const visibleStart = visiblePoints[0]?.time;
-  const visibleEnd = visiblePoints[visiblePoints.length - 1]?.time;
   const captureStart = captureStartRef.current;
   const captureEnd = qteState.status === 'recording'
     ? latest?.time ?? captureStart
     : captureEndRef.current;
-  const visibleDuration = visibleStart !== undefined && visibleEnd !== undefined
-    ? Math.max(1, visibleEnd - visibleStart)
-    : 1;
-  const captureX1 = captureStart !== null && visibleStart !== undefined
-    ? Math.max(0, Math.min(300, ((captureStart - visibleStart) / visibleDuration) * 300))
+  const captureX1 = captureStart !== null
+    ? Math.max(0, Math.min(300, ((captureStart - visibleStart) / 4000) * 300))
     : 0;
-  const captureX2 = captureEnd !== null && captureEnd !== undefined && visibleStart !== undefined
-    ? Math.max(0, Math.min(300, ((captureEnd - visibleStart) / visibleDuration) * 300))
+  const captureX2 = captureEnd !== null && captureEnd !== undefined
+    ? Math.max(0, Math.min(300, ((captureEnd - visibleStart) / 4000) * 300))
     : captureX1;
   const showCapture = captureStart !== null
     && captureEnd !== null
     && captureEnd !== undefined
-    && visibleStart !== undefined
-    && visibleEnd !== undefined
     && captureEnd >= visibleStart
     && captureStart <= visibleEnd;
 
@@ -318,12 +316,12 @@ export default function GameScreen({
 
               if (prediction && gestures) {
                 if (prediction.predictedGestureId === gestures.jump.id) {
-                  game.startJump();
+                  game.queueGestureAction('jump', 0, nextState.encounterId);
                 } else if (
                   prediction.predictedGestureId === gestures.switchLane.id
                   && nextState.switchDirection
                 ) {
-                  game.startLaneSwitch(nextState.switchDirection);
+                  game.queueGestureAction('switch-lane', nextState.switchDirection, nextState.encounterId);
                 }
               }
 
