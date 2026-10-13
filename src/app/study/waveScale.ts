@@ -47,7 +47,9 @@ export function sharedWaveDomain(series: WavePoint[][]): WaveDomain {
   });
 
   if (xMax <= xMin) xMax = xMin + 1;
-  const yPad = Math.max((yMax - yMin) * 0.08, 0.05);
+  const ySpan = yMax - yMin;
+  const yMagnitude = Math.max(Math.abs(yMin), Math.abs(yMax));
+  const yPad = Math.max(ySpan * 0.08, yMagnitude * 0.02, 1e-9);
   return {
     xMin,
     xMax,
