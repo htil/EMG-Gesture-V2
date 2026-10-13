@@ -40,7 +40,7 @@ import DarkSelect from './DarkSelect';
 import { DEFAULT_DIFFICULTY, registerGameRunListener, type StoredGameRun } from './gameHandoff';
 import ResultsPanel from './ResultsPanel';
 import { gestureQuotas, keptForGesture, sampleNumber, samplesComplete } from './samplePlan';
-import { alignWaveform, sharedWaveDomain, type WaveDomain } from './waveScale';
+import { alignWaveform, displayEnvelopeWaveform, sharedWaveDomain, type WaveDomain } from './waveScale';
 import {
   clearClientSession,
   loadClientSession,
@@ -289,7 +289,9 @@ function LivePanel({
 
 function TrialWave({ trial, domain }: { trial: StoredTrial; domain: WaveDomain }) {
   const data = useMemo(
-    () => alignWaveform(trial.points, trial.preTriggerPointCount, trial.triggeredAt),
+    () => displayEnvelopeWaveform(
+      alignWaveform(trial.points, trial.preTriggerPointCount, trial.triggeredAt),
+    ),
     [trial],
   );
   return (
@@ -297,7 +299,7 @@ function TrialWave({ trial, domain }: { trial: StoredTrial; domain: WaveDomain }
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={data} margin={{ top: 8, right: 4, bottom: 4, left: 4 }}>
           <ReferenceLine x={0} stroke="#22d3ee" strokeDasharray="3 3" opacity={0.45} />
-          <Line type="monotone" dataKey="value" stroke="#22d3ee" strokeWidth={1.8} dot={false} isAnimationActive={false} />
+          <Line type="linear" dataKey="value" stroke="#22d3ee" strokeWidth={1.8} dot={false} isAnimationActive={false} />
           <XAxis dataKey="time" type="number" domain={[domain.xMin, domain.xMax]} hide allowDataOverflow />
           <YAxis domain={[domain.yMin, domain.yMax]} hide allowDataOverflow />
         </LineChart>
@@ -441,7 +443,9 @@ export default function StudySession() {
   const roundComplete = samplesComplete(DEFAULT_GESTURES, trials, requiredPerGesture);
   const armed = stage === 'capture' && isStreaming && !selectedFull;
   const waveDomain = useMemo(() => sharedWaveDomain(
-    trials.map((trial) => alignWaveform(trial.points, trial.preTriggerPointCount, trial.triggeredAt)),
+    trials.map((trial) => displayEnvelopeWaveform(
+      alignWaveform(trial.points, trial.preTriggerPointCount, trial.triggeredAt),
+    )),
   ), [trials]);
 
   const {

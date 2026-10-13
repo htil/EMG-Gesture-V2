@@ -10,6 +10,8 @@ export interface WaveDomain {
   yMax: number;
 }
 
+const DISPLAY_ENVELOPE_WINDOW_MS = 75;
+
 export function alignWaveform(
   points: Array<{ time: number; value: number }>,
   preTriggerPointCount: number,
@@ -20,6 +22,27 @@ export function alignWaveform(
     time: Math.round(point.time - triggerOffset),
     value: point.value,
   }));
+}
+
+export function displayEnvelopeWaveform(points: WavePoint[]): WavePoint[] {
+  let windowStart = 0;
+  let sumSquares = 0;
+
+  return points.map((point, index) => {
+    sumSquares += point.value * point.value;
+    while (
+      windowStart < index
+      && points[windowStart].time < point.time - DISPLAY_ENVELOPE_WINDOW_MS
+    ) {
+      sumSquares -= points[windowStart].value * points[windowStart].value;
+      windowStart += 1;
+    }
+
+    return {
+      time: point.time,
+      value: Math.sqrt(Math.max(0, sumSquares) / Math.max(1, index - windowStart + 1)),
+    };
+  });
 }
 
 export function sharedWaveDomain(series: WavePoint[][]): WaveDomain {
