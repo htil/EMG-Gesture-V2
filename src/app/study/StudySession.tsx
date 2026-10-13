@@ -875,6 +875,7 @@ export default function StudySession() {
             exitLabel="Back to review"
             onSecondary={() => goTo('results')}
             secondaryLabel="Results"
+            emgPoints={signalData}
           />
         )}
 

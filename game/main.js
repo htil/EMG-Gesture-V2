@@ -55,6 +55,11 @@ for (let i = 0; i < HURDLE_COUNT; i++) {
 
 const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
 let activeRenderer = null;
+let activeGameOptions = {};
+let lastCueUpdate = 0;
+let completeUntil = 0;
+let lastObstacleResult = null;
+const previousHurdleZ = new WeakMap();
 
 const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.2);
 hemiLight.position.set(0, 20, 0);
@@ -206,7 +211,7 @@ function loadCharacter() {
   )
 }
 
-export function mountGame(container) {
+export function mountGame(container, options = {}) {
   const resizeRenderer = () => {
     const width = container.clientWidth || window.innerWidth;
     const height = container.clientHeight || window.innerHeight;
@@ -216,6 +221,7 @@ export function mountGame(container) {
   };
 
   loadCharacter();
+  activeGameOptions = options;
 
   const renderer = new THREE.WebGLRenderer();
   renderer.domElement.style.display = 'block';
@@ -243,6 +249,7 @@ export function mountGame(container) {
     renderer.domElement.remove();
     renderer.dispose();
     if (activeRenderer === renderer) activeRenderer = null;
+    if (activeGameOptions === options) activeGameOptions = {};
     clearCharacter();
   };
 }
@@ -416,16 +423,66 @@ function animate() {
 
   // Recycle hurdles
   for (const hurdle of hurdles) {
+    const previousZ = previousHurdleZ.get(hurdle) ?? hurdle.position.z;
     hurdle.position.z += RUN_SPEED * delta;
+    previousHurdleZ.set(hurdle, hurdle.position.z);
 
     if (hurdle.position.z > SEGMENT_LENGTH) {
       hurdle.position.z -= HURDLE_COUNT * HURDLE_SPACING;
+      previousHurdleZ.set(hurdle, hurdle.position.z);
     }
     if (Math.abs(hurdle.position.z) < HURDLE_HIT_DEPTH && !isJumping) {
+      completeUntil = performance.now() + 700;
+      lastObstacleResult = false;
+      activeGameOptions.onObstacleResult?.(false);
       resetGame();
-      return;
+      break;
+    }
+    if (previousZ <= HURDLE_HIT_DEPTH && hurdle.position.z > HURDLE_HIT_DEPTH && isJumping) {
+      completeUntil = performance.now() + 700;
+      lastObstacleResult = true;
+      activeGameOptions.onObstacleResult?.(true);
     }
   }
 
+  updateObstacleCue();
+
   activeRenderer?.render(scene, camera);
+}
+
+function updateObstacleCue() {
+  const now = performance.now();
+  if (now - lastCueUpdate < 80) return;
+  lastCueUpdate = now;
+
+  if (now < completeUntil) {
+    activeGameOptions.onQteUpdate?.({
+      status: 'complete',
+      progress: 1,
+      targetGestureName: 'Jump',
+      resultLabel: lastObstacleResult ? 'Correct — obstacle cleared' : 'Missed — return to rest',
+    });
+    return;
+  }
+
+  const upcoming = hurdles
+    .filter((hurdle) => hurdle.position.z <= 0)
+    .sort((left, right) => right.position.z - left.position.z)[0];
+  const distance = upcoming ? -upcoming.position.z : HURDLE_SPACING;
+
+  if (distance > 28) {
+    activeGameOptions.onQteUpdate?.({ status: 'rest', progress: 0, targetGestureName: 'Jump' });
+  } else if (distance > 16) {
+    activeGameOptions.onQteUpdate?.({
+      status: 'ready',
+      progress: Math.min(1, (28 - distance) / 12),
+      targetGestureName: 'Jump',
+    });
+  } else {
+    activeGameOptions.onQteUpdate?.({
+      status: 'recording',
+      progress: Math.min(1, Math.max(0, (16 - distance) / 16)),
+      targetGestureName: 'Jump',
+    });
+  }
 }
