@@ -1,0 +1,5 @@
+id,experiment_id,condition,status,current_round,created_at
+K7M2QP,EXP-PILOT,button,completed,3,2026-09-28T15:00:00.000Z
+H4N8LR,EXP-PILOT,threshold,in_progress,1,2026-09-28T15:00:00.000Z
+P3W6TX,EXP-PILOT,button,assigned,1,2026-09-28T15:00:00.000Z
+Q9C2VD,EXP-PILOT,threshold,assigned,1,2026-09-28T15:00:00.000Z

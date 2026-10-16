@@ -37,7 +37,7 @@ import {
   SheetTrigger
 } from './components/ui/sheet';
 import ResultScreen from './ResultScreen';
-import TestingScreen from './TestingScreen';
+import GameScreen from './GameScreen';
 import {
   DEFAULT_FEATURE_SET_ID,
   DEFAULT_GESTURES,
@@ -1934,23 +1934,7 @@ export default function TrainingScreen() {
 
   if (activeScreen === 'testing' && trainingSession) {
     return (
-      <TestingScreen
-        trainingSession={trainingSession}
-        recordingSignalData={recordingSignalData}
-        signalSourceMode={signalSourceMode}
-        isStreaming={isStreaming}
-        startStreamForMode={startStreamForMode}
-        liveConnectionStatus={liveConnectionStatus}
-        liveConnectionMessage={liveConnectionMessage}
-        liveDeviceName={liveDeviceName}
-        selectedChannelIndex={selectedChannelIndex}
-        isBluetoothAvailable={isBluetoothAvailable}
-        onSessionComplete={setTestingSession}
-        onShowResults={() => setActiveScreen('results')}
-        onExit={() => setActiveScreen('training')}
-        settings={testingSettings}
-        onSettingsChange={setTestingSettings}
-      />
+      <GameScreen onExit={() => setActiveScreen('training')} />
     );
   }
 
