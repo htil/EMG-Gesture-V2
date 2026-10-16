@@ -24,7 +24,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { buildInferenceSample, DEFAULT_GESTURES, getChannelMockSignalValue } from '../pipeline';
+import { buildInferenceSample, DEFAULT_FEATURE_SET_ID, DEFAULT_GESTURES, getChannelMockSignalValue } from '../pipeline';
 import { useGestureRecorder, type CaptureTriggerMode } from '../useGestureRecorder';
 import { useSignalSource, type SignalPoint, type SignalSourceMode } from '../useSignalSource';
 import {
@@ -37,7 +37,17 @@ import {
 } from './conditionTraining';
 import GameScreen from '../GameScreen';
 import DarkSelect from './DarkSelect';
+import {
+  collectionId,
+  makeEvent,
+  recordCollection,
+  retryCollectionSave,
+  subscribeCollectionStatus,
+  type CollectionContext,
+  type CollectionStatus,
+} from './collection';
 import { DEFAULT_DIFFICULTY, registerGameRunListener, type StoredGameRun } from './gameHandoff';
+import SampleGraphPanel from './SampleGraphPanel';
 import ResultsPanel from './ResultsPanel';
 import { gestureQuotas, keptForGesture, sampleNumber, samplesComplete } from './samplePlan';
 import { alignWaveform, displayEnvelopeWaveform, sharedWaveDomain, type WaveDomain } from './waveScale';
@@ -45,7 +55,6 @@ import {
   clearClientSession,
   loadClientSession,
   saveClientSession,
-  saveGameRun,
   saveRound,
   type Assignment,
   type ClientSession,
@@ -55,8 +64,10 @@ import {
 } from './api';
 
 const DISPLAY_WINDOW_MS = 4000;
-const SEGMENT_DURATION_MS = 1200;
-const ACTIVITY_GUIDE = 0.6;
+const DEFAULT_SEGMENT_DURATION_MS = 1200;
+const DEFAULT_PRE_TRIGGER_WINDOW_MS = 175;
+const DEFAULT_ACTIVITY_THRESHOLD = 0.6;
+const RECORDER_COOLDOWN_MS = 450;
 
 const FLOW: FlowStage[] = ['capture', 'review', 'game', 'results'];
 
@@ -148,13 +159,15 @@ function StepMap({
 function CaptureCounter({
   isRecording,
   recordingProgress,
+  segmentDurationMs,
 }: {
   isRecording: boolean;
   recordingProgress: number;
+  segmentDurationMs: number;
 }) {
   const radius = 26;
   const circumference = 2 * Math.PI * radius;
-  const secondsRemaining = Math.max(0, (SEGMENT_DURATION_MS - Math.round(recordingProgress * SEGMENT_DURATION_MS)) / 1000);
+  const secondsRemaining = Math.max(0, (segmentDurationMs - Math.round(recordingProgress * segmentDurationMs)) / 1000);
   const dashOffset = isRecording ? circumference * (1 - recordingProgress) : circumference;
 
   return (
@@ -191,6 +204,8 @@ function LivePanel({
   recordingProgress,
   showGuide,
   thresholdGuideValue,
+  segmentDurationMs,
+  showCaptureTimer,
 }: {
   signalData: SignalPoint[];
   recordingSignalData: SignalPoint[];
@@ -199,6 +214,8 @@ function LivePanel({
   recordingProgress: number;
   showGuide: boolean;
   thresholdGuideValue: number;
+  segmentDurationMs: number;
+  showCaptureTimer: boolean;
 }) {
   const chartEnd = Math.max(
     signalData[signalData.length - 1]?.time ?? 0,
@@ -209,7 +226,7 @@ function LivePanel({
   const activityData = signalData.filter((point) => point.time >= chartStart);
   const rawData = recordingSignalData.filter((point) => point.time >= chartStart);
   const activeSegmentEnd = recordingStartTime !== null
-    ? Math.min(recordingStartTime + SEGMENT_DURATION_MS, chartEnd)
+    ? Math.min(recordingStartTime + segmentDurationMs, chartEnd)
     : null;
   const segmentLabelLeft = recordingStartTime !== null
     ? Math.max(0, Math.min(78, ((recordingStartTime - chartStart) / DISPLAY_WINDOW_MS) * 100))
@@ -233,16 +250,26 @@ function LivePanel({
               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300" /> Capturing
             </span>
           )}
-          <CaptureCounter isRecording={isRecording} recordingProgress={recordingProgress} />
+          <CaptureCounter isRecording={isRecording} recordingProgress={recordingProgress} segmentDurationMs={segmentDurationMs} />
         </div>
       </div>
       <div className="relative h-[300px] px-2 pt-3">
+        {showCaptureTimer && (
+          <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
+            <div className="rounded-3xl border border-cyan-300/30 bg-slate-950/80 px-8 py-5 text-center shadow-2xl backdrop-blur-sm">
+              <p className="text-[10px] uppercase tracking-[0.2em] text-cyan-200">{isRecording ? 'Recording' : 'Starting'}</p>
+              <p className="mt-1 text-5xl font-light tabular-nums text-white">
+                {Math.max(0, (segmentDurationMs - recordingProgress * segmentDurationMs) / 1000).toFixed(1)}s
+              </p>
+            </div>
+          </div>
+        )}
         {recordingStartTime !== null && activeSegmentEnd !== null && segmentLabelLeft !== null && (
           <div
             className="pointer-events-none absolute top-5 z-10 rounded-md bg-cyan-300/10 px-2 py-1 text-[11px] text-cyan-100"
             style={{ left: `${segmentLabelLeft}%` }}
           >
-            Segment {(SEGMENT_DURATION_MS / 1000).toFixed(1)}s
+            Segment {(segmentDurationMs / 1000).toFixed(1)}s
           </div>
         )}
         <ResponsiveContainer width="100%" height="100%">
@@ -312,15 +339,19 @@ function TrialCard({
   trial,
   sampleIndex,
   kept,
-  required,
+  minimum,
+  maximum,
   domain,
+  onInspect,
   onDelete,
 }: {
   trial: StoredTrial;
   sampleIndex: number;
   kept: number;
-  required: number;
+  minimum: number;
+  maximum: number;
   domain: WaveDomain;
+  onInspect?: () => void;
   onDelete?: () => void;
 }) {
   return (
@@ -329,18 +360,29 @@ function TrialCard({
         <div>
           <p className="text-xs text-slate-500">Sample {sampleIndex}</p>
           <p className="mt-1 text-sm font-medium text-white">{trial.gestureName}</p>
-          <p className="mt-1 text-[11px] tabular-nums text-slate-400">{kept}/{required} kept</p>
+          <p className="mt-1 text-[11px] tabular-nums text-slate-400">{kept} kept · {minimum}–{maximum}</p>
         </div>
-        {onDelete && (
-          <button
-            type="button"
-            onClick={onDelete}
-            className="rounded-lg p-1.5 text-slate-500 transition hover:bg-rose-400/10 hover:text-rose-200"
-            aria-label={`Delete ${trial.gestureName} sample ${sampleIndex}`}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
-        )}
+        <div className="flex items-center gap-1">
+          {onInspect && (
+            <button
+              type="button"
+              onClick={onInspect}
+              className="rounded-lg border border-white/10 px-2 py-1 text-[11px] text-slate-200 transition hover:bg-white/10"
+            >
+              Graph
+            </button>
+          )}
+          {onDelete && (
+            <button
+              type="button"
+              onClick={onDelete}
+              className="rounded-lg p-1.5 text-slate-500 transition hover:bg-rose-400/10 hover:text-rose-200"
+              aria-label={`Delete ${trial.gestureName} sample ${sampleIndex}`}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
       </div>
       <TrialWave trial={trial} domain={domain} />
     </article>
@@ -389,6 +431,12 @@ export default function StudySession() {
   const [session, setSession] = useState<ClientSession | null>(() => loadClientSession());
   const [signalMode, setSignalMode] = useState<SignalSourceMode>('mock');
   const [channelIndex, setChannelIndex] = useState(0);
+  const [segmentDurationMs, setSegmentDurationMs] = useState(DEFAULT_SEGMENT_DURATION_MS);
+  const [preTriggerWindowMs, setPreTriggerWindowMs] = useState(DEFAULT_PRE_TRIGGER_WINDOW_MS);
+  const [activityThreshold, setActivityThreshold] = useState(DEFAULT_ACTIVITY_THRESHOLD);
+  const [captureTimerOn, setCaptureTimerOn] = useState(false);
+  const [inspectedTrialId, setInspectedTrialId] = useState<string | null>(null);
+  const [collectionStatus, setCollectionStatus] = useState<CollectionStatus>({ error: '', pending: 0 });
   const [gestureId, setGestureId] = useState(DEFAULT_GESTURES[0].id);
   const [manualTriggerToken, setManualTriggerToken] = useState(0);
   const [notice, setNotice] = useState('Start the stream, then perform the gesture.');
@@ -425,6 +473,7 @@ export default function StudySession() {
     startStream,
     stopStream,
     liveConnectionStatus,
+    liveConnectionMessage,
     liveDeviceName,
     liveSampleRateHz,
     isBluetoothAvailable,
@@ -437,10 +486,11 @@ export default function StudySession() {
   const stage = session?.stage ?? 'capture';
   const manualTrigger = session?.manualTrigger ?? false;
   const triggerMode: CaptureTriggerMode = manualTrigger ? 'button' : 'threshold';
-  const requiredPerGesture = session?.capturesPerRound ?? 1;
+  const capturesMax = session?.capturesMax ?? session?.capturesPerRound ?? 1;
+  const capturesMin = Math.min(session?.capturesMin ?? capturesMax, capturesMax);
   const selectedKept = keptForGesture(trials, gestureId);
-  const selectedFull = selectedKept >= requiredPerGesture;
-  const roundComplete = samplesComplete(DEFAULT_GESTURES, trials, requiredPerGesture);
+  const selectedFull = selectedKept >= capturesMax;
+  const roundComplete = samplesComplete(DEFAULT_GESTURES, trials, capturesMin);
   const armed = stage === 'capture' && isStreaming && !selectedFull;
   const waveDomain = useMemo(() => sharedWaveDomain(
     trials.map((trial) => displayEnvelopeWaveform(
@@ -457,14 +507,15 @@ export default function StudySession() {
     acknowledgeCompletedSegment,
   } = useGestureRecorder({
     signalPoints: recordingSignalData,
-    threshold: ACTIVITY_GUIDE,
-    segmentDurationMs: SEGMENT_DURATION_MS,
+    threshold: activityThreshold,
+    segmentDurationMs,
+    preTriggerWindowMs,
     isStreaming,
-    resetKey: `${signalMode}:${channelIndex}:${gestureId}:${session?.round ?? 1}`,
+    resetKey: `${signalMode}:${channelIndex}:${gestureId}:${session?.round ?? 1}:${segmentDurationMs}:${preTriggerWindowMs}:${activityThreshold}`,
     triggerMode,
     manualTriggerToken,
     isArmed: armed,
-    cooldownMs: 450,
+    cooldownMs: RECORDER_COOLDOWN_MS,
   });
 
   useEffect(() => {
@@ -475,35 +526,149 @@ export default function StudySession() {
 
   const sessionRef = useRef(session);
   sessionRef.current = session;
+  const logRef = useRef<CollectionContext | null>(null);
   const handledSegment = useRef<typeof completedSegment>(null);
+  const openCapture = useRef<{ sampleId: string; gestureId: string; gestureName: string } | null>(null);
+  const replacements = useRef<Map<string, string[]>>(new Map());
+  const reportedSignalError = useRef('');
+  const revisionRef = useRef<string | null>(session?.modelRevisionId ?? null);
+  const sawRecording = useRef(false);
+
+  const pressCapture = useCallback(() => {
+    setManualTriggerToken((token) => token + 1);
+    setCaptureTimerOn(true);
+  }, []);
+
+  useEffect(() => subscribeCollectionStatus(setCollectionStatus), []);
 
   useEffect(() => {
-    if (!completedSegment || handledSegment.current === completedSegment) return;
+    revisionRef.current = session?.modelRevisionId ?? null;
+  }, [session?.modelRevisionId]);
+
+  useEffect(() => {
+    setCaptureTimerOn(false);
+    sawRecording.current = false;
+  }, [activityThreshold, channelIndex, gestureId, isStreaming, preTriggerWindowMs, segmentDurationMs, session?.round, signalMode]);
+
+  useEffect(() => {
+    if (isRecording) sawRecording.current = true;
+    if (!isRecording && sawRecording.current) {
+      sawRecording.current = false;
+      setCaptureTimerOn(false);
+    }
+  }, [isRecording]);
+
+  useEffect(() => {
+    const context = logRef.current;
+    if (!context || context.phase === 'done') return;
+    void recordCollection(context.participantId, [{ kind: 'meta', record: context }]);
+  }, [session?.sessionId, session?.round, session?.stage, session?.condition, signalMode, channelIndex, segmentDurationMs, preTriggerWindowMs, activityThreshold, liveSampleRateHz, liveDeviceName, capturesMin, capturesMax]);
+
+  useEffect(() => {
+    const context = logRef.current;
     const current = sessionRef.current;
-    if (!current) return;
-    handledSegment.current = completedSegment;
-    const metrics = calculateMetrics(completedSegment.points);
-    const savedForGesture = keptForGesture(current.trials, gesture.id) + 1;
-    setSession((previous) => {
-      if (!previous) return previous;
-      const trial: StoredTrial = {
-        id: `${gesture.id}-${previous.round}-${completedSegment.completedAt}`,
-        gestureId: gesture.id,
-        gestureName: gesture.name,
-        pairIndex: keptForGesture(previous.trials, gesture.id) + 1,
+    if (!context || !current) return;
+
+    if (completedSegment && handledSegment.current !== completedSegment) {
+      handledSegment.current = completedSegment;
+      const open = openCapture.current;
+      openCapture.current = null;
+      const sampleId = open?.sampleId ?? collectionId('sample');
+      const gestureIdForSample = open?.gestureId ?? gesture.id;
+      const gestureName = open?.gestureName ?? gesture.name;
+      const metrics = calculateMetrics(completedSegment.points);
+      const points = completedSegment.points;
+      const queue = replacements.current.get(gestureIdForSample) ?? [];
+      const replacedId = queue.shift() ?? null;
+      if (queue.length === 0) replacements.current.delete(gestureIdForSample);
+      const savedForGesture = keptForGesture(current.trials, gestureIdForSample) + 1;
+      const sample = {
+        sampleId,
+        sessionId: context.sessionId,
+        participantId: context.participantId,
+        experimentId: context.experimentId,
+        condition: context.condition,
+        round: context.round,
+        phase: context.phase,
+        gestureId: gestureIdForSample,
+        gestureLabel: gestureName,
         capturedAt: Date.now(),
+        recordingStartedAt: points[0]?.time ?? completedSegment.triggeredAt,
+        recordingEndedAt: completedSegment.completedAt,
         triggeredAt: completedSegment.triggeredAt,
-        completedAt: completedSegment.completedAt,
         preTriggerPointCount: completedSegment.preTriggerPointCount,
-        points: completedSegment.points,
-        quality: completedSegment.points.length >= 12 && metrics.durationMs >= SEGMENT_DURATION_MS * 0.85 ? 'usable' : 'review',
-        metrics,
+        pointCount: points.length,
+        points,
+        signalSource: context.signalSource,
+        channelIndex: context.channelIndex,
+        sampleRateHz: context.sampleRateHz,
+        settings: context.settings,
       };
-      return { ...previous, trials: [...previous.trials, trial] };
-    });
-    setNotice(`${gesture.name} sample ${Math.min(savedForGesture, current.capturesPerRound)} of ${current.capturesPerRound} kept.`);
-    acknowledgeCompletedSegment();
-  }, [acknowledgeCompletedSegment, completedSegment, gesture.id, gesture.name]);
+      const items = [
+        { kind: 'sample' as const, record: sample },
+        { kind: 'event' as const, record: makeEvent(context, 'capture_completed', sampleId, null, '') },
+      ];
+      if (replacedId) items.push({ kind: 'event', record: makeEvent(context, 'sample_replaced', replacedId, sampleId, '') });
+      void recordCollection(context.participantId, items);
+      setSession((previous) => {
+        if (!previous) return previous;
+        const trial: StoredTrial = {
+          id: sampleId,
+          gestureId: gestureIdForSample,
+          gestureName,
+          pairIndex: keptForGesture(previous.trials, gestureIdForSample) + 1,
+          capturedAt: sample.capturedAt,
+          triggeredAt: completedSegment.triggeredAt,
+          completedAt: completedSegment.completedAt,
+          preTriggerPointCount: completedSegment.preTriggerPointCount,
+          points,
+          quality: points.length >= 12 && metrics.durationMs >= segmentDurationMs * 0.85 ? 'usable' : 'review',
+          metrics,
+        };
+        return { ...previous, trials: [...previous.trials, trial] };
+      });
+      if (savedForGesture >= capturesMax) setNotice(`${gestureName} has ${savedForGesture} examples, the maximum.`);
+      else if (savedForGesture >= capturesMin) setNotice(`${gestureName} sample ${savedForGesture} kept. The minimum is in, and you can keep up to ${capturesMax}.`);
+      else setNotice(`${gestureName} sample ${savedForGesture} of at least ${capturesMin} kept.`);
+      acknowledgeCompletedSegment();
+      return;
+    }
+
+    if (isRecording && !openCapture.current) {
+      const sampleId = collectionId('sample');
+      openCapture.current = { sampleId, gestureId: gesture.id, gestureName: gesture.name };
+      void recordCollection(context.participantId, [{
+        kind: 'event',
+        record: makeEvent(context, 'capture_started', sampleId, null, ''),
+      }]);
+      return;
+    }
+
+    if (!isRecording && openCapture.current && !completedSegment) {
+      const open = openCapture.current;
+      openCapture.current = null;
+      void recordCollection(context.participantId, [{
+        kind: 'event',
+        record: makeEvent(context, 'capture_cancelled', open.sampleId, null, 'Recording stopped before a sample was saved.'),
+      }]);
+    }
+  }, [acknowledgeCompletedSegment, capturesMax, capturesMin, completedSegment, gesture.id, gesture.name, isRecording, segmentDurationMs]);
+
+  useEffect(() => {
+    if (liveConnectionStatus !== 'error') {
+      reportedSignalError.current = '';
+      return;
+    }
+    const detail = liveConnectionMessage || 'The signal source reported an error.';
+    if (reportedSignalError.current === detail) return;
+    reportedSignalError.current = detail;
+    const context = logRef.current;
+    if (!context) return;
+    void recordCollection(context.participantId, [{
+      kind: 'event',
+      record: makeEvent(context, 'capture_error', openCapture.current?.sampleId ?? null, null, detail),
+    }]);
+  }, [liveConnectionMessage, liveConnectionStatus]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -511,12 +676,12 @@ export default function StudySession() {
       if (target?.matches('input, select, textarea')) return;
       if (event.code === 'Space' && manualTrigger && armed && recorderState === 'idle') {
         event.preventDefault();
-        setManualTriggerToken((token) => token + 1);
+        pressCapture();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [armed, manualTrigger, recorderState]);
+  }, [armed, manualTrigger, pressCapture, recorderState]);
 
   useEffect(() => {
     if (!session) return;
@@ -534,12 +699,15 @@ export default function StudySession() {
     if (!isModelReady(current.participantId, current.condition, current.trials.map((trial) => trial.id))) return;
     const run: StoredGameRun = {
       id: `${current.participantId}-${Date.now()}`,
+      sessionId: current.sessionId,
       round: current.round,
       recordedAt: Date.now(),
       condition: current.condition,
       difficulty: handoff.difficulty || DEFAULT_DIFFICULTY,
       gameScore: handoff.gameScore,
       outcomes: handoff.outcomes,
+      modelRevisionId: current.modelRevisionId ?? revisionRef.current,
+      obstacleSuccess: typeof handoff.obstacleSuccess === 'boolean' ? handoff.obstacleSuccess : null,
     };
     setSession((previous) => {
       if (!previous) return previous;
@@ -550,10 +718,33 @@ export default function StudySession() {
         unlockedThrough: 'results',
       };
     });
-    void saveGameRun(current.participantId, run).catch(() => {
-      setSaveError('The game result could not be saved.');
-    });
+    void recordCollection(current.participantId, [{ kind: 'run', record: run }]);
   }), []);
+
+  if (session) {
+    logRef.current = {
+      participantId: session.participantId,
+      sessionId: session.sessionId,
+      experimentId: session.experimentId,
+      condition: session.condition,
+      round: session.round,
+      phase: session.stage,
+      signalSource: signalMode,
+      channelIndex,
+      sampleRateHz: liveSampleRateHz,
+      deviceName: liveDeviceName,
+      settings: {
+        segmentDurationMs,
+        preTriggerWindowMs,
+        activityThreshold,
+        cooldownMs: RECORDER_COOLDOWN_MS,
+        capturesMin,
+        capturesMax,
+        featureSetId: DEFAULT_FEATURE_SET_ID,
+        classifier: 'knn',
+      },
+    };
+  }
 
   if (!session) return null;
 
@@ -572,10 +763,10 @@ export default function StudySession() {
     const sample = buildInferenceSample(points, durationMs);
     return sample ? gamePredictionEngine.predict(sample) : null;
   };
-  const quotas = gestureQuotas(DEFAULT_GESTURES, trials, session.capturesPerRound);
+  const quotas = gestureQuotas(DEFAULT_GESTURES, trials, capturesMin, capturesMax);
   const missingQuotas = quotas.filter((row) => row.missing > 0);
-  const cappedKept = quotas.reduce((sum, row) => sum + Math.min(row.kept, row.required), 0);
-  const totalRequired = DEFAULT_GESTURES.length * session.capturesPerRound;
+  const cappedKept = quotas.reduce((sum, row) => sum + Math.min(row.kept, row.minimum), 0);
+  const totalRequired = DEFAULT_GESTURES.length * capturesMin;
   const reachedIndex = flowIndex(session.unlockedThrough ?? stage);
   const renderTrial = (trial: StoredTrial) => {
     const quota = quotas.find((row) => row.gesture.id === trial.gestureId);
@@ -585,8 +776,10 @@ export default function StudySession() {
         trial={trial}
         sampleIndex={sampleNumber(trials, trial.id)}
         kept={quota?.kept ?? 0}
-        required={session.capturesPerRound}
+        minimum={quota?.minimum ?? capturesMin}
+        maximum={quota?.maximum ?? capturesMax}
         domain={waveDomain}
+        onInspect={() => setInspectedTrialId(trial.id)}
         onDelete={() => deleteKeptTrial(trial.id)}
       />
     );
@@ -602,21 +795,62 @@ export default function StudySession() {
   };
 
   const deleteKeptTrial = (trialId: string) => {
+    const trial = session.trials.find((item) => item.id === trialId);
+    if (!trial) return;
+    const queue = replacements.current.get(trial.gestureId) ?? [];
+    queue.push(trial.id);
+    replacements.current.set(trial.gestureId, queue);
     setSession((current) => {
       if (!current) return current;
-      return { ...current, trials: current.trials.filter((trial) => trial.id !== trialId) };
+      return { ...current, trials: current.trials.filter((item) => item.id !== trialId) };
     });
-    setNotice('Example removed. Return to Capture if that gesture is now short.');
+    if (inspectedTrialId === trialId) setInspectedTrialId(null);
+    const context = logRef.current;
+    if (context) {
+      void recordCollection(context.participantId, [{
+        kind: 'event',
+        record: makeEvent(context, 'sample_deleted', trial.id, null, ''),
+      }]);
+    }
+    setNotice('Example removed. Return to Capture if that gesture is below the minimum.');
   };
 
   const trainModel = async () => {
     if (!roundComplete || training) return;
     setTraining(true);
     setModelState((current) => (current ? { ...current, status: 'training', error: '' } : current));
+    const startedAt = Date.now();
+    const revisionId = collectionId('rev');
+    const sampleIds = trials.map((trial) => trial.id);
     try {
-      const next = await trainConditionModel(session.participantId, condition, trials, DEFAULT_GESTURES);
+      const next = await trainConditionModel(session.participantId, condition, trials, DEFAULT_GESTURES, segmentDurationMs);
+      const success = next.status === 'ready';
+      const context = logRef.current;
+      if (context) {
+        void recordCollection(context.participantId, [{
+          kind: 'training',
+          record: {
+            revisionId,
+            sessionId: context.sessionId,
+            participantId: context.participantId,
+            condition,
+            round: context.round,
+            sampleIds,
+            classifier: 'knn',
+            settings: context.settings,
+            startedAt,
+            finishedAt: Date.now(),
+            status: success ? 'success' : 'failure',
+            error: success ? '' : next.error,
+          },
+        }]);
+      }
+      if (success) {
+        revisionRef.current = revisionId;
+        setSession((current) => (current ? { ...current, modelRevisionId: revisionId } : current));
+      }
       setModelState(next);
-      setNotice(next.status === 'ready' ? 'Model ready for this condition.' : next.error || 'The model is not ready.');
+      setNotice(success ? 'Model ready for this condition.' : next.error || 'The model is not ready.');
     } finally {
       setTraining(false);
     }
@@ -706,6 +940,14 @@ export default function StudySession() {
       </header>
 
       <main className="relative mx-auto max-w-6xl space-y-5 px-4 py-6 md:px-6">
+        {collectionStatus.error && (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-rose-300/30 bg-rose-400/10 px-4 py-3 text-sm text-rose-100">
+            <span>{collectionStatus.error}</span>
+            <button type="button" onClick={() => void retryCollectionSave()} className="rounded-lg bg-rose-100 px-3 py-1.5 text-xs font-medium text-slate-950">
+              Retry save
+            </button>
+          </div>
+        )}
         <StepMap stage={stage} round={session.round} repetitions={session.repetitions} reachedIndex={reachedIndex} canVisit={canVisit} onSelect={goTo} />
 
         {stage === 'done' && (
@@ -729,18 +971,20 @@ export default function StudySession() {
                 recordingProgress={recordingProgress}
                 showGuide={!manualTrigger}
                 thresholdGuideValue={signalMode === 'live'
-                  ? getDisplayValueForNormalizedActivity(ACTIVITY_GUIDE)
-                  : ACTIVITY_GUIDE}
+                  ? getDisplayValueForNormalizedActivity(activityThreshold)
+                  : activityThreshold}
+                segmentDurationMs={segmentDurationMs}
+                showCaptureTimer={manualTrigger && captureTimerOn}
               />
               <section className="rounded-[24px] border border-white/8 bg-white/[0.025] p-4">
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="text-sm font-medium text-white">This round</h2>
-                  <span className="text-xs tabular-nums text-slate-500">{cappedKept}/{totalRequired}</span>
+                  <span className="text-xs tabular-nums text-slate-500">{trials.length} saved · {cappedKept}/{totalRequired} minimum</span>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
                   {quotas.map((row) => (
                     <span key={row.gesture.id} className="rounded-full border border-white/10 px-3 py-1 text-[11px] text-slate-300">
-                      {row.gesture.name} <span className="tabular-nums text-slate-100">{row.kept}/{row.required}</span>
+                      {row.gesture.name} <span className="tabular-nums text-slate-100">{row.kept} kept · {row.minimum}–{row.maximum}</span>
                     </span>
                   ))}
                 </div>
@@ -759,7 +1003,7 @@ export default function StudySession() {
             <aside className="space-y-4">
               <section className="rounded-[28px] border border-white/10 bg-slate-950/70 p-5">
                 <div className="flex items-center justify-between text-[11px] text-slate-500">
-                  <span>Examples kept</span>
+                  <span>Minimum covered</span>
                   <span className="tabular-nums">{cappedKept}/{totalRequired}</span>
                 </div>
                 <div className="mt-3 h-1 overflow-hidden rounded-full bg-white/10">
@@ -775,6 +1019,55 @@ export default function StudySession() {
                     onChange={setGestureId}
                   />
                 </div>
+
+                <div className="mt-4 grid grid-cols-3 gap-2">
+                  <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                    Window ms
+                    <input
+                      type="number"
+                      min={200}
+                      max={5000}
+                      step={50}
+                      value={segmentDurationMs}
+                      onChange={(event) => {
+                        const next = Number(event.target.value);
+                        if (Number.isFinite(next)) setSegmentDurationMs(Math.min(5000, Math.max(200, next)));
+                      }}
+                      className="mt-1 w-full rounded-xl border border-white/10 bg-slate-950 px-2 py-2 text-sm text-slate-100"
+                    />
+                  </label>
+                  <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                    Pre-trigger
+                    <input
+                      type="number"
+                      min={0}
+                      max={2000}
+                      step={25}
+                      value={preTriggerWindowMs}
+                      onChange={(event) => {
+                        const next = Number(event.target.value);
+                        if (Number.isFinite(next)) setPreTriggerWindowMs(Math.min(2000, Math.max(0, next)));
+                      }}
+                      className="mt-1 w-full rounded-xl border border-white/10 bg-slate-950 px-2 py-2 text-sm text-slate-100"
+                    />
+                  </label>
+                  <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                    Threshold
+                    <input
+                      type="number"
+                      min={0.05}
+                      max={1}
+                      step={0.05}
+                      value={activityThreshold}
+                      onChange={(event) => {
+                        const next = Number(event.target.value);
+                        if (Number.isFinite(next)) setActivityThreshold(Math.min(1, Math.max(0.05, next)));
+                      }}
+                      className="mt-1 w-full rounded-xl border border-white/10 bg-slate-950 px-2 py-2 text-sm text-slate-100"
+                    />
+                  </label>
+                </div>
+                <p className="mt-2 text-[11px] leading-4 text-slate-500">Window length and pre-trigger history are still being decided. Each saved sample keeps the values used.</p>
 
                 <div className="mt-4 grid grid-cols-2 gap-2">
                   {(['mock', 'live'] as SignalSourceMode[]).map((mode) => (
@@ -825,7 +1118,7 @@ export default function StudySession() {
                 {manualTrigger && (
                   <button
                     type="button"
-                    onClick={() => setManualTriggerToken((token) => token + 1)}
+                    onClick={pressCapture}
                     disabled={!armed || recorderState !== 'idle'}
                     className="mt-4 flex w-full items-center justify-center gap-3 rounded-2xl border border-cyan-300/30 bg-cyan-300/10 px-5 py-5 text-sm font-medium text-cyan-50 disabled:cursor-not-allowed disabled:opacity-35"
                   >
@@ -887,7 +1180,7 @@ export default function StudySession() {
             <div className="flex flex-wrap gap-2">
               {quotas.map((row) => (
                 <span key={row.gesture.id} className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-xs text-slate-200">
-                  {row.gesture.name} <span className="tabular-nums">{row.kept}/{row.required} kept</span>
+                  {row.gesture.name} <span className="tabular-nums">{row.kept} kept · {row.minimum}–{row.maximum}</span>
                 </span>
               ))}
             </div>
@@ -897,7 +1190,7 @@ export default function StudySession() {
                 <ul className="mt-2 space-y-1">
                   {missingQuotas.map((row) => (
                     <li key={row.gesture.id}>
-                      {row.gesture.name} needs {row.missing} more {row.missing === 1 ? 'example' : 'examples'} ({row.kept}/{row.required} kept)
+                      {row.gesture.name} needs {row.missing} more {row.missing === 1 ? 'example' : 'examples'} ({row.kept} kept, at least {row.minimum})
                     </li>
                   ))}
                 </ul>
@@ -966,6 +1259,14 @@ export default function StudySession() {
           />
         )}
       </main>
+      {inspectedTrialId && trials.some((trial) => trial.id === inspectedTrialId) && (
+        <SampleGraphPanel
+          trial={trials.find((trial) => trial.id === inspectedTrialId) ?? trials[0]}
+          trials={trials.filter((trial) => trial.gestureId === trials.find((item) => item.id === inspectedTrialId)?.gestureId)}
+          onClose={() => setInspectedTrialId(null)}
+          onSelect={setInspectedTrialId}
+        />
+      )}
     </div>
   );
 }

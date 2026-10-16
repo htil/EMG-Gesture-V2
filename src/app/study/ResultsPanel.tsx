@@ -127,7 +127,7 @@ export default function ResultsPanel({
         <p className="text-xs text-amber-100">Try Again stays closed until this condition’s model is ready.</p>
       )}
       {!continueEnabled && (
-        <p className="text-xs text-amber-100">Continue stays closed until every gesture has its required examples again.</p>
+        <p className="text-xs text-amber-100">Continue stays closed until every gesture has at least the minimum number of examples again.</p>
       )}
       <p className="text-xs leading-5 text-slate-500">When retries and retraining are allowed during the measured study is still open.</p>
       {saveError && <p className="text-sm text-rose-300">{saveError}</p>}

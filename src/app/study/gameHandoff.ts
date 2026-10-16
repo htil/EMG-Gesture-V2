@@ -18,12 +18,16 @@ export interface GameRunHandoff {
   difficulty: string;
   gameScore: number;
   outcomes: GestureTestOutcome[];
+  obstacleSuccess?: boolean | null;
 }
 
 export interface StoredGameRun extends GameRunHandoff {
   id: string;
+  sessionId?: string;
   round: number;
   recordedAt: number;
+  modelRevisionId?: string | null;
+  obstacleSuccess?: boolean | null;
 }
 
 type GameRunListener = (handoff: GameRunHandoff) => void;

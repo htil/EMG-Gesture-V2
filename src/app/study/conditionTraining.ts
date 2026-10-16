@@ -150,13 +150,13 @@ export function getConditionPredictionEngine(
   return engines.get(storageKey(scopeId, condition)) ?? null;
 }
 
-function toTrainingSession(trials: TrainableTrial[], gestures: Gesture[]) {
+function toTrainingSession(trials: TrainableTrial[], gestures: Gesture[], segmentDurationMs: number) {
   return {
     id: `condition-${Date.now()}`,
     createdAt: Date.now(),
     gestures,
     featureSetId: DEFAULT_FEATURE_SET_ID,
-    segmentDurationMs: 1200,
+    segmentDurationMs,
     gestureData: gestures.map((gesture) => ({
       gesture,
       targetSampleCount: trials.filter((trial) => trial.gestureId === gesture.id).length,
@@ -179,6 +179,7 @@ export async function trainConditionModel(
   condition: Assignment,
   trials: TrainableTrial[],
   gestures: Gesture[],
+  segmentDurationMs = 1200,
 ): Promise<ConditionModelState> {
   const key = storageKey(scopeId, condition);
   const token = (trainTokens.get(key) ?? 0) + 1;
@@ -200,7 +201,7 @@ export async function trainConditionModel(
     });
     if (trainTokens.get(key) !== token) return readModelState(scopeId, condition);
 
-    const engine = createPredictionEngine(toTrainingSession(trials, gestures));
+    const engine = createPredictionEngine(toTrainingSession(trials, gestures, segmentDurationMs));
     if (trainTokens.get(key) !== token) return readModelState(scopeId, condition);
     if (!engine.getModelDebugSummary().isReady) {
       engines.delete(key);

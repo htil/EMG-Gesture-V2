@@ -15,6 +15,7 @@ import {
   deleteExperiment,
   deleteParticipant,
   downloadRoster,
+  downloadStudyData,
   generateParticipants,
   listExperiments,
   listParticipants,
@@ -60,7 +61,8 @@ export default function AdminApp() {
   const [draftName, setDraftName] = useState('');
   const [draftNotes, setDraftNotes] = useState('');
   const [draftRepetitions, setDraftRepetitions] = useState(3);
-  const [draftCaptures, setDraftCaptures] = useState(3);
+  const [draftMin, setDraftMin] = useState(3);
+  const [draftMax, setDraftMax] = useState(3);
   const [newName, setNewName] = useState('');
   const [generateCount, setGenerateCount] = useState(8);
   const [assignment, setAssignment] = useState<'balanced' | Assignment>('balanced');
@@ -100,7 +102,8 @@ export default function AdminApp() {
     setDraftName(selected.name);
     setDraftNotes(selected.notes);
     setDraftRepetitions(selected.repetitions);
-    setDraftCaptures(selected.capturesPerRound);
+    setDraftMin(selected.capturesMin);
+    setDraftMax(selected.capturesMax);
   }, [selected]);
 
   useEffect(() => {
@@ -227,7 +230,8 @@ export default function AdminApp() {
                 const created = await createExperiment(pin, {
                   name: newName,
                   repetitions: 3,
-                  capturesPerRound: 3,
+                  capturesMin: 3,
+                  capturesMax: 3,
                   notes: '',
                 });
                 setNewName('');
@@ -260,6 +264,9 @@ export default function AdminApp() {
                   <button type="button" onClick={() => void run(() => downloadRoster(pin, selected.id))} className="flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-xs text-slate-300">
                     <Download className="h-3.5 w-3.5" /> Export CSV
                   </button>
+                  <button type="button" onClick={() => void run(() => downloadStudyData(pin, selected.id))} className="flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-xs text-slate-300">
+                    <Download className="h-3.5 w-3.5" /> Export study data
+                  </button>
                   <button
                     type="button"
                     onClick={() => void run(async () => {
@@ -275,15 +282,18 @@ export default function AdminApp() {
                 </div>
               </div>
 
-              <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                 <Field label="Name">
                   <input value={draftName} onChange={(event) => setDraftName(event.target.value)} className={inputClass} />
                 </Field>
                 <Field label="Loop count (n)">
                   <input type="number" min={1} max={30} value={draftRepetitions} onChange={(event) => setDraftRepetitions(Number(event.target.value))} className={inputClass} />
                 </Field>
-                <Field label="Samples required per gesture">
-                  <input type="number" min={1} max={20} value={draftCaptures} onChange={(event) => setDraftCaptures(Number(event.target.value))} className={inputClass} />
+                <Field label="Minimum samples per gesture">
+                  <input type="number" min={1} max={20} value={draftMin} onChange={(event) => setDraftMin(Number(event.target.value))} className={inputClass} />
+                </Field>
+                <Field label="Maximum samples per gesture">
+                  <input type="number" min={1} max={20} value={draftMax} onChange={(event) => setDraftMax(Number(event.target.value))} className={inputClass} />
                 </Field>
                 <Field label="Session access">
                   <DarkSelect
@@ -301,6 +311,9 @@ export default function AdminApp() {
                   />
                 </Field>
               </div>
+              <p className="mt-3 text-xs leading-5 text-slate-500">
+                A gesture can be finished once it reaches the minimum. Capture stops at the maximum. The round record stores how many samples were actually kept.
+              </p>
               <Field label="Notes">
                 <textarea value={draftNotes} onChange={(event) => setDraftNotes(event.target.value)} rows={2} className={inputClass} />
               </Field>
@@ -312,7 +325,7 @@ export default function AdminApp() {
                     name: draftName,
                     notes: draftNotes,
                     ...(draftRepetitions !== selected.repetitions ? { repetitions: draftRepetitions } : {}),
-                    ...(draftCaptures !== selected.capturesPerRound ? { capturesPerRound: draftCaptures } : {}),
+                    ...(draftMin !== selected.capturesMin || draftMax !== selected.capturesMax ? { capturesMin: draftMin, capturesMax: draftMax } : {}),
                   });
                   await refreshExperiments(pin, selected.id);
                   setNotice('Experiment saved.');
@@ -458,11 +471,11 @@ export default function AdminApp() {
                   <div key={`${round.participantId}-${round.round}-${round.completedAt}`} className="flex items-center justify-between rounded-xl bg-white/[0.03] px-3 py-2 text-xs text-slate-400">
                     <span className="font-mono text-slate-200">{round.participantId}</span>
                     <span>Round {round.round}</span>
-                    <span>{round.usableCount}/{round.trialCount} usable</span>
+                    <span>Saved {round.savedCount ?? round.trialCount}</span>
                     <Check className="h-3.5 w-3.5 text-emerald-300" />
                   </div>
                 ))}
-                {rounds.length === 0 && <p className="text-sm text-slate-500">Rounds appear here after a participant finishes Compare.</p>}
+                {rounds.length === 0 && <p className="text-sm text-slate-500">Rounds appear here after a participant finishes a round. The saved count is how many samples they kept.</p>}
               </div>
             </section>
 

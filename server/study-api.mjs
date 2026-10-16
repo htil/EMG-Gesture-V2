@@ -1,11 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { zipStore } from './zip-store.mjs';
 
 const ID_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const EXPERIMENT_HEADERS = ['id', 'name', 'repetitions', 'captures_per_round', 'status', 'notes', 'created_at'];
+const EXPERIMENT_HEADERS = ['id', 'name', 'repetitions', 'captures_per_round', 'captures_min', 'captures_max', 'status', 'notes', 'created_at'];
 const PARTICIPANT_HEADERS = ['id', 'experiment_id', 'condition', 'status', 'current_round', 'created_at'];
-const ROUND_HEADERS = ['participant_id', 'experiment_id', 'round', 'trial_count', 'usable_count', 'completed_at'];
+const ROUND_HEADERS = ['participant_id', 'experiment_id', 'round', 'trial_count', 'saved_count', 'usable_count', 'completed_at'];
+const EVENT_TYPES = new Set(['capture_started', 'capture_completed', 'capture_cancelled', 'capture_error', 'sample_deleted', 'sample_replaced']);
+const ATTEMPT_RESULTS = new Set(['correct', 'wrong', 'unknown', 'recording_failure']);
 
 function nowIso() {
   return new Date().toISOString();
@@ -135,13 +138,120 @@ function normalizeId(value) {
   return String(value ?? '').trim().toUpperCase().replace(/\s+/g, '');
 }
 
+function sampleBounds(experiment) {
+  const legacy = Number(experiment.captures_per_round) || 3;
+  const minimum = Number(experiment.captures_min) || legacy;
+  const maximum = Number(experiment.captures_max) || legacy;
+  const min = Math.min(minimum, maximum);
+  const max = Math.max(minimum, maximum);
+  return {
+    min: Number.isFinite(min) && min > 0 ? min : legacy,
+    max: Number.isFinite(max) && max > 0 ? max : legacy,
+  };
+}
+
+function withSampleLimits(experiment) {
+  const bounds = sampleBounds(experiment);
+  return {
+    ...experiment,
+    captures_min: String(bounds.min),
+    captures_max: String(bounds.max),
+    captures_per_round: String(bounds.max),
+  };
+}
+
+function safeToken(value, fallback = '') {
+  const text = String(value ?? '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+  return text || fallback;
+}
+
+function finiteNumber(value, fallback = null) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function writeJsonAtomic(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const temporary = `${filePath}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`);
+  fs.renameSync(temporary, filePath);
+}
+
+function collectionDir(sessionsDir, participantId, sessionId) {
+  return path.join(sessionsDir, safeToken(participantId, 'participant'), 'collection', safeToken(sessionId, 'session'));
+}
+
+function readJsonFiles(directory) {
+  if (!fs.existsSync(directory)) return [];
+  return fs.readdirSync(directory)
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8'));
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+function sanitizePoints(points) {
+  if (!Array.isArray(points)) return [];
+  return points.slice(0, 20000).map((point) => ({
+    time: finiteNumber(point?.time, 0),
+    value: finiteNumber(point?.value, 0),
+  }));
+}
+
+function sanitizeSettings(settings) {
+  const source = settings && typeof settings === 'object' ? settings : {};
+  return {
+    segmentDurationMs: finiteNumber(source.segmentDurationMs, null),
+    preTriggerWindowMs: finiteNumber(source.preTriggerWindowMs, null),
+    activityThreshold: finiteNumber(source.activityThreshold, null),
+    cooldownMs: finiteNumber(source.cooldownMs, null),
+    capturesMin: finiteNumber(source.capturesMin, null),
+    capturesMax: finiteNumber(source.capturesMax, null),
+    featureSetId: String(source.featureSetId || ''),
+    classifier: 'knn',
+  };
+}
+
+function sanitizeStoredRun(run, participant) {
+  if (!run || run.condition !== participant.condition || !Number.isFinite(Number(run.gameScore)) || !Array.isArray(run.outcomes)) {
+    return null;
+  }
+  return {
+    id: safeToken(run.id, randomId(8, 'RUN-')),
+    sessionId: safeToken(run.sessionId, ''),
+    round: Number(run.round) || Number(participant.current_round) || 1,
+    recordedAt: Number(run.recordedAt) || Date.now(),
+    condition: participant.condition,
+    difficulty: String(run.difficulty || 'standard'),
+    gameScore: Number(run.gameScore),
+    modelRevisionId: run.modelRevisionId ? safeToken(run.modelRevisionId, '') : null,
+    obstacleSuccess: run.obstacleSuccess === true ? true : run.obstacleSuccess === false ? false : null,
+    outcomes: run.outcomes.filter((outcome) => outcome && ATTEMPT_RESULTS.has(outcome.result)).map((outcome) => ({
+      attemptId: String(outcome.attemptId || ''),
+      expectedGestureId: String(outcome.expectedGestureId || ''),
+      expectedGestureName: String(outcome.expectedGestureName || ''),
+      result: outcome.result,
+      predictedGestureId: outcome.predictedGestureId == null ? null : String(outcome.predictedGestureId),
+      predictedGestureName: outcome.predictedGestureName == null ? null : String(outcome.predictedGestureName),
+    })),
+  };
+}
+
 function summarizeExperiment(experiment, participants) {
   const mine = participants.filter((participant) => participant.experiment_id === experiment.id);
+  const bounds = sampleBounds(experiment);
   return {
     id: experiment.id,
     name: experiment.name,
     repetitions: Number(experiment.repetitions),
-    capturesPerRound: Number(experiment.captures_per_round),
+    capturesMin: bounds.min,
+    capturesMax: bounds.max,
+    capturesPerRound: bounds.max,
     status: experiment.status,
     notes: experiment.notes,
     createdAt: experiment.created_at,
@@ -192,9 +302,12 @@ export function createStudyDesk(dataDir) {
     settings: readSettings(settingsPath),
   });
 
-  const saveExperiments = (records) => writeTable(experimentsPath, EXPERIMENT_HEADERS, records);
+  const saveExperiments = (records) => writeTable(experimentsPath, EXPERIMENT_HEADERS, records.map(withSampleLimits));
   const saveParticipants = (records) => writeTable(participantsPath, PARTICIPANT_HEADERS, records);
-  const saveRounds = (records) => writeTable(roundsPath, ROUND_HEADERS, records);
+  const saveRounds = (records) => writeTable(roundsPath, ROUND_HEADERS, records.map((round) => ({
+    ...round,
+    saved_count: round.saved_count || round.trial_count || '0',
+  })));
   const runsFile = (participantId) => path.join(sessionsDir, `${participantId}-runs.json`);
   const readRuns = (participantId) => {
     const filePath = runsFile(participantId);
@@ -245,6 +358,7 @@ export function createStudyDesk(dataDir) {
         if (experiment.status !== 'active') {
           throw Object.assign(new Error('This session is not open.'), { status: 403 });
         }
+        const bounds = sampleBounds(experiment);
         if (participant.status === 'completed') {
           return {
             status: 200,
@@ -253,7 +367,9 @@ export function createStudyDesk(dataDir) {
               experimentId: experiment.id,
               experimentName: experiment.name,
               repetitions: Number(experiment.repetitions),
-              capturesPerRound: Number(experiment.captures_per_round),
+              capturesMin: bounds.min,
+              capturesMax: bounds.max,
+              capturesPerRound: bounds.max,
               round: Number(experiment.repetitions),
               condition: participant.condition,
               status: 'completed',
@@ -272,9 +388,11 @@ export function createStudyDesk(dataDir) {
             participantId: participant.id,
             experimentId: experiment.id,
             experimentName: experiment.name,
-            repetitions: Number(experiment.repetitions),
-            capturesPerRound: Number(experiment.captures_per_round),
-            round: Number(participant.current_round) || 1,
+              repetitions: Number(experiment.repetitions),
+              capturesMin: bounds.min,
+              capturesMax: bounds.max,
+              capturesPerRound: bounds.max,
+              round: Number(participant.current_round) || 1,
             condition: participant.condition,
             manualTrigger: participant.condition === 'button',
             status: 'in_progress',
@@ -287,30 +405,111 @@ export function createStudyDesk(dataDir) {
         const id = normalizeId(body.id);
         const participant = state.participants.find((entry) => entry.id === id);
         if (!participant) throw Object.assign(new Error('That ID was not recognized.'), { status: 404 });
-        const run = body.run;
-        const allowed = new Set(['correct', 'wrong', 'unknown', 'recording_failure']);
-        if (!run || run.condition !== participant.condition || !Number.isFinite(Number(run.gameScore)) || !Array.isArray(run.outcomes)) {
-          throw Object.assign(new Error('That game result does not belong to this session.'), { status: 400 });
-        }
-        const stored = {
-          id: String(run.id || randomId(8, 'RUN-')),
-          round: Number(run.round) || Number(participant.current_round) || 1,
-          recordedAt: Number(run.recordedAt) || Date.now(),
-          condition: participant.condition,
-          difficulty: String(run.difficulty || 'standard'),
-          gameScore: Number(run.gameScore),
-          outcomes: run.outcomes.filter((outcome) => outcome && allowed.has(outcome.result)).map((outcome) => ({
-            attemptId: String(outcome.attemptId || ''),
-            expectedGestureId: String(outcome.expectedGestureId || ''),
-            expectedGestureName: String(outcome.expectedGestureName || ''),
-            result: outcome.result,
-            predictedGestureId: outcome.predictedGestureId == null ? null : String(outcome.predictedGestureId),
-            predictedGestureName: outcome.predictedGestureName == null ? null : String(outcome.predictedGestureName),
-          })),
-        };
+        const stored = sanitizeStoredRun(body.run, participant);
+        if (!stored) throw Object.assign(new Error('That game result does not belong to this session.'), { status: 400 });
         const runs = readRuns(participant.id).filter((entry) => entry.id !== stored.id);
         runs.push(stored);
         writeRuns(participant.id, runs);
+        return { status: 200, body: { ok: true } };
+      }
+
+      if (route === 'POST /collection') {
+        const id = normalizeId(body.id);
+        const participant = state.participants.find((entry) => entry.id === id);
+        if (!participant) throw Object.assign(new Error('That ID was not recognized.'), { status: 404 });
+        const items = Array.isArray(body.items) ? body.items : [];
+        for (const item of items) {
+          const record = item?.record;
+          if (item?.kind === 'meta' && record) {
+            const sessionId = safeToken(record.sessionId, '');
+            if (!sessionId) continue;
+            writeJsonAtomic(path.join(collectionDir(sessionsDir, participant.id, sessionId), 'meta.json'), {
+              ...record,
+              participantId: participant.id,
+              condition: participant.condition,
+              updatedAt: nowIso(),
+            });
+          } else if (item?.kind === 'sample' && record) {
+            const sessionId = safeToken(record.sessionId, '');
+            const sampleId = safeToken(record.sampleId, '');
+            if (!sessionId || !sampleId) continue;
+            const filePath = path.join(collectionDir(sessionsDir, participant.id, sessionId), 'samples', `${sampleId}.json`);
+            if (fs.existsSync(filePath)) continue;
+            const points = sanitizePoints(record.points);
+            writeJsonAtomic(filePath, {
+              sampleId,
+              sessionId,
+              participantId: participant.id,
+              experimentId: participant.experiment_id,
+              condition: participant.condition,
+              round: finiteNumber(record.round, Number(participant.current_round) || 1),
+              phase: String(record.phase || ''),
+              gestureId: String(record.gestureId || ''),
+              gestureLabel: String(record.gestureLabel || ''),
+              capturedAt: finiteNumber(record.capturedAt, Date.now()),
+              recordingStartedAt: finiteNumber(record.recordingStartedAt, null),
+              recordingEndedAt: finiteNumber(record.recordingEndedAt, null),
+              triggeredAt: finiteNumber(record.triggeredAt, null),
+              preTriggerPointCount: finiteNumber(record.preTriggerPointCount, 0),
+              pointCount: points.length,
+              points,
+              signalSource: record.signalSource === 'live' ? 'live' : 'mock',
+              channelIndex: finiteNumber(record.channelIndex, 0),
+              sampleRateHz: finiteNumber(record.sampleRateHz, null),
+              settings: sanitizeSettings(record.settings),
+            });
+          } else if (item?.kind === 'event' && record && EVENT_TYPES.has(record.type)) {
+            const sessionId = safeToken(record.sessionId, '');
+            const eventId = safeToken(record.eventId, '');
+            if (!sessionId || !eventId) continue;
+            const filePath = path.join(collectionDir(sessionsDir, participant.id, sessionId), 'events', `${eventId}.json`);
+            if (fs.existsSync(filePath)) continue;
+            writeJsonAtomic(filePath, {
+              eventId,
+              sessionId,
+              participantId: participant.id,
+              condition: participant.condition,
+              round: finiteNumber(record.round, 1),
+              phase: String(record.phase || ''),
+              type: record.type,
+              at: finiteNumber(record.at, Date.now()),
+              sampleId: record.sampleId ? safeToken(record.sampleId, '') : null,
+              replacementSampleId: record.replacementSampleId ? safeToken(record.replacementSampleId, '') : null,
+              detail: String(record.detail || '').slice(0, 500),
+            });
+          } else if (item?.kind === 'training' && record) {
+            const sessionId = safeToken(record.sessionId, '');
+            const revisionId = safeToken(record.revisionId, '');
+            if (!sessionId || !revisionId) continue;
+            const filePath = path.join(collectionDir(sessionsDir, participant.id, sessionId), 'training', `${revisionId}.json`);
+            if (fs.existsSync(filePath)) continue;
+            writeJsonAtomic(filePath, {
+              revisionId,
+              sessionId,
+              participantId: participant.id,
+              condition: participant.condition,
+              round: finiteNumber(record.round, 1),
+              sampleIds: Array.isArray(record.sampleIds) ? record.sampleIds.map((sampleId) => safeToken(sampleId, '')).filter(Boolean) : [],
+              classifier: 'knn',
+              settings: sanitizeSettings(record.settings),
+              startedAt: finiteNumber(record.startedAt, null),
+              finishedAt: finiteNumber(record.finishedAt, null),
+              status: record.status === 'success' ? 'success' : 'failure',
+              error: String(record.error || '').slice(0, 500),
+            });
+          } else if (item?.kind === 'run') {
+            const stored = sanitizeStoredRun(record, participant);
+            if (!stored) continue;
+            const sessionId = stored.sessionId || 'session';
+            writeJsonAtomic(path.join(collectionDir(sessionsDir, participant.id, sessionId), 'runs', `${stored.id}.json`), {
+              ...stored,
+              participantId: participant.id,
+            });
+            const runs = readRuns(participant.id).filter((entry) => entry.id !== stored.id);
+            runs.push(stored);
+            writeRuns(participant.id, runs);
+          }
+        }
         return { status: 200, body: { ok: true } };
       }
 
@@ -328,11 +527,17 @@ export function createStudyDesk(dataDir) {
         }
         const trials = Array.isArray(body.trials) ? body.trials : [];
         const usableCount = trials.filter((trial) => trial?.quality === 'usable').length;
+        const savedByGesture = {};
+        for (const trial of trials) {
+          const label = String(trial?.gestureName || trial?.gestureId || 'unknown');
+          savedByGesture[label] = (savedByGesture[label] || 0) + 1;
+        }
         state.rounds.push({
           participant_id: participant.id,
           experiment_id: experiment.id,
           round: String(round),
           trial_count: String(trials.length),
+          saved_count: String(trials.length),
           usable_count: String(usableCount),
           completed_at: nowIso(),
         });
@@ -343,6 +548,8 @@ export function createStudyDesk(dataDir) {
           experimentId: experiment.id,
           condition: participant.condition,
           round,
+          savedCount: trials.length,
+          savedByGesture,
           completedAt: nowIso(),
           trials,
         }, null, 2)}\n`);
@@ -376,12 +583,18 @@ export function createStudyDesk(dataDir) {
         const name = String(body.name ?? '').trim();
         if (!name) throw Object.assign(new Error('Name the experiment.'), { status: 400 });
         const repetitions = integerInRange(body.repetitions ?? 3, 1, 30, 'Repetitions');
-        const capturesPerRound = integerInRange(body.capturesPerRound ?? 3, 1, 20, 'Captures per round');
+        const capturesMin = integerInRange(body.capturesMin ?? body.capturesPerRound ?? 3, 1, 20, 'Minimum samples');
+        const capturesMax = integerInRange(body.capturesMax ?? body.capturesPerRound ?? capturesMin, 1, 20, 'Maximum samples');
+        if (capturesMin > capturesMax) {
+          throw Object.assign(new Error('The minimum cannot be higher than the maximum.'), { status: 400 });
+        }
         const experiment = {
           id: randomId(6, 'EXP-'),
           name,
           repetitions: String(repetitions),
-          captures_per_round: String(capturesPerRound),
+          captures_per_round: String(capturesMax),
+          captures_min: String(capturesMin),
+          captures_max: String(capturesMax),
           status: 'active',
           notes: String(body.notes ?? '').trim(),
           created_at: nowIso(),
@@ -409,16 +622,28 @@ export function createStudyDesk(dataDir) {
           }
           experiment.status = body.status;
         }
-        if (body.repetitions !== undefined || body.capturesPerRound !== undefined) {
+        if (body.repetitions !== undefined || body.capturesMin !== undefined || body.capturesMax !== undefined || body.capturesPerRound !== undefined) {
           if (started) {
-            throw Object.assign(new Error('Reset participants before changing the round count or captures per round.'), { status: 409 });
+            throw Object.assign(new Error('Reset participants before changing the round count or sample limits.'), { status: 409 });
           }
           if (body.repetitions !== undefined) {
             experiment.repetitions = String(integerInRange(body.repetitions, 1, 30, 'Repetitions'));
           }
-          if (body.capturesPerRound !== undefined) {
-            experiment.captures_per_round = String(integerInRange(body.capturesPerRound, 1, 20, 'Captures per round'));
+          const current = sampleBounds(experiment);
+          const capturesMin = body.capturesMin !== undefined
+            ? integerInRange(body.capturesMin, 1, 20, 'Minimum samples')
+            : current.min;
+          const capturesMax = body.capturesMax !== undefined
+            ? integerInRange(body.capturesMax, 1, 20, 'Maximum samples')
+            : body.capturesPerRound !== undefined
+              ? integerInRange(body.capturesPerRound, 1, 20, 'Maximum samples')
+              : current.max;
+          if (capturesMin > capturesMax) {
+            throw Object.assign(new Error('The minimum cannot be higher than the maximum.'), { status: 400 });
           }
+          experiment.captures_min = String(capturesMin);
+          experiment.captures_max = String(capturesMax);
+          experiment.captures_per_round = String(capturesMax);
         }
         saveExperiments(state.experiments);
         return { status: 200, body: summarizeExperiment(experiment, state.participants) };
@@ -453,6 +678,7 @@ export function createStudyDesk(dataDir) {
                 participantId: round.participant_id,
                 round: Number(round.round),
                 trialCount: Number(round.trial_count),
+                savedCount: Number(round.saved_count || round.trial_count),
                 usableCount: Number(round.usable_count),
                 completedAt: round.completed_at,
               })),
@@ -508,6 +734,8 @@ export function createStudyDesk(dataDir) {
           for (const fileName of fs.readdirSync(sessionsDir)) {
             if (fileName.startsWith(`${id}-round-`)) fs.unlinkSync(path.join(sessionsDir, fileName));
           }
+          const collectionRoot = path.join(sessionsDir, id);
+          if (fs.existsSync(collectionRoot)) fs.rmSync(collectionRoot, { recursive: true, force: true });
         }
         const experiment = findExperiment(state, participant.experiment_id);
         return { status: 200, body: presentParticipant(participant, experiment.repetitions) };
@@ -539,6 +767,144 @@ export function createStudyDesk(dataDir) {
         }
         saveParticipants(state.participants.filter((entry) => entry.id !== id));
         return { status: 200, body: { ok: true } };
+      }
+
+      const collectionExportMatch = pathname.match(/^\/export\/([^/]+)\/collection$/);
+      if (collectionExportMatch && method === 'GET') {
+        const experiment = findExperiment(state, decodeURIComponent(collectionExportMatch[1]));
+        const mine = state.participants.filter((participant) => participant.experiment_id === experiment.id);
+        const sessions = [];
+        const samples = [];
+        const events = [];
+        const training = [];
+        const runs = [];
+        for (const participant of mine) {
+          const root = path.join(sessionsDir, participant.id, 'collection');
+          if (!fs.existsSync(root)) continue;
+          for (const sessionName of fs.readdirSync(root)) {
+            const dir = path.join(root, sessionName);
+            if (!fs.statSync(dir).isDirectory()) continue;
+            const metaPath = path.join(dir, 'meta.json');
+            if (fs.existsSync(metaPath)) {
+              try {
+                sessions.push(JSON.parse(fs.readFileSync(metaPath, 'utf8')));
+              } catch {
+                // Skip a session file that did not finish writing.
+              }
+            }
+            samples.push(...readJsonFiles(path.join(dir, 'samples')));
+            events.push(...readJsonFiles(path.join(dir, 'events')));
+            training.push(...readJsonFiles(path.join(dir, 'training')));
+            runs.push(...readJsonFiles(path.join(dir, 'runs')));
+          }
+        }
+        const sessionRows = sessions.map((session) => ({
+          session_id: session.sessionId,
+          participant_id: session.participantId,
+          experiment_id: session.experimentId,
+          condition: session.condition,
+          round: session.round,
+          phase: session.phase,
+          signal_source: session.signalSource,
+          channel: session.channelIndex,
+          sample_rate_hz: session.sampleRateHz ?? '',
+          device_name: session.deviceName ?? '',
+          segment_duration_ms: session.settings?.segmentDurationMs ?? '',
+          pre_trigger_window_ms: session.settings?.preTriggerWindowMs ?? '',
+          activity_threshold: session.settings?.activityThreshold ?? '',
+          cooldown_ms: session.settings?.cooldownMs ?? '',
+          captures_min: session.settings?.capturesMin ?? '',
+          captures_max: session.settings?.capturesMax ?? '',
+          feature_set_id: session.settings?.featureSetId ?? '',
+          classifier: session.settings?.classifier ?? '',
+          updated_at: session.updatedAt ?? '',
+        }));
+        const sampleRows = samples.map((sample) => ({
+          sample_id: sample.sampleId,
+          session_id: sample.sessionId,
+          participant_id: sample.participantId,
+          condition: sample.condition,
+          round: sample.round,
+          gesture_id: sample.gestureId,
+          gesture_label: sample.gestureLabel,
+          captured_at: sample.capturedAt,
+          recording_started_at: sample.recordingStartedAt,
+          recording_ended_at: sample.recordingEndedAt,
+          triggered_at: sample.triggeredAt,
+          pre_trigger_point_count: sample.preTriggerPointCount,
+          point_count: sample.pointCount,
+          signal_source: sample.signalSource,
+          channel: sample.channelIndex,
+          segment_duration_ms: sample.settings?.segmentDurationMs ?? '',
+          pre_trigger_window_ms: sample.settings?.preTriggerWindowMs ?? '',
+          activity_threshold: sample.settings?.activityThreshold ?? '',
+        }));
+        const eventRows = events.map((event) => ({
+          event_id: event.eventId,
+          session_id: event.sessionId,
+          participant_id: event.participantId,
+          condition: event.condition,
+          round: event.round,
+          phase: event.phase,
+          type: event.type,
+          at: event.at,
+          sample_id: event.sampleId ?? '',
+          replacement_sample_id: event.replacementSampleId ?? '',
+          detail: event.detail ?? '',
+        }));
+        const trainingRows = training.map((revision) => ({
+          revision_id: revision.revisionId,
+          session_id: revision.sessionId,
+          participant_id: revision.participantId,
+          condition: revision.condition,
+          round: revision.round,
+          sample_ids: Array.isArray(revision.sampleIds) ? revision.sampleIds.join('|') : '',
+          classifier: revision.classifier,
+          feature_set_id: revision.settings?.featureSetId ?? '',
+          segment_duration_ms: revision.settings?.segmentDurationMs ?? '',
+          started_at: revision.startedAt ?? '',
+          finished_at: revision.finishedAt ?? '',
+          status: revision.status,
+          error: revision.error ?? '',
+        }));
+        const runRows = runs.map((run) => ({
+          run_id: run.id,
+          session_id: run.sessionId ?? '',
+          participant_id: run.participantId ?? '',
+          condition: run.condition,
+          round: run.round,
+          difficulty: run.difficulty,
+          model_revision_id: run.modelRevisionId ?? '',
+          game_score: run.gameScore,
+          obstacle_success: run.obstacleSuccess == null ? '' : run.obstacleSuccess,
+          recorded_at: run.recordedAt,
+        }));
+        const attemptRows = runs.flatMap((run) => (Array.isArray(run.outcomes) ? run.outcomes : []).map((outcome) => ({
+          run_id: run.id,
+          attempt_id: outcome.attemptId,
+          expected_gesture_id: outcome.expectedGestureId,
+          expected_gesture_name: outcome.expectedGestureName,
+          result: outcome.result,
+          predicted_gesture_id: outcome.predictedGestureId ?? '',
+          predicted_gesture_name: outcome.predictedGestureName ?? '',
+        })));
+        const archive = zipStore([
+          { name: 'sessions.csv', data: toCsv(['session_id', 'participant_id', 'experiment_id', 'condition', 'round', 'phase', 'signal_source', 'channel', 'sample_rate_hz', 'device_name', 'segment_duration_ms', 'pre_trigger_window_ms', 'activity_threshold', 'cooldown_ms', 'captures_min', 'captures_max', 'feature_set_id', 'classifier', 'updated_at'], sessionRows) },
+          { name: 'samples.csv', data: toCsv(['sample_id', 'session_id', 'participant_id', 'condition', 'round', 'gesture_id', 'gesture_label', 'captured_at', 'recording_started_at', 'recording_ended_at', 'triggered_at', 'pre_trigger_point_count', 'point_count', 'signal_source', 'channel', 'segment_duration_ms', 'pre_trigger_window_ms', 'activity_threshold'], sampleRows) },
+          { name: 'events.csv', data: toCsv(['event_id', 'session_id', 'participant_id', 'condition', 'round', 'phase', 'type', 'at', 'sample_id', 'replacement_sample_id', 'detail'], eventRows) },
+          { name: 'training.csv', data: toCsv(['revision_id', 'session_id', 'participant_id', 'condition', 'round', 'sample_ids', 'classifier', 'feature_set_id', 'segment_duration_ms', 'started_at', 'finished_at', 'status', 'error'], trainingRows) },
+          { name: 'runs.csv', data: toCsv(['run_id', 'session_id', 'participant_id', 'condition', 'round', 'difficulty', 'model_revision_id', 'game_score', 'obstacle_success', 'recorded_at'], runRows) },
+          { name: 'attempts.csv', data: toCsv(['run_id', 'attempt_id', 'expected_gesture_id', 'expected_gesture_name', 'result', 'predicted_gesture_id', 'predicted_gesture_name'], attemptRows) },
+          { name: 'waveforms.json', data: JSON.stringify({ sessions, samples }, null, 2) },
+        ]);
+        return {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/zip',
+            'Content-Disposition': `attachment; filename="${experiment.id}-study-data.zip"`,
+          },
+          buffer: archive,
+        };
       }
 
       const exportMatch = pathname.match(/^\/export\/([^/]+)$/);
@@ -618,9 +984,9 @@ function attachStudyApi(middlewares, dataDir) {
         body,
       });
       res.statusCode = result.status;
-      if (result.text !== undefined) {
+      if (result.text !== undefined || result.buffer !== undefined) {
         for (const [key, value] of Object.entries(result.headers ?? {})) res.setHeader(key, value);
-        res.end(result.text);
+        res.end(result.buffer ?? result.text);
         return;
       }
       res.setHeader('Content-Type', 'application/json');

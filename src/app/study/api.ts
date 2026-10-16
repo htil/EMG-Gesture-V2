@@ -10,6 +10,8 @@ export interface Experiment {
   id: string;
   name: string;
   repetitions: number;
+  capturesMin: number;
+  capturesMax: number;
   capturesPerRound: number;
   status: ExperimentStatus;
   notes: string;
@@ -35,6 +37,7 @@ export interface RoundLog {
   participantId: string;
   round: number;
   trialCount: number;
+  savedCount: number;
   usableCount: number;
   completedAt: string;
 }
@@ -62,9 +65,13 @@ export interface ClientSession {
   participantId: string;
   experimentId: string;
   experimentName: string;
+  sessionId: string;
   repetitions: number;
+  capturesMin: number;
+  capturesMax: number;
   capturesPerRound: number;
   round: number;
+  modelRevisionId: string | null;
   condition: Assignment;
   manualTrigger: boolean;
   status: ParticipantStatus;
@@ -81,18 +88,29 @@ export function loadClientSession(): ClientSession | null {
   const raw = sessionStorage.getItem(SESSION_KEY);
   if (!raw) return null;
   try {
-    const parsed = JSON.parse(raw) as Omit<ClientSession, 'stage' | 'unlockedThrough' | 'condition' | 'runs'> & {
+    const parsed = JSON.parse(raw) as Omit<ClientSession, 'stage' | 'unlockedThrough' | 'condition' | 'runs' | 'sessionId' | 'capturesMin' | 'capturesMax' | 'modelRevisionId'> & {
       stage?: string;
       unlockedThrough?: string;
       condition?: Assignment;
       runs?: StoredGameRun[];
+      sessionId?: string;
+      capturesMin?: number;
+      capturesMax?: number;
+      modelRevisionId?: string | null;
     };
     const stage = parsed.stage === 'compare' ? 'results' : parsed.stage;
     const unlockedThrough = parsed.unlockedThrough === 'compare' ? 'results' : parsed.unlockedThrough;
+    const capturesMax = typeof parsed.capturesMax === 'number' ? parsed.capturesMax : parsed.capturesPerRound;
+    const capturesMin = typeof parsed.capturesMin === 'number' ? parsed.capturesMin : capturesMax;
     if (stage !== 'capture' && stage !== 'review' && stage !== 'game' && stage !== 'results' && stage !== 'done') return null;
     if (unlockedThrough !== 'capture' && unlockedThrough !== 'review' && unlockedThrough !== 'game' && unlockedThrough !== 'results') return null;
     return {
       ...parsed,
+      sessionId: parsed.sessionId || `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      capturesMin,
+      capturesMax,
+      capturesPerRound: capturesMax,
+      modelRevisionId: typeof parsed.modelRevisionId === 'string' ? parsed.modelRevisionId : null,
       stage,
       unlockedThrough,
       condition: parsed.condition === 'button' || parsed.condition === 'threshold'
@@ -172,7 +190,7 @@ export function listExperiments(pin: string) {
   return request<{ experiments: Experiment[] }>('/api/study/experiments', undefined, pin);
 }
 
-export function createExperiment(pin: string, input: { name: string; repetitions: number; capturesPerRound: number; notes: string }) {
+export function createExperiment(pin: string, input: { name: string; repetitions: number; capturesMin: number; capturesMax: number; notes: string }) {
   return request<Experiment>('/api/study/experiments', {
     method: 'POST',
     body: JSON.stringify(input),
@@ -184,7 +202,8 @@ export function updateExperiment(pin: string, id: string, patch: Partial<{
   notes: string;
   status: ExperimentStatus;
   repetitions: number;
-  capturesPerRound: number;
+  capturesMin: number;
+  capturesMax: number;
 }>) {
   return request<Experiment>(`/api/study/experiments/${encodeURIComponent(id)}`, {
     method: 'PATCH',
@@ -239,6 +258,23 @@ export async function downloadRoster(pin: string, experimentId: string) {
   const anchor = document.createElement('a');
   anchor.href = url;
   anchor.download = `${experimentId}-participants.csv`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+export async function downloadStudyData(pin: string, experimentId: string) {
+  const response = await fetch(`/api/study/export/${encodeURIComponent(experimentId)}/collection`, {
+    headers: { 'x-admin-pin': pin },
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({ error: 'Could not export the study data.' }));
+    throw new Error(payload.error || 'Could not export the study data.');
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `${experimentId}-study-data.zip`;
   anchor.click();
   URL.revokeObjectURL(url);
 }

@@ -3,7 +3,8 @@ import type { Gesture } from '../pipeline';
 export interface GestureQuota {
   gesture: Gesture;
   kept: number;
-  required: number;
+  minimum: number;
+  maximum: number;
   missing: number;
 }
 
@@ -21,18 +22,26 @@ export function sampleNumber<T extends { id: string; gestureId: string; captured
   return ordered.findIndex((item) => item.id === sampleId) + 1;
 }
 
-export function gestureQuotas<T extends { gestureId: string }>(gestures: Gesture[], samples: T[], required: number): GestureQuota[] {
+export function gestureQuotas<T extends { gestureId: string }>(
+  gestures: Gesture[],
+  samples: T[],
+  minimum: number,
+  maximum: number,
+): GestureQuota[] {
+  const min = Math.max(0, minimum);
+  const max = Math.max(min, maximum);
   return gestures.map((gesture) => {
     const kept = keptForGesture(samples, gesture.id);
     return {
       gesture,
       kept,
-      required,
-      missing: Math.max(0, required - kept),
+      minimum: min,
+      maximum: max,
+      missing: Math.max(0, min - kept),
     };
   });
 }
 
-export function samplesComplete<T extends { gestureId: string }>(gestures: Gesture[], samples: T[], required: number) {
-  return gestureQuotas(gestures, samples, required).every((row) => row.missing === 0);
+export function samplesComplete<T extends { gestureId: string }>(gestures: Gesture[], samples: T[], minimum: number) {
+  return gestures.every((gesture) => keptForGesture(samples, gesture.id) >= minimum);
 }
