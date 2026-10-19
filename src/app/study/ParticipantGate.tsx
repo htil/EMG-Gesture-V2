@@ -1,7 +1,88 @@
 import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router';
 import { Activity, ArrowRight } from 'lucide-react';
-import { joinStudy, loadClientSession, saveClientSession, type ClientSession } from './api';
+import { joinStudy, loadClientSession, saveClientSession, type ClientSession, type RestoredSession } from './api';
+
+type JoinedSession = Awaited<ReturnType<typeof joinStudy>>;
+
+function pickSession(joined: JoinedSession, existing: ClientSession | null): ClientSession {
+  const condition = joined.condition === 'button' || joined.condition === 'threshold'
+    ? joined.condition
+    : joined.manualTrigger ? 'button' : 'threshold';
+  const generation = joined.generation ?? 1;
+  const capturesMax = joined.capturesMax ?? joined.capturesPerRound ?? 1;
+  const capturesMin = joined.capturesMin ?? capturesMax;
+  const restored: RestoredSession | null = joined.restored
+    && joined.restored.generation === generation
+    && joined.restored.round === joined.round
+    ? joined.restored
+    : null;
+  const local = existing
+    && existing.participantId === joined.participantId
+    && existing.round === joined.round
+    && (existing.generation ?? 1) === generation
+    && existing.status !== 'completed'
+    ? existing
+    : null;
+  const shared = {
+    participantId: joined.participantId,
+    experimentId: joined.experimentId,
+    experimentName: joined.experimentName,
+    generation,
+    repetitions: joined.repetitions,
+    capturesMin,
+    capturesMax,
+    capturesPerRound: capturesMax,
+    round: joined.round,
+    condition,
+    manualTrigger: Boolean(joined.manualTrigger),
+    status: 'in_progress' as const,
+  };
+  const preferLocal = Boolean(local && (!restored || (local.updatedAt ?? 0) >= (restored.updatedAt ?? 0)));
+  if (preferLocal && local) {
+    return {
+      ...shared,
+      sessionId: local.sessionId,
+      updatedAt: local.updatedAt ?? 0,
+      modelRevisionId: local.modelRevisionId ?? null,
+      stage: local.stage === 'done' ? 'capture' : local.stage,
+      unlockedThrough: local.unlockedThrough,
+      trials: local.trials ?? [],
+      runs: local.runs?.length ? local.runs : restored?.runs ?? joined.runs ?? [],
+      pendingReplacements: local.pendingReplacements ?? [],
+      openCapture: local.openCapture ?? null,
+      trainingRun: local.trainingRun ?? null,
+    };
+  }
+  if (restored) {
+    return {
+      ...shared,
+      sessionId: restored.sessionId,
+      updatedAt: restored.updatedAt ?? 0,
+      modelRevisionId: restored.modelRevisionId,
+      stage: restored.stage === 'done' ? 'capture' : restored.stage,
+      unlockedThrough: restored.unlockedThrough,
+      trials: restored.trials ?? [],
+      runs: restored.runs?.length ? restored.runs : joined.runs ?? [],
+      pendingReplacements: restored.pendingReplacements ?? [],
+      openCapture: restored.openCapture?.sampleId ? restored.openCapture : null,
+      trainingRun: restored.trainingRun?.revisionId ? restored.trainingRun : null,
+    };
+  }
+  return {
+    ...shared,
+    sessionId: `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    updatedAt: Date.now(),
+    modelRevisionId: null,
+    stage: 'capture',
+    unlockedThrough: 'capture',
+    trials: [],
+    runs: joined.runs ?? [],
+    pendingReplacements: [],
+    openCapture: null,
+    trainingRun: null,
+  };
+}
 
 export default function ParticipantGate() {
   const navigate = useNavigate();
@@ -26,42 +107,7 @@ export default function ParticipantGate() {
         setFinished(true);
         return;
       }
-      const existing = loadClientSession();
-      const condition = joined.condition === 'button' || joined.condition === 'threshold'
-        ? joined.condition
-        : joined.manualTrigger ? 'button' : 'threshold';
-      const session: ClientSession = existing
-        && existing.participantId === joined.participantId
-        && existing.round === joined.round
-        && existing.status !== 'completed'
-        ? {
-            ...existing,
-            ...joined,
-            sessionId: existing.sessionId,
-            modelRevisionId: existing.modelRevisionId ?? null,
-            condition,
-            manualTrigger: Boolean(joined.manualTrigger),
-            runs: existing.runs?.length ? existing.runs : joined.runs ?? [],
-          }
-        : {
-            participantId: joined.participantId,
-            experimentId: joined.experimentId,
-            experimentName: joined.experimentName,
-            sessionId: `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-            repetitions: joined.repetitions,
-            capturesMin: joined.capturesMin ?? joined.capturesPerRound,
-            capturesMax: joined.capturesMax ?? joined.capturesPerRound,
-            capturesPerRound: joined.capturesMax ?? joined.capturesPerRound,
-            round: joined.round,
-            modelRevisionId: null,
-            condition,
-            manualTrigger: Boolean(joined.manualTrigger),
-            status: 'in_progress',
-            stage: 'capture',
-            unlockedThrough: 'capture',
-            trials: [],
-            runs: joined.runs ?? [],
-          };
+      const session = pickSession(joined, loadClientSession());
       saveClientSession(session);
       navigate('/session');
     } catch (joinError) {

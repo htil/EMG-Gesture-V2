@@ -61,11 +61,56 @@ export interface StoredTrial {
   };
 }
 
+export interface PendingReplacement {
+  round: number;
+  gestureId: string;
+  sampleId: string;
+}
+
+export interface OpenCapture {
+  sampleId: string;
+  gestureId: string;
+  gestureName: string;
+  round: number;
+  phase: 'countdown' | 'recording';
+}
+
+export interface TrainingRun {
+  revisionId: string;
+  startedAt: number;
+  round: number;
+  sampleIds: string[];
+}
+
+export interface RestoredSession {
+  sessionId: string;
+  round: number;
+  stage: StudyStage;
+  unlockedThrough: FlowStage;
+  trials: StoredTrial[];
+  pendingReplacements: PendingReplacement[];
+  openCapture: OpenCapture | null;
+  trainingRun: TrainingRun | null;
+  modelRevisionId: string | null;
+  runs: StoredGameRun[];
+  updatedAt: number;
+  generation: number;
+}
+
+export interface SaveAlert {
+  participantId: string;
+  message: string;
+  pending: number;
+  at: string;
+}
+
 export interface ClientSession {
   participantId: string;
   experimentId: string;
   experimentName: string;
   sessionId: string;
+  generation: number;
+  updatedAt: number;
   repetitions: number;
   capturesMin: number;
   capturesMax: number;
@@ -79,44 +124,67 @@ export interface ClientSession {
   unlockedThrough: FlowStage;
   trials: StoredTrial[];
   runs: StoredGameRun[];
+  pendingReplacements: PendingReplacement[];
+  openCapture: OpenCapture | null;
+  trainingRun: TrainingRun | null;
 }
 
 const SESSION_KEY = 'emg-study-session';
 const PIN_KEY = 'emg-admin-pin';
 
+function readSessionRaw() {
+  try {
+    const stored = localStorage.getItem(SESSION_KEY) ?? sessionStorage.getItem(SESSION_KEY);
+    if (stored && !localStorage.getItem(SESSION_KEY)) localStorage.setItem(SESSION_KEY, stored);
+    return stored;
+  } catch {
+    return null;
+  }
+}
+
 export function loadClientSession(): ClientSession | null {
-  const raw = sessionStorage.getItem(SESSION_KEY);
+  const raw = readSessionRaw();
   if (!raw) return null;
   try {
-    const parsed = JSON.parse(raw) as Omit<ClientSession, 'stage' | 'unlockedThrough' | 'condition' | 'runs' | 'sessionId' | 'capturesMin' | 'capturesMax' | 'modelRevisionId'> & {
+    const parsed = JSON.parse(raw) as Partial<ClientSession> & {
       stage?: string;
       unlockedThrough?: string;
-      condition?: Assignment;
-      runs?: StoredGameRun[];
-      sessionId?: string;
-      capturesMin?: number;
-      capturesMax?: number;
-      modelRevisionId?: string | null;
     };
-    const stage = parsed.stage === 'compare' ? 'results' : parsed.stage;
-    const unlockedThrough = parsed.unlockedThrough === 'compare' ? 'results' : parsed.unlockedThrough;
-    const capturesMax = typeof parsed.capturesMax === 'number' ? parsed.capturesMax : parsed.capturesPerRound;
+    const rawStage = String(parsed.stage ?? '');
+    const rawUnlocked = String(parsed.unlockedThrough ?? '');
+    const stage = rawStage === 'compare' ? 'results' : rawStage;
+    const unlockedThrough = rawUnlocked === 'compare' ? 'results' : rawUnlocked;
+    const capturesMax = typeof parsed.capturesMax === 'number'
+      ? parsed.capturesMax
+      : (typeof parsed.capturesPerRound === 'number' ? parsed.capturesPerRound : 1);
     const capturesMin = typeof parsed.capturesMin === 'number' ? parsed.capturesMin : capturesMax;
     if (stage !== 'capture' && stage !== 'review' && stage !== 'game' && stage !== 'results' && stage !== 'done') return null;
     if (unlockedThrough !== 'capture' && unlockedThrough !== 'review' && unlockedThrough !== 'game' && unlockedThrough !== 'results') return null;
     return {
-      ...parsed,
+      participantId: String(parsed.participantId ?? ''),
+      experimentId: String(parsed.experimentId ?? ''),
+      experimentName: String(parsed.experimentName ?? ''),
       sessionId: parsed.sessionId || `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      generation: typeof parsed.generation === 'number' ? parsed.generation : 1,
+      updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0,
+      repetitions: Number(parsed.repetitions) || 1,
       capturesMin,
       capturesMax,
       capturesPerRound: capturesMax,
+      round: Number(parsed.round) || 1,
       modelRevisionId: typeof parsed.modelRevisionId === 'string' ? parsed.modelRevisionId : null,
-      stage,
-      unlockedThrough,
       condition: parsed.condition === 'button' || parsed.condition === 'threshold'
         ? parsed.condition
         : parsed.manualTrigger ? 'button' : 'threshold',
+      manualTrigger: Boolean(parsed.manualTrigger),
+      status: parsed.status === 'completed' || parsed.status === 'assigned' ? parsed.status : 'in_progress',
+      stage,
+      unlockedThrough,
+      trials: Array.isArray(parsed.trials) ? parsed.trials : [],
       runs: Array.isArray(parsed.runs) ? parsed.runs : [],
+      pendingReplacements: Array.isArray(parsed.pendingReplacements) ? parsed.pendingReplacements : [],
+      openCapture: parsed.openCapture ?? null,
+      trainingRun: parsed.trainingRun ?? null,
     };
   } catch {
     return null;
@@ -124,10 +192,16 @@ export function loadClientSession(): ClientSession | null {
 }
 
 export function saveClientSession(session: ClientSession) {
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  const stamped = { ...session, updatedAt: Date.now() };
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify(stamped));
+  } catch {
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(stamped));
+  }
 }
 
 export function clearClientSession() {
+  localStorage.removeItem(SESSION_KEY);
   sessionStorage.removeItem(SESSION_KEY);
 }
 
@@ -156,9 +230,10 @@ async function request<T>(path: string, init?: RequestInit, pin?: string): Promi
 }
 
 export function joinStudy(id: string) {
-  return request<Omit<ClientSession, 'stage' | 'trials' | 'manualTrigger' | 'unlockedThrough'> & {
+  return request<Omit<ClientSession, 'stage' | 'trials' | 'manualTrigger' | 'unlockedThrough' | 'pendingReplacements' | 'openCapture' | 'trainingRun' | 'updatedAt'> & {
     manualTrigger?: boolean;
     runs?: StoredGameRun[];
+    restored?: RestoredSession | null;
   }>('/api/study/join', {
     method: 'POST',
     body: JSON.stringify({ id }),
@@ -216,7 +291,7 @@ export function deleteExperiment(pin: string, id: string) {
 }
 
 export function listParticipants(pin: string, experimentId: string) {
-  return request<{ participants: Participant[]; rounds: RoundLog[] }>(
+  return request<{ participants: Participant[]; rounds: RoundLog[]; saveAlerts?: SaveAlert[] }>(
     `/api/study/participants?experimentId=${encodeURIComponent(experimentId)}`,
     undefined,
     pin,

@@ -88,7 +88,8 @@ export function markDatasetChanged(scopeId: string, condition: Assignment, trial
     engines.delete(key);
   }
 
-  const trainingStillRunning = trainingInFlight.get(key) === trainTokens.get(key);
+  const inFlightToken = trainingInFlight.get(key);
+  const trainingStillRunning = inFlightToken !== undefined && inFlightToken === trainTokens.get(key);
   if (current.status === 'training' && datasetSame && trainingStillRunning) return current;
   if (current.status === 'training' && datasetSame) {
     engines.delete(key);
@@ -139,6 +140,12 @@ export function isModelReady(scopeId: string, condition: Assignment, trialIds: s
     && fingerprint(state.datasetTrialIds) === fingerprint(trialIds)
     && fingerprint(state.trainedTrialIds) === fingerprint(trialIds)
     && engines.has(key);
+}
+
+export function isTrainingInFlight(scopeId: string, condition: Assignment) {
+  const key = storageKey(scopeId, condition);
+  const inFlightToken = trainingInFlight.get(key);
+  return inFlightToken !== undefined && inFlightToken === trainTokens.get(key);
 }
 
 export function getConditionPredictionEngine(

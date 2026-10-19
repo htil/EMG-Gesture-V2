@@ -28,6 +28,7 @@ export interface StoredGameRun extends GameRunHandoff {
   recordedAt: number;
   modelRevisionId?: string | null;
   obstacleSuccess?: boolean | null;
+  generation?: number;
 }
 
 type GameRunListener = (handoff: GameRunHandoff) => void;

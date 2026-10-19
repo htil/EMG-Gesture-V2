@@ -29,6 +29,7 @@ import { useGestureRecorder, type CaptureTriggerMode } from '../useGestureRecord
 import { useSignalSource, type SignalPoint, type SignalSourceMode } from '../useSignalSource';
 import {
   isModelReady,
+  isTrainingInFlight,
   getConditionPredictionEngine,
   markDatasetChanged,
   trainConditionModel,
@@ -41,10 +42,8 @@ import {
   collectionId,
   makeEvent,
   recordCollection,
-  retryCollectionSave,
-  subscribeCollectionStatus,
+  whenCollectionSaved,
   type CollectionContext,
-  type CollectionStatus,
 } from './collection';
 import { DEFAULT_DIFFICULTY, registerGameRunListener, type StoredGameRun } from './gameHandoff';
 import SampleGraphPanel from './SampleGraphPanel';
@@ -67,7 +66,9 @@ const DISPLAY_WINDOW_MS = 4000;
 const DEFAULT_SEGMENT_DURATION_MS = 1200;
 const DEFAULT_PRE_TRIGGER_WINDOW_MS = 175;
 const DEFAULT_ACTIVITY_THRESHOLD = 0.6;
+const DEFAULT_COUNTDOWN_MS = 3000;
 const RECORDER_COOLDOWN_MS = 450;
+const recoveredInterruptions = new Set<string>();
 
 const FLOW: FlowStage[] = ['capture', 'review', 'game', 'results'];
 
@@ -205,7 +206,7 @@ function LivePanel({
   showGuide,
   thresholdGuideValue,
   segmentDurationMs,
-  showCaptureTimer,
+  overlay,
 }: {
   signalData: SignalPoint[];
   recordingSignalData: SignalPoint[];
@@ -215,7 +216,7 @@ function LivePanel({
   showGuide: boolean;
   thresholdGuideValue: number;
   segmentDurationMs: number;
-  showCaptureTimer: boolean;
+  overlay: { label: string; text: string } | null;
 }) {
   const chartEnd = Math.max(
     signalData[signalData.length - 1]?.time ?? 0,
@@ -254,13 +255,11 @@ function LivePanel({
         </div>
       </div>
       <div className="relative h-[300px] px-2 pt-3">
-        {showCaptureTimer && (
+        {overlay && (
           <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
             <div className="rounded-3xl border border-cyan-300/30 bg-slate-950/80 px-8 py-5 text-center shadow-2xl backdrop-blur-sm">
-              <p className="text-[10px] uppercase tracking-[0.2em] text-cyan-200">{isRecording ? 'Recording' : 'Starting'}</p>
-              <p className="mt-1 text-5xl font-light tabular-nums text-white">
-                {Math.max(0, (segmentDurationMs - recordingProgress * segmentDurationMs) / 1000).toFixed(1)}s
-              </p>
+              <p className="text-[10px] uppercase tracking-[0.2em] text-cyan-200">{overlay.label}</p>
+              <p className="mt-1 text-5xl font-light tabular-nums text-white">{overlay.text}</p>
             </div>
           </div>
         )}
@@ -434,9 +433,11 @@ export default function StudySession() {
   const [segmentDurationMs, setSegmentDurationMs] = useState(DEFAULT_SEGMENT_DURATION_MS);
   const [preTriggerWindowMs, setPreTriggerWindowMs] = useState(DEFAULT_PRE_TRIGGER_WINDOW_MS);
   const [activityThreshold, setActivityThreshold] = useState(DEFAULT_ACTIVITY_THRESHOLD);
+  const [countdownMs, setCountdownMs] = useState(DEFAULT_COUNTDOWN_MS);
+  const [countdownEndsAt, setCountdownEndsAt] = useState<number | null>(null);
+  const [countdownRemainingMs, setCountdownRemainingMs] = useState(0);
   const [captureTimerOn, setCaptureTimerOn] = useState(false);
   const [inspectedTrialId, setInspectedTrialId] = useState<string | null>(null);
-  const [collectionStatus, setCollectionStatus] = useState<CollectionStatus>({ error: '', pending: 0 });
   const [gestureId, setGestureId] = useState(DEFAULT_GESTURES[0].id);
   const [manualTriggerToken, setManualTriggerToken] = useState(0);
   const [notice, setNotice] = useState('Start the stream, then perform the gesture.');
@@ -491,7 +492,8 @@ export default function StudySession() {
   const selectedKept = keptForGesture(trials, gestureId);
   const selectedFull = selectedKept >= capturesMax;
   const roundComplete = samplesComplete(DEFAULT_GESTURES, trials, capturesMin);
-  const armed = stage === 'capture' && isStreaming && !selectedFull;
+  const countingDown = countdownEndsAt !== null;
+  const armed = stage === 'capture' && isStreaming && !selectedFull && !countingDown;
   const waveDomain = useMemo(() => sharedWaveDomain(
     trials.map((trial) => displayEnvelopeWaveform(
       alignWaveform(trial.points, trial.preTriggerPointCount, trial.triggeredAt),
@@ -528,41 +530,106 @@ export default function StudySession() {
   sessionRef.current = session;
   const logRef = useRef<CollectionContext | null>(null);
   const handledSegment = useRef<typeof completedSegment>(null);
-  const openCapture = useRef<{ sampleId: string; gestureId: string; gestureName: string } | null>(null);
-  const replacements = useRef<Map<string, string[]>>(new Map());
+  const openCapture = useRef<{ sampleId: string; gestureId: string; gestureName: string; started: boolean } | null>(null);
   const reportedSignalError = useRef('');
   const revisionRef = useRef<string | null>(session?.modelRevisionId ?? null);
+  const finishToken = useRef(0);
   const sawRecording = useRef(false);
+  const captureSetupKey = useRef('');
 
-  const pressCapture = useCallback(() => {
-    setManualTriggerToken((token) => token + 1);
-    setCaptureTimerOn(true);
-  }, []);
-
-  useEffect(() => subscribeCollectionStatus(setCollectionStatus), []);
-
-  useEffect(() => {
-    revisionRef.current = session?.modelRevisionId ?? null;
-  }, [session?.modelRevisionId]);
-
-  useEffect(() => {
+  const cancelOpenCapture = useCallback((detail: string) => {
+    const open = openCapture.current;
+    openCapture.current = null;
+    setCountdownEndsAt(null);
+    setCountdownRemainingMs(0);
     setCaptureTimerOn(false);
     sawRecording.current = false;
-  }, [activityThreshold, channelIndex, gestureId, isStreaming, preTriggerWindowMs, segmentDurationMs, session?.round, signalMode]);
+    if (!open) return;
+    const context = logRef.current;
+    if (context) {
+      void recordCollection(context.participantId, [{
+        kind: 'event',
+        record: makeEvent(context, 'capture_cancelled', open.sampleId, null, detail),
+      }]);
+    }
+    setSession((current) => (current ? { ...current, openCapture: null } : current));
+  }, []);
+
+  const pressCapture = useCallback(() => {
+    const current = sessionRef.current;
+    if (!current || !manualTrigger || !armed || countdownEndsAt !== null || isRecording) return;
+    const sampleId = collectionId('sample');
+    const next = {
+      sampleId,
+      gestureId: gesture.id,
+      gestureName: gesture.name,
+      round: current.round,
+      phase: 'countdown' as const,
+    };
+    openCapture.current = { sampleId, gestureId: gesture.id, gestureName: gesture.name, started: false };
+    setSession((previous) => (previous ? { ...previous, openCapture: next } : previous));
+    if (countdownMs <= 0) {
+      openCapture.current.started = true;
+      setSession((previous) => (previous?.openCapture ? { ...previous, openCapture: { ...previous.openCapture, phase: 'recording' } } : previous));
+      setManualTriggerToken((token) => token + 1);
+      setCaptureTimerOn(true);
+      return;
+    }
+    setCountdownEndsAt(Date.now() + countdownMs);
+  }, [armed, countdownEndsAt, countdownMs, gesture.id, gesture.name, isRecording, manualTrigger]);
 
   useEffect(() => {
-    if (isRecording) sawRecording.current = true;
-    if (!isRecording && sawRecording.current) {
-      sawRecording.current = false;
+    if (countdownEndsAt === null) return undefined;
+    let finished = false;
+    let timer = 0;
+    const tick = () => {
+      if (finished) return;
+      const left = countdownEndsAt - Date.now();
+      if (left > 0) {
+        setCountdownRemainingMs(left);
+        return;
+      }
+      finished = true;
+      window.clearInterval(timer);
+      setCountdownEndsAt(null);
+      setCountdownRemainingMs(0);
+      if (openCapture.current) openCapture.current.started = true;
+      setSession((current) => (
+        current?.openCapture
+          ? { ...current, openCapture: { ...current.openCapture, phase: 'recording' } }
+          : current
+      ));
+      setManualTriggerToken((token) => token + 1);
+      setCaptureTimerOn(true);
+    };
+    timer = window.setInterval(tick, 100);
+    tick();
+    return () => {
+      finished = true;
+      window.clearInterval(timer);
+    };
+  }, [countdownEndsAt]);
+
+  useEffect(() => {
+    const key = `${gestureId}|${channelIndex}|${signalMode}|${isStreaming}|${session?.round ?? ''}|${segmentDurationMs}|${preTriggerWindowMs}|${activityThreshold}`;
+    if (!captureSetupKey.current) {
+      captureSetupKey.current = key;
+      return;
+    }
+    if (captureSetupKey.current === key) return;
+    captureSetupKey.current = key;
+    if (openCapture.current && !sawRecording.current) {
+      cancelOpenCapture('Countdown stopped before recording started.');
+    } else if (sawRecording.current && !isRecording) {
       setCaptureTimerOn(false);
     }
-  }, [isRecording]);
+  }, [activityThreshold, cancelOpenCapture, channelIndex, gestureId, isRecording, isStreaming, preTriggerWindowMs, segmentDurationMs, session?.round, signalMode]);
 
   useEffect(() => {
     const context = logRef.current;
     if (!context || context.phase === 'done') return;
     void recordCollection(context.participantId, [{ kind: 'meta', record: context }]);
-  }, [session?.sessionId, session?.round, session?.stage, session?.condition, signalMode, channelIndex, segmentDurationMs, preTriggerWindowMs, activityThreshold, liveSampleRateHz, liveDeviceName, capturesMin, capturesMax]);
+  }, [session?.sessionId, session?.round, session?.stage, session?.condition, session?.generation, signalMode, channelIndex, segmentDurationMs, preTriggerWindowMs, countdownMs, activityThreshold, liveSampleRateHz, liveDeviceName, capturesMin, capturesMax]);
 
   useEffect(() => {
     const context = logRef.current;
@@ -573,14 +640,17 @@ export default function StudySession() {
       handledSegment.current = completedSegment;
       const open = openCapture.current;
       openCapture.current = null;
+      sawRecording.current = false;
+      setCaptureTimerOn(false);
       const sampleId = open?.sampleId ?? collectionId('sample');
       const gestureIdForSample = open?.gestureId ?? gesture.id;
       const gestureName = open?.gestureName ?? gesture.name;
       const metrics = calculateMetrics(completedSegment.points);
       const points = completedSegment.points;
-      const queue = replacements.current.get(gestureIdForSample) ?? [];
-      const replacedId = queue.shift() ?? null;
-      if (queue.length === 0) replacements.current.delete(gestureIdForSample);
+      const pending = current.pendingReplacements ?? [];
+      const replacementIndex = pending.findIndex((item) => item.round === current.round && item.gestureId === gestureIdForSample);
+      const replacedId = replacementIndex >= 0 ? pending[replacementIndex].sampleId : null;
+      const nextPending = replacementIndex >= 0 ? pending.filter((_, index) => index !== replacementIndex) : pending;
       const savedForGesture = keptForGesture(current.trials, gestureIdForSample) + 1;
       const sample = {
         sampleId,
@@ -602,6 +672,7 @@ export default function StudySession() {
         signalSource: context.signalSource,
         channelIndex: context.channelIndex,
         sampleRateHz: context.sampleRateHz,
+        generation: context.generation,
         settings: context.settings,
       };
       const items = [
@@ -625,7 +696,7 @@ export default function StudySession() {
           quality: points.length >= 12 && metrics.durationMs >= segmentDurationMs * 0.85 ? 'usable' : 'review',
           metrics,
         };
-        return { ...previous, trials: [...previous.trials, trial] };
+        return { ...previous, trials: [...previous.trials, trial], pendingReplacements: nextPending, openCapture: null };
       });
       if (savedForGesture >= capturesMax) setNotice(`${gestureName} has ${savedForGesture} examples, the maximum.`);
       else if (savedForGesture >= capturesMin) setNotice(`${gestureName} sample ${savedForGesture} kept. The minimum is in, and you can keep up to ${capturesMax}.`);
@@ -634,25 +705,40 @@ export default function StudySession() {
       return;
     }
 
+    if (isRecording && openCapture.current && !openCapture.current.started) {
+      openCapture.current.started = true;
+    }
+
     if (isRecording && !openCapture.current) {
       const sampleId = collectionId('sample');
-      openCapture.current = { sampleId, gestureId: gesture.id, gestureName: gesture.name };
+      openCapture.current = { sampleId, gestureId: gesture.id, gestureName: gesture.name, started: true };
+      setSession((previous) => (previous ? {
+        ...previous,
+        openCapture: {
+          sampleId,
+          gestureId: gesture.id,
+          gestureName: gesture.name,
+          round: previous.round,
+          phase: 'recording',
+        },
+      } : previous));
+    }
+
+    if (isRecording && openCapture.current?.started && !sawRecording.current) {
+      sawRecording.current = true;
       void recordCollection(context.participantId, [{
         kind: 'event',
-        record: makeEvent(context, 'capture_started', sampleId, null, ''),
+        record: makeEvent(context, 'capture_started', openCapture.current.sampleId, null, ''),
       }]);
       return;
     }
 
-    if (!isRecording && openCapture.current && !completedSegment) {
-      const open = openCapture.current;
-      openCapture.current = null;
-      void recordCollection(context.participantId, [{
-        kind: 'event',
-        record: makeEvent(context, 'capture_cancelled', open.sampleId, null, 'Recording stopped before a sample was saved.'),
-      }]);
+    if (!isRecording && sawRecording.current && !completedSegment) {
+      sawRecording.current = false;
+      setCaptureTimerOn(false);
+      cancelOpenCapture('Recording stopped before a sample was saved.');
     }
-  }, [acknowledgeCompletedSegment, capturesMax, capturesMin, completedSegment, gesture.id, gesture.name, isRecording, segmentDurationMs]);
+  }, [acknowledgeCompletedSegment, cancelOpenCapture, capturesMax, capturesMin, completedSegment, gesture.id, gesture.name, isRecording, segmentDurationMs]);
 
   useEffect(() => {
     if (liveConnectionStatus !== 'error') {
@@ -718,8 +804,115 @@ export default function StudySession() {
         unlockedThrough: 'results',
       };
     });
-    void recordCollection(current.participantId, [{ kind: 'run', record: run }]);
+    void recordCollection(current.participantId, [{ kind: 'run', record: { ...run, generation: current.generation } }]);
   }), []);
+
+  useEffect(() => () => {
+    finishToken.current += 1;
+  }, []);
+
+  useEffect(() => {
+    const current = sessionRef.current;
+    const context = logRef.current;
+    if (!current || !context) return;
+    const open = current.openCapture;
+    if (open?.sampleId && open.round === current.round) {
+      const key = `capture:${current.generation}:${current.sessionId}:${open.sampleId}`;
+      if (!recoveredInterruptions.has(key)) {
+        recoveredInterruptions.add(key);
+        const detail = open.phase === 'countdown'
+          ? 'Countdown stopped before recording started.'
+          : 'Recording stopped before a sample was saved.';
+        void recordCollection(current.participantId, [{
+          kind: 'event',
+          record: makeEvent(context, 'capture_cancelled', open.sampleId, null, detail),
+        }]);
+      }
+      setSession((previous) => (previous?.openCapture ? { ...previous, openCapture: null } : previous));
+    }
+    const training = current.trainingRun;
+    if (training?.revisionId && training.round === current.round && !isTrainingInFlight(current.participantId, current.condition)) {
+      const key = `train:${current.generation}:${current.sessionId}:${training.revisionId}`;
+      if (!recoveredInterruptions.has(key)) {
+        recoveredInterruptions.add(key);
+        void recordCollection(current.participantId, [{
+          kind: 'training',
+          record: {
+            revisionId: training.revisionId,
+            sessionId: context.sessionId,
+            participantId: context.participantId,
+            generation: context.generation,
+            condition: context.condition,
+            round: training.round,
+            sampleIds: training.sampleIds,
+            classifier: 'knn',
+            settings: context.settings,
+            startedAt: training.startedAt,
+            finishedAt: Date.now(),
+            status: 'failure',
+            error: 'Training stopped before the model was ready.',
+          },
+        }]);
+      }
+      setTraining(false);
+      setSession((previous) => (previous?.trainingRun ? { ...previous, trainingRun: null } : previous));
+    }
+  }, [session?.sessionId, session?.generation]);
+
+  useEffect(() => {
+    if (!session) return undefined;
+    const timer = window.setTimeout(() => {
+      const current = sessionRef.current;
+      const context = logRef.current;
+      if (!current || !context || current.stage === 'done') return;
+      void recordCollection(current.participantId, [{
+        kind: 'checkpoint',
+        record: {
+          sessionId: current.sessionId,
+          generation: current.generation,
+          round: current.round,
+          stage: current.stage,
+          unlockedThrough: current.unlockedThrough,
+          modelRevisionId: current.modelRevisionId,
+          trials: current.trials,
+          pendingReplacements: current.pendingReplacements ?? [],
+          openCapture: current.openCapture,
+          trainingRun: current.trainingRun,
+          updatedAt: Date.now(),
+        },
+      }]);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [session]);
+
+  useEffect(() => {
+    const send = () => {
+      const current = sessionRef.current;
+      if (!current || current.stage === 'done') return;
+      const body = JSON.stringify({
+        id: current.participantId,
+        items: [{
+          kind: 'checkpoint',
+          record: {
+            sessionId: current.sessionId,
+            generation: current.generation,
+            round: current.round,
+            stage: current.stage,
+            unlockedThrough: current.unlockedThrough,
+            modelRevisionId: current.modelRevisionId,
+            trials: current.trials,
+            pendingReplacements: current.pendingReplacements ?? [],
+            openCapture: current.openCapture,
+            trainingRun: current.trainingRun,
+            updatedAt: Date.now(),
+          },
+        }],
+      });
+      navigator.sendBeacon('/api/study/collection', new Blob([body], { type: 'application/json' }));
+    };
+    window.addEventListener('pagehide', send);
+    return () => window.removeEventListener('pagehide', send);
+  }, []);
 
   if (session) {
     logRef.current = {
@@ -733,9 +926,11 @@ export default function StudySession() {
       channelIndex,
       sampleRateHz: liveSampleRateHz,
       deviceName: liveDeviceName,
+      generation: session.generation,
       settings: {
         segmentDurationMs,
         preTriggerWindowMs,
+        countdownMs,
         activityThreshold,
         cooldownMs: RECORDER_COOLDOWN_MS,
         capturesMin,
@@ -797,12 +992,16 @@ export default function StudySession() {
   const deleteKeptTrial = (trialId: string) => {
     const trial = session.trials.find((item) => item.id === trialId);
     if (!trial) return;
-    const queue = replacements.current.get(trial.gestureId) ?? [];
-    queue.push(trial.id);
-    replacements.current.set(trial.gestureId, queue);
     setSession((current) => {
       if (!current) return current;
-      return { ...current, trials: current.trials.filter((item) => item.id !== trialId) };
+      return {
+        ...current,
+        trials: current.trials.filter((item) => item.id !== trialId),
+        pendingReplacements: [
+          ...(current.pendingReplacements ?? []),
+          { round: current.round, gestureId: trial.gestureId, sampleId: trial.id },
+        ],
+      };
     });
     if (inspectedTrialId === trialId) setInspectedTrialId(null);
     const context = logRef.current;
@@ -822,6 +1021,7 @@ export default function StudySession() {
     const startedAt = Date.now();
     const revisionId = collectionId('rev');
     const sampleIds = trials.map((trial) => trial.id);
+    setSession((current) => (current ? { ...current, trainingRun: { revisionId, startedAt, round: current.round, sampleIds } } : current));
     try {
       const next = await trainConditionModel(session.participantId, condition, trials, DEFAULT_GESTURES, segmentDurationMs);
       const success = next.status === 'ready';
@@ -833,6 +1033,7 @@ export default function StudySession() {
             revisionId,
             sessionId: context.sessionId,
             participantId: context.participantId,
+            generation: context.generation,
             condition,
             round: context.round,
             sampleIds,
@@ -845,10 +1046,12 @@ export default function StudySession() {
           },
         }]);
       }
-      if (success) {
-        revisionRef.current = revisionId;
-        setSession((current) => (current ? { ...current, modelRevisionId: revisionId } : current));
-      }
+      if (success) revisionRef.current = revisionId;
+      setSession((current) => (current ? {
+        ...current,
+        modelRevisionId: success ? revisionId : current.modelRevisionId,
+        trainingRun: null,
+      } : current));
       setModelState(next);
       setNotice(success ? 'Model ready for this condition.' : next.error || 'The model is not ready.');
     } finally {
@@ -877,27 +1080,48 @@ export default function StudySession() {
 
   const finishRound = async () => {
     if (!roundComplete) return;
+    const token = ++finishToken.current;
+    const snapshot = session;
     setSaving(true);
     setSaveError('');
     try {
-      const result = await saveRound(session.participantId, session.round, trials);
-      if (result.status === 'completed') {
-        setSession({ ...session, status: 'completed', stage: 'done', trials: [] });
-        return;
+      while (finishToken.current === token) {
+        try {
+          await whenCollectionSaved();
+          if (finishToken.current !== token) return;
+          const result = await saveRound(snapshot.participantId, snapshot.round, snapshot.trials);
+          if (finishToken.current !== token) return;
+          if (result.status === 'completed') {
+            setSession({
+              ...snapshot,
+              status: 'completed',
+              stage: 'done',
+              trials: [],
+              pendingReplacements: [],
+              openCapture: null,
+              trainingRun: null,
+            });
+          } else {
+            setSession({
+              ...snapshot,
+              status: 'in_progress',
+              stage: 'capture',
+              unlockedThrough: 'capture',
+              round: result.round,
+              trials: [],
+              pendingReplacements: [],
+              openCapture: null,
+              trainingRun: null,
+            });
+            setNotice('Next round is ready. Start the stream if it is paused.');
+          }
+          return;
+        } catch {
+          await new Promise((resolve) => window.setTimeout(resolve, 2000));
+        }
       }
-      setSession({
-        ...session,
-        status: 'in_progress',
-        stage: 'capture',
-        unlockedThrough: 'capture',
-        round: result.round,
-        trials: [],
-      });
-      setNotice('Next round is ready. Start the stream if it is paused.');
-    } catch (error) {
-      setSaveError(error instanceof Error ? error.message : 'This round could not be saved.');
     } finally {
-      setSaving(false);
+      if (finishToken.current === token) setSaving(false);
     }
   };
 
@@ -940,14 +1164,6 @@ export default function StudySession() {
       </header>
 
       <main className="relative mx-auto max-w-6xl space-y-5 px-4 py-6 md:px-6">
-        {collectionStatus.error && (
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-rose-300/30 bg-rose-400/10 px-4 py-3 text-sm text-rose-100">
-            <span>{collectionStatus.error}</span>
-            <button type="button" onClick={() => void retryCollectionSave()} className="rounded-lg bg-rose-100 px-3 py-1.5 text-xs font-medium text-slate-950">
-              Retry save
-            </button>
-          </div>
-        )}
         <StepMap stage={stage} round={session.round} repetitions={session.repetitions} reachedIndex={reachedIndex} canVisit={canVisit} onSelect={goTo} />
 
         {stage === 'done' && (
@@ -974,7 +1190,11 @@ export default function StudySession() {
                   ? getDisplayValueForNormalizedActivity(activityThreshold)
                   : activityThreshold}
                 segmentDurationMs={segmentDurationMs}
-                showCaptureTimer={manualTrigger && captureTimerOn}
+                overlay={countingDown
+                  ? { label: 'Get ready', text: String(Math.max(1, Math.ceil(countdownRemainingMs / 1000))) }
+                  : manualTrigger && captureTimerOn
+                    ? { label: 'Recording', text: `${Math.max(0, (segmentDurationMs - recordingProgress * segmentDurationMs) / 1000).toFixed(1)}s` }
+                    : null}
               />
               <section className="rounded-[24px] border border-white/8 bg-white/[0.025] p-4">
                 <div className="flex items-center justify-between gap-3">
@@ -1020,7 +1240,7 @@ export default function StudySession() {
                   />
                 </div>
 
-                <div className="mt-4 grid grid-cols-3 gap-2">
+                <div className="mt-4 grid grid-cols-2 gap-2">
                   <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
                     Window ms
                     <input
@@ -1066,8 +1286,23 @@ export default function StudySession() {
                       className="mt-1 w-full rounded-xl border border-white/10 bg-slate-950 px-2 py-2 text-sm text-slate-100"
                     />
                   </label>
+                  <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                    Countdown ms
+                    <input
+                      type="number"
+                      min={0}
+                      max={10000}
+                      step={100}
+                      value={countdownMs}
+                      onChange={(event) => {
+                        const next = Number(event.target.value);
+                        if (Number.isFinite(next)) setCountdownMs(Math.min(10000, Math.max(0, next)));
+                      }}
+                      className="mt-1 w-full rounded-xl border border-white/10 bg-slate-950 px-2 py-2 text-sm text-slate-100"
+                    />
+                  </label>
                 </div>
-                <p className="mt-2 text-[11px] leading-4 text-slate-500">Window length and pre-trigger history are still being decided. Each saved sample keeps the values used.</p>
+                <p className="mt-2 text-[11px] leading-4 text-slate-500">Window length, pre-trigger history, and the countdown are still being decided. Each saved sample keeps the values used.</p>
 
                 <div className="mt-4 grid grid-cols-2 gap-2">
                   {(['mock', 'live'] as SignalSourceMode[]).map((mode) => (
@@ -1108,7 +1343,7 @@ export default function StudySession() {
 
                 <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
                   <p className="text-xs font-medium text-cyan-100">
-                    {!isStreaming ? 'Waiting for the stream' : isRecording ? 'Recording' : recorderState === 'cooldown' ? 'Short pause' : selectedFull ? `${gesture.name} has its examples` : roundComplete ? 'Required examples kept' : 'Ready'}
+                    {!isStreaming ? 'Waiting for the stream' : countingDown ? 'Get ready' : isRecording ? 'Recording' : recorderState === 'cooldown' ? 'Short pause' : selectedFull ? `${gesture.name} has its examples` : roundComplete ? 'Required examples kept' : 'Ready'}
                   </p>
                   <p className="mt-2 text-xs leading-5 text-slate-400">
                     {manualTrigger ? 'Press Capture at the start of the gesture.' : 'Recording begins when you perform the gesture.'}
@@ -1119,10 +1354,10 @@ export default function StudySession() {
                   <button
                     type="button"
                     onClick={pressCapture}
-                    disabled={!armed || recorderState !== 'idle'}
+                    disabled={!armed || recorderState !== 'idle' || countingDown}
                     className="mt-4 flex w-full items-center justify-center gap-3 rounded-2xl border border-cyan-300/30 bg-cyan-300/10 px-5 py-5 text-sm font-medium text-cyan-50 disabled:cursor-not-allowed disabled:opacity-35"
                   >
-                    <Hand className="h-5 w-5" /> Capture <span className="rounded-md border border-white/10 px-2 py-1 text-[10px] text-cyan-100/70">Space</span>
+                    <Hand className="h-5 w-5" /> {countingDown ? `Get ready ${Math.max(1, Math.ceil(countdownRemainingMs / 1000))}` : 'Capture'} <span className="rounded-md border border-white/10 px-2 py-1 text-[10px] text-cyan-100/70">Space</span>
                   </button>
                 )}
 

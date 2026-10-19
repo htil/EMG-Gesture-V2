@@ -5,7 +5,7 @@ import { zipStore } from './zip-store.mjs';
 
 const ID_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const EXPERIMENT_HEADERS = ['id', 'name', 'repetitions', 'captures_per_round', 'captures_min', 'captures_max', 'status', 'notes', 'created_at'];
-const PARTICIPANT_HEADERS = ['id', 'experiment_id', 'condition', 'status', 'current_round', 'created_at'];
+const PARTICIPANT_HEADERS = ['id', 'experiment_id', 'condition', 'status', 'current_round', 'created_at', 'generation'];
 const ROUND_HEADERS = ['participant_id', 'experiment_id', 'round', 'trial_count', 'saved_count', 'usable_count', 'completed_at'];
 const EVENT_TYPES = new Set(['capture_started', 'capture_completed', 'capture_cancelled', 'capture_error', 'sample_deleted', 'sample_replaced']);
 const ATTEMPT_RESULTS = new Set(['correct', 'wrong', 'unknown', 'recording_failure']);
@@ -210,6 +210,7 @@ function sanitizeSettings(settings) {
     preTriggerWindowMs: finiteNumber(source.preTriggerWindowMs, null),
     activityThreshold: finiteNumber(source.activityThreshold, null),
     cooldownMs: finiteNumber(source.cooldownMs, null),
+    countdownMs: finiteNumber(source.countdownMs, null),
     capturesMin: finiteNumber(source.capturesMin, null),
     capturesMax: finiteNumber(source.capturesMax, null),
     featureSetId: String(source.featureSetId || ''),
@@ -263,6 +264,18 @@ function summarizeExperiment(experiment, participants) {
   };
 }
 
+function participantGeneration(participant) {
+  const value = Number(participant?.generation);
+  return Number.isInteger(value) && value > 0 ? value : 1;
+}
+
+function sameGeneration(record, participant) {
+  const incoming = Number(record?.generation);
+  const current = participantGeneration(participant);
+  if (!Number.isInteger(incoming) || incoming <= 0) return current === 1;
+  return incoming === current;
+}
+
 function presentParticipant(participant, repetitions) {
   const currentRound = Number(participant.current_round) || 1;
   const roundsCompleted = participant.status === 'completed'
@@ -303,7 +316,10 @@ export function createStudyDesk(dataDir) {
   });
 
   const saveExperiments = (records) => writeTable(experimentsPath, EXPERIMENT_HEADERS, records.map(withSampleLimits));
-  const saveParticipants = (records) => writeTable(participantsPath, PARTICIPANT_HEADERS, records);
+  const saveParticipants = (records) => writeTable(participantsPath, PARTICIPANT_HEADERS, records.map((participant) => ({
+    ...participant,
+    generation: String(participantGeneration(participant)),
+  })));
   const saveRounds = (records) => writeTable(roundsPath, ROUND_HEADERS, records.map((round) => ({
     ...round,
     saved_count: round.saved_count || round.trial_count || '0',
@@ -322,6 +338,169 @@ export function createStudyDesk(dataDir) {
   const writeRuns = (participantId, runs) => {
     fs.mkdirSync(sessionsDir, { recursive: true });
     fs.writeFileSync(runsFile(participantId), `${JSON.stringify(runs, null, 2)}\n`);
+  };
+  const participantRoot = (participantId) => path.join(sessionsDir, safeToken(participantId, 'participant'));
+  const checkpointFile = (participantId) => path.join(participantRoot(participantId), 'checkpoint.json');
+  const alertFile = (participantId) => path.join(participantRoot(participantId), 'save-alert.json');
+  const readJson = (filePath) => {
+    if (!fs.existsSync(filePath)) return null;
+    try {
+      return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    } catch {
+      return null;
+    }
+  };
+  const sanitizeTrial = (trial) => {
+    if (!trial || typeof trial !== 'object') return null;
+    const id = safeToken(trial.id, '');
+    if (!id) return null;
+    const points = sanitizePoints(trial.points);
+    return {
+      id,
+      gestureId: String(trial.gestureId || ''),
+      gestureName: String(trial.gestureName || ''),
+      pairIndex: finiteNumber(trial.pairIndex, 1),
+      capturedAt: finiteNumber(trial.capturedAt, Date.now()),
+      triggeredAt: finiteNumber(trial.triggeredAt, 0),
+      completedAt: finiteNumber(trial.completedAt, 0),
+      preTriggerPointCount: finiteNumber(trial.preTriggerPointCount, 0),
+      points,
+      quality: trial.quality === 'review' ? 'review' : 'usable',
+      metrics: {
+        rms: finiteNumber(trial.metrics?.rms, 0),
+        peak: finiteNumber(trial.metrics?.peak, 0),
+        range: finiteNumber(trial.metrics?.range, 0),
+        durationMs: finiteNumber(trial.metrics?.durationMs, 0),
+      },
+    };
+  };
+  const trialFromSample = (sample) => sanitizeTrial({
+    id: sample.sampleId,
+    gestureId: sample.gestureId,
+    gestureName: sample.gestureLabel,
+    pairIndex: 1,
+    capturedAt: sample.capturedAt,
+    triggeredAt: sample.triggeredAt,
+    completedAt: sample.recordingEndedAt,
+    preTriggerPointCount: sample.preTriggerPointCount,
+    points: sample.points,
+    quality: 'usable',
+    metrics: {
+      rms: 0,
+      peak: 0,
+      range: 0,
+      durationMs: Math.max(0, Number(sample.recordingEndedAt) - Number(sample.recordingStartedAt) || 0),
+    },
+  });
+  const buildRestore = (participant) => {
+    const round = Number(participant.current_round) || 1;
+    let checkpoint = readJson(checkpointFile(participant.id));
+    if (checkpoint && !sameGeneration(checkpoint, participant)) return null;
+    if (checkpoint && Number(checkpoint.round) !== round) checkpoint = null;
+    let sessionId = checkpoint ? safeToken(checkpoint.sessionId, '') : '';
+    if (!sessionId) {
+      const root = path.join(participantRoot(participant.id), 'collection');
+      if (!fs.existsSync(root)) return null;
+      const candidates = fs.readdirSync(root)
+        .map((name) => {
+          const dir = path.join(root, name);
+          if (!fs.statSync(dir).isDirectory()) return null;
+          const meta = readJson(path.join(dir, 'meta.json'));
+          if (!meta || Number(meta.round) !== round) return null;
+          return { sessionId: safeToken(meta.sessionId || name, ''), updatedAt: fs.statSync(dir).mtimeMs };
+        })
+        .filter((entry) => entry?.sessionId)
+        .sort((left, right) => right.updatedAt - left.updatedAt);
+      sessionId = candidates[0]?.sessionId || '';
+      if (!sessionId) return null;
+      checkpoint = {
+        sessionId,
+        round,
+        stage: 'capture',
+        unlockedThrough: 'capture',
+        trials: [],
+        pendingReplacements: [],
+        updatedAt: 0,
+      };
+    }
+    const dir = collectionDir(sessionsDir, participant.id, sessionId);
+    const samples = readJsonFiles(path.join(dir, 'samples'));
+    const events = readJsonFiles(path.join(dir, 'events'));
+    const deleted = new Set(events
+      .filter((event) => event.type === 'sample_deleted' && Number(event.round) === round && event.sampleId)
+      .map((event) => event.sampleId));
+    const replaced = new Set(events
+      .filter((event) => event.type === 'sample_replaced' && Number(event.round) === round && event.sampleId)
+      .map((event) => event.sampleId));
+    const checkpointTrials = (Array.isArray(checkpoint.trials) ? checkpoint.trials : [])
+      .map(sanitizeTrial)
+      .filter((trial) => trial && !deleted.has(trial.id));
+    const seen = new Set(checkpointTrials.map((trial) => trial.id));
+    const extras = samples
+      .filter((sample) => Number(sample.round) === round && !deleted.has(sample.sampleId) && !seen.has(sample.sampleId))
+      .map(trialFromSample)
+      .filter(Boolean);
+    const pendingFromEvents = events
+      .filter((event) => event.type === 'sample_deleted' && Number(event.round) === round && event.sampleId && !replaced.has(event.sampleId))
+      .sort((left, right) => Number(left.at) - Number(right.at))
+      .map((event) => ({
+        round,
+        sampleId: event.sampleId,
+        gestureId: samples.find((sample) => sample.sampleId === event.sampleId)?.gestureId
+          || (Array.isArray(checkpoint.pendingReplacements) ? checkpoint.pendingReplacements : [])
+            .find((item) => item?.sampleId === event.sampleId)?.gestureId
+          || '',
+      }));
+    const pendingIds = new Set(pendingFromEvents.map((item) => item.sampleId));
+    const pendingFromCheckpoint = (Array.isArray(checkpoint.pendingReplacements) ? checkpoint.pendingReplacements : [])
+      .filter((item) => Number(item?.round) === round && item?.sampleId && !replaced.has(item.sampleId) && !pendingIds.has(item.sampleId))
+      .map((item) => ({
+        round,
+        sampleId: safeToken(item.sampleId, ''),
+        gestureId: String(item.gestureId || ''),
+      }))
+      .filter((item) => item.sampleId);
+    const stage = ['capture', 'review', 'game', 'results'].includes(checkpoint.stage) ? checkpoint.stage : 'capture';
+    const unlockedThrough = ['capture', 'review', 'game', 'results'].includes(checkpoint.unlockedThrough)
+      ? checkpoint.unlockedThrough
+      : stage;
+    return {
+      sessionId,
+      round,
+      stage,
+      unlockedThrough,
+      trials: [...checkpointTrials, ...extras],
+      pendingReplacements: [...pendingFromEvents, ...pendingFromCheckpoint],
+      openCapture: checkpoint.openCapture && Number(checkpoint.openCapture.round) === round && safeToken(checkpoint.openCapture.sampleId, '') ? {
+        sampleId: safeToken(checkpoint.openCapture.sampleId, ''),
+        gestureId: String(checkpoint.openCapture.gestureId || ''),
+        gestureName: String(checkpoint.openCapture.gestureName || ''),
+        round,
+        phase: checkpoint.openCapture.phase === 'recording' ? 'recording' : 'countdown',
+      } : null,
+      trainingRun: checkpoint.trainingRun && Number(checkpoint.trainingRun.round) === round ? {
+        revisionId: safeToken(checkpoint.trainingRun.revisionId, ''),
+        startedAt: finiteNumber(checkpoint.trainingRun.startedAt, Date.now()),
+        round,
+        sampleIds: Array.isArray(checkpoint.trainingRun.sampleIds)
+          ? checkpoint.trainingRun.sampleIds.map((sampleId) => safeToken(sampleId, '')).filter(Boolean)
+          : [],
+      } : null,
+      modelRevisionId: checkpoint.modelRevisionId ? safeToken(checkpoint.modelRevisionId, '') : null,
+      runs: readRuns(participant.id).filter((run) => Number(run.round) === round),
+      updatedAt: finiteNumber(checkpoint.updatedAt, 0),
+      generation: participantGeneration(participant),
+    };
+  };
+  const readAlert = (participant) => {
+    const alert = readJson(alertFile(participant.id));
+    if (!alert?.active || !sameGeneration(alert, participant)) return null;
+    return {
+      participantId: participant.id,
+      message: String(alert.message || 'Study data is still not saving.'),
+      pending: finiteNumber(alert.pending, 0),
+      at: String(alert.at || ''),
+    };
   };
 
   const requireAdmin = (headers, state) => {
@@ -372,8 +551,10 @@ export function createStudyDesk(dataDir) {
               capturesPerRound: bounds.max,
               round: Number(experiment.repetitions),
               condition: participant.condition,
+              generation: participantGeneration(participant),
               status: 'completed',
               runs: readRuns(participant.id),
+              restored: null,
             },
           };
         }
@@ -394,11 +575,32 @@ export function createStudyDesk(dataDir) {
               capturesPerRound: bounds.max,
               round: Number(participant.current_round) || 1,
             condition: participant.condition,
+            generation: participantGeneration(participant),
             manualTrigger: participant.condition === 'button',
             status: 'in_progress',
             runs: readRuns(participant.id),
+            restored: buildRestore(participant),
           },
         };
+      }
+
+      if (route === 'POST /save-alert') {
+        const id = normalizeId(body.id);
+        const participant = state.participants.find((entry) => entry.id === id);
+        if (!participant) throw Object.assign(new Error('That ID was not recognized.'), { status: 404 });
+        if (!sameGeneration(body, participant)) return { status: 200, body: { ok: true } };
+        if (body.active) {
+          writeJsonAtomic(alertFile(participant.id), {
+            generation: participantGeneration(participant),
+            active: true,
+            message: String(body.message || 'Study data is still not saving.').slice(0, 300),
+            pending: finiteNumber(body.pending, 0),
+            at: String(body.at || nowIso()),
+          });
+        } else if (fs.existsSync(alertFile(participant.id))) {
+          fs.unlinkSync(alertFile(participant.id));
+        }
+        return { status: 200, body: { ok: true } };
       }
 
       if (route === 'POST /runs') {
@@ -420,7 +622,25 @@ export function createStudyDesk(dataDir) {
         const items = Array.isArray(body.items) ? body.items : [];
         for (const item of items) {
           const record = item?.record;
-          if (item?.kind === 'meta' && record) {
+          if (!record || !sameGeneration(record, participant)) continue;
+          if (item?.kind === 'checkpoint') {
+            const sessionId = safeToken(record.sessionId, '');
+            if (!sessionId) continue;
+            const trials = (Array.isArray(record.trials) ? record.trials : []).slice(0, 200).map(sanitizeTrial).filter(Boolean);
+            writeJsonAtomic(checkpointFile(participant.id), {
+              sessionId,
+              generation: participantGeneration(participant),
+              round: finiteNumber(record.round, Number(participant.current_round) || 1),
+              stage: String(record.stage || 'capture'),
+              unlockedThrough: String(record.unlockedThrough || record.stage || 'capture'),
+              modelRevisionId: record.modelRevisionId ? safeToken(record.modelRevisionId, '') : null,
+              trials,
+              pendingReplacements: Array.isArray(record.pendingReplacements) ? record.pendingReplacements.slice(0, 200) : [],
+              openCapture: record.openCapture ?? null,
+              trainingRun: record.trainingRun ?? null,
+              updatedAt: Date.now(),
+            });
+          } else if (item?.kind === 'meta' && record) {
             const sessionId = safeToken(record.sessionId, '');
             if (!sessionId) continue;
             writeJsonAtomic(path.join(collectionDir(sessionsDir, participant.id, sessionId), 'meta.json'), {
@@ -672,6 +892,10 @@ export function createStudyDesk(dataDir) {
             participants: state.participants
               .filter((participant) => participant.experiment_id === experimentId)
               .map((participant) => presentParticipant(participant, experiment.repetitions)),
+            saveAlerts: state.participants
+              .filter((participant) => participant.experiment_id === experimentId)
+              .map(readAlert)
+              .filter(Boolean),
             rounds: state.rounds
               .filter((round) => round.experiment_id === experimentId)
               .map((round) => ({
@@ -728,11 +952,14 @@ export function createStudyDesk(dataDir) {
         if (!participant) throw Object.assign(new Error('Participant not found.'), { status: 404 });
         participant.status = 'assigned';
         participant.current_round = '1';
+        participant.generation = String(participantGeneration(participant) + 1);
         saveParticipants(state.participants);
         saveRounds(state.rounds.filter((round) => round.participant_id !== id));
         if (fs.existsSync(sessionsDir)) {
           for (const fileName of fs.readdirSync(sessionsDir)) {
-            if (fileName.startsWith(`${id}-round-`)) fs.unlinkSync(path.join(sessionsDir, fileName));
+            if (fileName.startsWith(`${id}-round-`) || fileName === `${id}-runs.json`) {
+              fs.unlinkSync(path.join(sessionsDir, fileName));
+            }
           }
           const collectionRoot = path.join(sessionsDir, id);
           if (fs.existsSync(collectionRoot)) fs.rmSync(collectionRoot, { recursive: true, force: true });
@@ -780,22 +1007,57 @@ export function createStudyDesk(dataDir) {
         const runs = [];
         for (const participant of mine) {
           const root = path.join(sessionsDir, participant.id, 'collection');
-          if (!fs.existsSync(root)) continue;
-          for (const sessionName of fs.readdirSync(root)) {
-            const dir = path.join(root, sessionName);
-            if (!fs.statSync(dir).isDirectory()) continue;
-            const metaPath = path.join(dir, 'meta.json');
-            if (fs.existsSync(metaPath)) {
-              try {
-                sessions.push(JSON.parse(fs.readFileSync(metaPath, 'utf8')));
-              } catch {
-                // Skip a session file that did not finish writing.
+          if (fs.existsSync(root)) {
+            for (const sessionName of fs.readdirSync(root)) {
+              const dir = path.join(root, sessionName);
+              if (!fs.statSync(dir).isDirectory()) continue;
+              const metaPath = path.join(dir, 'meta.json');
+              if (fs.existsSync(metaPath)) {
+                try {
+                  sessions.push(JSON.parse(fs.readFileSync(metaPath, 'utf8')));
+                } catch {
+                  // Skip a session file that did not finish writing.
+                }
               }
+              samples.push(...readJsonFiles(path.join(dir, 'samples')));
+              events.push(...readJsonFiles(path.join(dir, 'events')));
+              training.push(...readJsonFiles(path.join(dir, 'training')));
+              runs.push(...readJsonFiles(path.join(dir, 'runs')));
             }
-            samples.push(...readJsonFiles(path.join(dir, 'samples')));
-            events.push(...readJsonFiles(path.join(dir, 'events')));
-            training.push(...readJsonFiles(path.join(dir, 'training')));
-            runs.push(...readJsonFiles(path.join(dir, 'runs')));
+          }
+          if (!fs.existsSync(sessionsDir)) continue;
+          for (const fileName of fs.readdirSync(sessionsDir)) {
+            if (!fileName.startsWith(`${participant.id}-round-`) || !fileName.endsWith('.json')) continue;
+            const roundFile = readJson(path.join(sessionsDir, fileName));
+            const known = new Set(samples.map((sample) => sample.sampleId));
+            for (const trial of Array.isArray(roundFile?.trials) ? roundFile.trials : []) {
+              const sampleId = safeToken(trial?.id, '');
+              if (!sampleId || known.has(sampleId)) continue;
+              known.add(sampleId);
+              const points = sanitizePoints(trial.points);
+              samples.push({
+                sampleId,
+                sessionId: '',
+                participantId: participant.id,
+                experimentId: experiment.id,
+                condition: participant.condition,
+                round: finiteNumber(roundFile.round, 0),
+                phase: 'review',
+                gestureId: String(trial.gestureId || ''),
+                gestureLabel: String(trial.gestureName || ''),
+                capturedAt: finiteNumber(trial.capturedAt, 0),
+                recordingStartedAt: points[0]?.time ?? null,
+                recordingEndedAt: finiteNumber(trial.completedAt, null),
+                triggeredAt: finiteNumber(trial.triggeredAt, null),
+                preTriggerPointCount: finiteNumber(trial.preTriggerPointCount, 0),
+                pointCount: points.length,
+                points,
+                signalSource: '',
+                channelIndex: '',
+                sampleRateHz: null,
+                settings: roundFile.settings ?? {},
+              });
+            }
           }
         }
         const sessionRows = sessions.map((session) => ({
@@ -813,12 +1075,19 @@ export function createStudyDesk(dataDir) {
           pre_trigger_window_ms: session.settings?.preTriggerWindowMs ?? '',
           activity_threshold: session.settings?.activityThreshold ?? '',
           cooldown_ms: session.settings?.cooldownMs ?? '',
+          countdown_ms: session.settings?.countdownMs ?? '',
           captures_min: session.settings?.capturesMin ?? '',
           captures_max: session.settings?.capturesMax ?? '',
           feature_set_id: session.settings?.featureSetId ?? '',
           classifier: session.settings?.classifier ?? '',
           updated_at: session.updatedAt ?? '',
         }));
+        const replacedBy = new Map(events
+          .filter((event) => event.type === 'sample_replaced' && event.sampleId)
+          .map((event) => [event.sampleId, event.replacementSampleId || '']));
+        const deletedIds = new Set(events
+          .filter((event) => event.type === 'sample_deleted' && event.sampleId)
+          .map((event) => event.sampleId));
         const sampleRows = samples.map((sample) => ({
           sample_id: sample.sampleId,
           session_id: sample.sessionId,
@@ -835,10 +1104,26 @@ export function createStudyDesk(dataDir) {
           point_count: sample.pointCount,
           signal_source: sample.signalSource,
           channel: sample.channelIndex,
+          kept: deletedIds.has(sample.sampleId) ? 'no' : 'yes',
+          replaced_by: replacedBy.get(sample.sampleId) ?? '',
           segment_duration_ms: sample.settings?.segmentDurationMs ?? '',
           pre_trigger_window_ms: sample.settings?.preTriggerWindowMs ?? '',
+          countdown_ms: sample.settings?.countdownMs ?? '',
           activity_threshold: sample.settings?.activityThreshold ?? '',
+          cooldown_ms: sample.settings?.cooldownMs ?? '',
+          feature_set_id: sample.settings?.featureSetId ?? '',
+          classifier: sample.settings?.classifier ?? '',
         }));
+        const replacementRows = events
+          .filter((event) => event.type === 'sample_replaced')
+          .map((event) => ({
+            round: event.round,
+            session_id: event.sessionId,
+            participant_id: event.participantId,
+            deleted_sample_id: event.sampleId ?? '',
+            replacement_sample_id: event.replacementSampleId ?? '',
+            at: event.at,
+          }));
         const eventRows = events.map((event) => ({
           event_id: event.eventId,
           session_id: event.sessionId,
@@ -889,8 +1174,9 @@ export function createStudyDesk(dataDir) {
           predicted_gesture_name: outcome.predictedGestureName ?? '',
         })));
         const archive = zipStore([
-          { name: 'sessions.csv', data: toCsv(['session_id', 'participant_id', 'experiment_id', 'condition', 'round', 'phase', 'signal_source', 'channel', 'sample_rate_hz', 'device_name', 'segment_duration_ms', 'pre_trigger_window_ms', 'activity_threshold', 'cooldown_ms', 'captures_min', 'captures_max', 'feature_set_id', 'classifier', 'updated_at'], sessionRows) },
-          { name: 'samples.csv', data: toCsv(['sample_id', 'session_id', 'participant_id', 'condition', 'round', 'gesture_id', 'gesture_label', 'captured_at', 'recording_started_at', 'recording_ended_at', 'triggered_at', 'pre_trigger_point_count', 'point_count', 'signal_source', 'channel', 'segment_duration_ms', 'pre_trigger_window_ms', 'activity_threshold'], sampleRows) },
+          { name: 'sessions.csv', data: toCsv(['session_id', 'participant_id', 'experiment_id', 'condition', 'round', 'phase', 'signal_source', 'channel', 'sample_rate_hz', 'device_name', 'segment_duration_ms', 'pre_trigger_window_ms', 'countdown_ms', 'activity_threshold', 'cooldown_ms', 'captures_min', 'captures_max', 'feature_set_id', 'classifier', 'updated_at'], sessionRows) },
+          { name: 'samples.csv', data: toCsv(['sample_id', 'session_id', 'participant_id', 'condition', 'round', 'gesture_id', 'gesture_label', 'captured_at', 'recording_started_at', 'recording_ended_at', 'triggered_at', 'pre_trigger_point_count', 'point_count', 'signal_source', 'channel', 'kept', 'replaced_by', 'segment_duration_ms', 'pre_trigger_window_ms', 'countdown_ms', 'activity_threshold', 'cooldown_ms', 'feature_set_id', 'classifier'], sampleRows) },
+          { name: 'replacements.csv', data: toCsv(['round', 'session_id', 'participant_id', 'deleted_sample_id', 'replacement_sample_id', 'at'], replacementRows) },
           { name: 'events.csv', data: toCsv(['event_id', 'session_id', 'participant_id', 'condition', 'round', 'phase', 'type', 'at', 'sample_id', 'replacement_sample_id', 'detail'], eventRows) },
           { name: 'training.csv', data: toCsv(['revision_id', 'session_id', 'participant_id', 'condition', 'round', 'sample_ids', 'classifier', 'feature_set_id', 'segment_duration_ms', 'started_at', 'finished_at', 'status', 'error'], trainingRows) },
           { name: 'runs.csv', data: toCsv(['run_id', 'session_id', 'participant_id', 'condition', 'round', 'difficulty', 'model_revision_id', 'game_score', 'obstacle_success', 'recorded_at'], runRows) },

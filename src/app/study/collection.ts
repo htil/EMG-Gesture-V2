@@ -1,4 +1,12 @@
-import type { Assignment, StudyStage } from './api';
+import type {
+  Assignment,
+  FlowStage,
+  OpenCapture,
+  PendingReplacement,
+  StoredTrial,
+  StudyStage,
+  TrainingRun,
+} from './api';
 import type { StoredGameRun } from './gameHandoff';
 
 export type CollectionEventType =
@@ -14,6 +22,7 @@ export interface RecordingSettings {
   preTriggerWindowMs: number;
   activityThreshold: number;
   cooldownMs: number;
+  countdownMs: number;
   capturesMin: number;
   capturesMax: number;
   featureSetId: string;
@@ -31,6 +40,7 @@ export interface CollectionContext {
   channelIndex: number;
   sampleRateHz: number | null;
   deviceName: string | null;
+  generation: number;
   settings: RecordingSettings;
 }
 
@@ -43,6 +53,7 @@ export interface CollectionEvent {
   phase: StudyStage;
   type: CollectionEventType;
   at: number;
+  generation: number;
   sampleId: string | null;
   replacementSampleId: string | null;
   detail: string;
@@ -84,6 +95,21 @@ export interface TrainingRevision {
   finishedAt: number;
   status: 'success' | 'failure';
   error: string;
+  generation: number;
+}
+
+export interface SessionCheckpoint {
+  sessionId: string;
+  generation: number;
+  round: number;
+  stage: StudyStage;
+  unlockedThrough: FlowStage;
+  modelRevisionId: string | null;
+  trials: StoredTrial[];
+  pendingReplacements: PendingReplacement[];
+  openCapture: OpenCapture | null;
+  trainingRun: TrainingRun | null;
+  updatedAt: number;
 }
 
 export type CollectionItem =
@@ -91,7 +117,8 @@ export type CollectionItem =
   | { kind: 'sample'; record: SampleRecord }
   | { kind: 'event'; record: CollectionEvent }
   | { kind: 'training'; record: TrainingRevision }
-  | { kind: 'run'; record: StoredGameRun };
+  | { kind: 'run'; record: StoredGameRun }
+  | { kind: 'checkpoint'; record: SessionCheckpoint };
 
 export interface CollectionStatus {
   error: string;
@@ -104,6 +131,10 @@ interface QueuedItem {
 }
 
 const QUEUE_KEY = 'emg-collection-queue';
+const waiters: Array<() => void> = [];
+let failureCount = 0;
+let alertActive = false;
+let retryTimer = 0;
 
 export function collectionId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -125,6 +156,7 @@ export function makeEvent(
     phase: context.phase,
     type,
     at: Date.now(),
+    generation: context.generation,
     sampleId,
     replacementSampleId,
     detail,
@@ -136,9 +168,10 @@ let saveError = '';
 let flushing = false;
 const listeners = new Set<(status: CollectionStatus) => void>();
 
-function loadQueue(): QueuedItem[] {
+function readStoredQueue() {
   try {
-    const raw = sessionStorage.getItem(QUEUE_KEY);
+    const raw = localStorage.getItem(QUEUE_KEY) ?? sessionStorage.getItem(QUEUE_KEY);
+    if (raw && !localStorage.getItem(QUEUE_KEY)) localStorage.setItem(QUEUE_KEY, raw);
     const parsed = raw ? JSON.parse(raw) as QueuedItem[] : [];
     return Array.isArray(parsed) ? parsed : [];
   } catch {
@@ -146,9 +179,13 @@ function loadQueue(): QueuedItem[] {
   }
 }
 
+function loadQueue(): QueuedItem[] {
+  return readStoredQueue();
+}
+
 function persistQueue() {
   try {
-    sessionStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
+    localStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
   } catch {
     saveError = saveError || 'Study data is waiting to save, but this browser could not keep the backup copy.';
   }
@@ -182,27 +219,92 @@ async function postCollection(participantId: string, items: CollectionItem[]) {
   if (!response.ok) throw new Error(payload.error || 'Study data could not be saved.');
 }
 
+function releaseWaiters() {
+  if (queue.length > 0 || saveError) return;
+  const pending = waiters.splice(0);
+  pending.forEach((resolve) => resolve());
+}
+
+async function postSaveAlert(participantId: string, generation: number, active: boolean) {
+  await fetch('/api/study/save-alert', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id: participantId,
+      generation,
+      active,
+      pending: queue.length,
+      at: new Date().toISOString(),
+      message: 'Study data is still not saving.',
+    }),
+  });
+}
+
+function generationOf(item: CollectionItem) {
+  const record = item.record as { generation?: number };
+  return typeof record.generation === 'number' ? record.generation : 1;
+}
+
+function scheduleRetry() {
+  window.clearTimeout(retryTimer);
+  const delay = Math.min(15000, 1000 * (2 ** Math.min(failureCount, 4)));
+  retryTimer = window.setTimeout(() => {
+    retryTimer = 0;
+    void flush();
+  }, delay);
+}
+
 async function flush() {
-  if (flushing || queue.length === 0) return;
+  if (flushing || queue.length === 0) {
+    releaseWaiters();
+    return;
+  }
   flushing = true;
   const participantId = queue[0].participantId;
   let count = 0;
   while (count < queue.length && queue[count].participantId === participantId) count += 1;
   const batch = queue.slice(0, count).map((entry) => entry.item);
+  const generation = generationOf(batch[0]);
   try {
     await postCollection(participantId, batch);
     queue.splice(0, count);
     saveError = '';
+    failureCount = 0;
     persistQueue();
     notify();
+    if (alertActive) {
+      alertActive = false;
+      void postSaveAlert(participantId, generation, false).catch(() => {
+        alertActive = true;
+      });
+    }
   } catch (error) {
     saveError = error instanceof Error ? error.message : 'Study data could not be saved.';
+    failureCount += 1;
     persistQueue();
     notify();
+    if (failureCount >= 3) {
+      alertActive = true;
+      void postSaveAlert(participantId, generation, true).catch(() => undefined);
+    }
+    scheduleRetry();
   } finally {
     flushing = false;
   }
   if (!saveError && queue.length > 0) void flush();
+  releaseWaiters();
+}
+
+export function whenCollectionSaved() {
+  if (queue.length === 0 && !saveError) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    waiters.push(resolve);
+    if (!flushing) {
+      window.clearTimeout(retryTimer);
+      retryTimer = 0;
+      void flush();
+    }
+  });
 }
 
 export function recordCollection(participantId: string, items: CollectionItem[]) {
@@ -216,6 +318,9 @@ export function recordCollection(participantId: string, items: CollectionItem[])
 
 export function retryCollectionSave() {
   saveError = '';
+  failureCount = 0;
   notify();
   return flush();
 }
+
+if (queue.length > 0) void flush();

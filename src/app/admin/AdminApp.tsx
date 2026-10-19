@@ -29,6 +29,7 @@ import {
   type Experiment,
   type Participant,
   type RoundLog,
+  type SaveAlert,
 } from '../study/api';
 
 const STATUS_LABEL = {
@@ -56,6 +57,7 @@ export default function AdminApp() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [rounds, setRounds] = useState<RoundLog[]>([]);
+  const [saveAlerts, setSaveAlerts] = useState<SaveAlert[]>([]);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [draftName, setDraftName] = useState('');
@@ -80,6 +82,7 @@ export default function AdminApp() {
     const payload = await listParticipants(activePin, experimentId);
     setParticipants(payload.participants);
     setRounds(payload.rounds);
+    setSaveAlerts(payload.saveAlerts ?? []);
   };
 
   useEffect(() => {
@@ -107,8 +110,19 @@ export default function AdminApp() {
   }, [selected]);
 
   useEffect(() => {
-    if (!authed || !selectedId) return;
-    refreshParticipants(pin, selectedId).catch((loadError: Error) => setError(loadError.message));
+    if (!authed || !selectedId) return undefined;
+    let stopped = false;
+    const load = () => {
+      refreshParticipants(pin, selectedId).catch((loadError: Error) => {
+        if (!stopped) setError(loadError.message);
+      });
+    };
+    load();
+    const timer = window.setInterval(load, 10000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
   }, [authed, pin, selectedId]);
 
   const balance = useMemo(() => {
@@ -397,6 +411,16 @@ export default function AdminApp() {
                   Generate IDs
                 </button>
               </div>
+
+              {saveAlerts.length > 0 && (
+                <div className="mt-4 space-y-2">
+                  {saveAlerts.map((alert) => (
+                    <p key={alert.participantId} className="rounded-2xl border border-rose-300/30 bg-rose-400/10 px-4 py-3 text-sm text-rose-100">
+                      Study data for {alert.participantId} is still not saving. {alert.pending} records are waiting.
+                    </p>
+                  ))}
+                </div>
+              )}
 
               <div className="mt-5 overflow-x-auto">
                 <table className="w-full min-w-[720px] text-left text-sm">
