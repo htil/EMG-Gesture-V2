@@ -71,6 +71,9 @@ let lastObstacleTarget = 'Jump';
 let lastEncounterId = '';
 let lastExpectedAction = 'jump';
 let pendingGestureAction = null;
+const STARTING_LIVES = 5;
+let lives = STARTING_LIVES;
+let runOver = false;
 const previousHurdleZ = new WeakMap();
 
 const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.2);
@@ -173,6 +176,8 @@ export function mountGame(container, options = {}) {
   };
 
   activeGameOptions = options;
+  resetGame();
+  activeGameOptions.onLivesChange?.(lives, STARTING_LIVES);
 
   const renderer = new THREE.WebGLRenderer();
   renderer.domElement.style.display = 'block';
@@ -325,11 +330,12 @@ function createHurdle() {
   return group;
 }
 
+function laneX(lane) {
+  return lane === 0 ? -LANE_OFFSET : LANE_OFFSET;
+}
+
 function createLaneGate(openLane) {
   const group = new THREE.Group();
-  const closedLane = openLane === 0 ? 1 : 0;
-  const closedX = closedLane === 0 ? -LANE_OFFSET : LANE_OFFSET;
-  const openX = openLane === 0 ? -LANE_OFFSET : LANE_OFFSET;
   const wallMaterial = new THREE.MeshStandardMaterial({
     color: 0xef4444,
     emissive: 0x5f0a16,
@@ -344,7 +350,6 @@ function createLaneGate(openLane) {
   });
 
   const wall = new THREE.Mesh(new THREE.BoxGeometry(LANE_WIDTH, 2.6, 0.32), wallMaterial);
-  wall.position.set(closedX, 1.3, 0);
   group.add(wall);
 
   // Bright frame makes the single open lane readable from a distance.
@@ -353,16 +358,59 @@ function createLaneGate(openLane) {
   const leftPost = new THREE.Mesh(postGeometry, frameMaterial);
   const rightPost = new THREE.Mesh(postGeometry, frameMaterial);
   const topBar = new THREE.Mesh(topGeometry, frameMaterial);
-  leftPost.position.set(openX - LANE_WIDTH / 2, 1.3, 0);
-  rightPost.position.set(openX + LANE_WIDTH / 2, 1.3, 0);
-  topBar.position.set(openX, 2.55, 0);
   group.add(leftPost, rightPost, topBar);
+  group.userData.parts = { wall, leftPost, rightPost, topBar };
+  placeLaneGate(group, openLane);
 
   return group;
 }
 
+// Moves an existing wall so `openLane` is the gap and the other lane is blocked.
+function placeLaneGate(group, openLane) {
+  const closedX = laneX(openLane === 0 ? 1 : 0);
+  const openX = laneX(openLane);
+  const { wall, leftPost, rightPost, topBar } = group.userData.parts;
+  wall.position.set(closedX, 1.3, 0);
+  leftPost.position.set(openX - LANE_WIDTH / 2, 1.3, 0);
+  rightPost.position.set(openX + LANE_WIDTH / 2, 1.3, 0);
+  topBar.position.set(openX, 2.55, 0);
+  group.userData.openLane = openLane;
+}
+
+// Nearest unresolved wall first. Passed and already-hit walls are left alone.
+function upcomingLaneGates() {
+  return hurdles
+    .filter((hurdle) => (
+      hurdle.userData.obstacleType === 'switch'
+      && !hurdle.userData.resolved
+      && hurdle.position.z < 0
+    ))
+    .sort((left, right) => right.position.z - left.position.z);
+}
+
+// Rebuild the walls still ahead so each one requires a switch action
+function retargetUpcomingGates(blockedLane) {
+  let laneToBlock = blockedLane;
+  for (const gate of upcomingLaneGates()) {
+    const openLane = laneToBlock === 0 ? 1 : 0;
+    placeLaneGate(gate, openLane);
+    laneToBlock = openLane;
+  }
+}
+
+// A wall that wraps behind the camera becomes the farthest obstacle. Continue
+// the lane pattern from the wall in front of it instead of restoring its old side.
+function continueGateSequence(hurdle) {
+  const gates = upcomingLaneGates();
+  const previous = gates[gates.indexOf(hurdle) - 1];
+  const blockedLane = previous ? previous.userData.openLane : laneIndex;
+  placeLaneGate(hurdle, blockedLane === 0 ? 1 : 0);
+}
+
 function resetGame() {
   pendingGestureAction = null;
+  lives = STARTING_LIVES;
+  runOver = false;
   laneIndex = 0;
   isSwitching = false;
   if (characterRoot) {
@@ -389,10 +437,15 @@ function resetGame() {
     hurdles[i].userData.resolved = false;
     hurdles[i].userData.encounter += 1;
   }
+  retargetUpcomingGates(laneIndex);
 }
 
 function animate() {
   const delta = clock.getDelta();
+  if (runOver) {
+    activeRenderer?.render(scene, camera);
+    return;
+  }
   if (mixer) mixer.update(delta);
 
   // Ease lane switch animation
@@ -436,6 +489,7 @@ function animate() {
       hurdle.userData.resolved = false;
       hurdle.userData.encounter += 1;
       previousHurdleZ.set(hurdle, hurdle.position.z);
+      if (hurdle.userData.obstacleType === 'switch') continueGateSequence(hurdle);
     }
 
     const isLaneGate = hurdle.userData.obstacleType === 'switch';
@@ -468,13 +522,20 @@ function animate() {
       lastObstacleTarget = isLaneGate ? 'Switch Lane' : 'Jump';
       lastExpectedAction = isLaneGate ? 'switch-lane' : 'jump';
       lastEncounterId = `${hurdle.userData.obstacleId}:${hurdle.userData.encounter}`;
+      lives = Math.max(0, lives - 1);
+      activeGameOptions.onLivesChange?.(lives, STARTING_LIVES);
       activeGameOptions.onObstacleResult?.({
         correct: false,
         encounterId: lastEncounterId,
         expectedAction: lastExpectedAction,
       });
-      resetGame();
-      break;
+      // Readjusts gates to account for missed lane switch
+      if (isLaneGate) retargetUpcomingGates(laneIndex);
+      if (lives === 0) {
+        runOver = true;
+        activeGameOptions.onGameOver?.();
+        break;
+      }
     }
     if (
       !hurdle.userData.resolved
@@ -511,7 +572,7 @@ function updateObstacleCue() {
       status: 'complete',
       progress: 1,
       targetGestureName: lastObstacleTarget,
-      resultLabel: lastObstacleResult ? 'Correct — obstacle cleared' : 'Missed — return to rest',
+      resultLabel: lastObstacleResult ? 'Correct — obstacle cleared' : 'Missed — life lost',
       encounterId: lastEncounterId,
       expectedAction: lastExpectedAction,
     });

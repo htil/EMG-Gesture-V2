@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, ArrowLeft, CheckCircle2, XCircle, Zap } from 'lucide-react';
+import { Activity, ArrowLeft, CheckCircle2, Heart, XCircle, Zap } from 'lucide-react';
 import {
   DEFAULT_DIFFICULTY,
   submitGameRun,
@@ -246,6 +246,8 @@ export default function GameScreen({
   });
   const [runnerScore, setRunnerScore] = useState(0);
   const [runnerStreak, setRunnerStreak] = useState(0);
+  const [lives, setLives] = useState(5);
+  const [maxLives, setMaxLives] = useState(5);
   const [correctAttempts, setCorrectAttempts] = useState(0);
   const [totalAttempts, setTotalAttempts] = useState(0);
   const [feedback, setFeedback] = useState<{ correct: boolean; id: number } | null>(null);
@@ -259,6 +261,8 @@ export default function GameScreen({
   const processedEncountersRef = useRef(new Set<string>());
   const predictionsRef = useRef(new Map<string, GamePrediction | null>());
   const outcomesRef = useRef<GestureTestOutcome[]>([]);
+  const finishRunRef = useRef<() => void>(() => {});
+  const gameOverStartedRef = useRef(false);
 
   useEffect(() => {
     emgPointsRef.current = emgPoints;
@@ -373,6 +377,15 @@ export default function GameScreen({
               });
             }
           },
+          onLivesChange: (nextLives, nextMaxLives) => {
+            setLives(nextLives);
+            setMaxLives(nextMaxLives);
+          },
+          onGameOver: () => {
+            if (gameOverStartedRef.current) return;
+            gameOverStartedRef.current = true;
+            finishRunRef.current();
+          },
         });
       }
     });
@@ -404,8 +417,13 @@ export default function GameScreen({
       });
       if (submitted) return;
     }
-    onSecondary?.();
+    if (onSecondary) {
+      onSecondary();
+      return;
+    }
+    onExit();
   };
+  finishRunRef.current = finishRun;
 
   return (
     <div className="fixed inset-0 z-[100] overflow-hidden bg-slate-950 text-white">
@@ -413,11 +431,19 @@ export default function GameScreen({
       <div className="pointer-events-none fixed inset-0 z-40 bg-[linear-gradient(180deg,rgba(2,6,23,.76)_0%,transparent_25%,transparent_72%,rgba(2,6,23,.62)_100%)]" />
 
       <header className="pointer-events-none fixed inset-x-0 top-0 z-[110] flex items-start justify-between gap-3 p-3 md:p-5">
-        <div className="pointer-events-auto flex items-center gap-3 rounded-2xl border border-cyan-300/15 bg-slate-950/80 px-3 py-2.5 shadow-2xl backdrop-blur-md md:px-4">
-          <button type="button" onClick={onExit} className="rounded-lg border border-white/10 bg-white/5 p-2 text-slate-300 transition hover:bg-white/10 hover:text-white" aria-label={exitLabel} title={exitLabel}>
-            <ArrowLeft className="h-4 w-4" />
-          </button>
-          <div>
+        <div className="flex items-stretch gap-2">
+          <div className="rounded-2xl border border-rose-300/20 bg-slate-950/80 px-3 py-2.5 shadow-2xl backdrop-blur-md md:px-4" aria-live="polite">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-rose-300">Lives</p>
+            <div className="mt-1 flex items-center gap-1" role="img" aria-label={`${lives} of ${maxLives} lives remaining`}>
+              {Array.from({ length: maxLives }, (_, index) => (
+                <Heart
+                  key={index}
+                  className={`h-4 w-4 ${index < lives ? 'fill-rose-400 text-rose-300 drop-shadow-[0_0_6px_rgba(251,113,133,.75)]' : 'text-slate-600'}`}
+                />
+              ))}
+            </div>
+          </div>
+          <div className="rounded-2xl border border-cyan-300/15 bg-slate-950/80 px-3 py-2.5 shadow-2xl backdrop-blur-md md:px-4">
             <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-cyan-300">EMG Gesture</p>
             <p className="text-sm font-semibold text-white">Neural Runner</p>
           </div>
@@ -493,6 +519,16 @@ export default function GameScreen({
           </button>
         )}
       </aside>
+
+      <button
+        type="button"
+        onClick={onExit}
+        className="pointer-events-auto fixed bottom-4 left-4 z-[110] rounded-2xl border border-cyan-300/15 bg-slate-950/80 p-2.5 text-slate-300 shadow-2xl backdrop-blur-md transition hover:bg-white/10 hover:text-white md:left-5"
+        aria-label={exitLabel}
+        title={exitLabel}
+      >
+        <ArrowLeft className="h-4 w-4" />
+      </button>
 
       <div className="pointer-events-none fixed bottom-4 left-1/2 z-40 -translate-x-1/2 rounded-full border border-white/10 bg-slate-950/65 px-4 py-2 text-[10px] uppercase tracking-[0.16em] text-slate-300 backdrop-blur-md">
         Arrow keys to jump and switch lanes

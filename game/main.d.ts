@@ -17,6 +17,8 @@ export interface GameObstacleResult {
 export interface GameMountOptions {
   onQteUpdate?: (state: GameQteUpdate) => void;
   onObstacleResult?: (result: GameObstacleResult) => void;
+  onLivesChange?: (lives: number, maxLives: number) => void;
+  onGameOver?: () => void;
 }
 
 export function mountGame(container: HTMLElement, options?: GameMountOptions): () => void;
