@@ -6,6 +6,8 @@ export interface GameQteUpdate {
   encounterId?: string;
   expectedAction?: 'jump' | 'switch-lane';
   switchDirection?: number;
+  trialIndex?: number;
+  trialCount?: number;
 }
 
 export interface GameObstacleResult {
@@ -15,10 +17,13 @@ export interface GameObstacleResult {
 }
 
 export interface GameMountOptions {
+  obstacleCount?: number;
+  startingLives?: number;
   onQteUpdate?: (state: GameQteUpdate) => void;
   onObstacleResult?: (result: GameObstacleResult) => void;
   onLivesChange?: (lives: number, maxLives: number) => void;
   onGameOver?: () => void;
+  onRunComplete?: () => void;
 }
 
 export function mountGame(container: HTMLElement, options?: GameMountOptions): () => void;

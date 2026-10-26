@@ -11,7 +11,7 @@ const CHARACTER_SCALE = 4;
 
 const HURDLE_WIDTH = 2.4;
 const HURDLE_HEIGHT = 0.45;
-const HURDLE_COUNT = 6;
+const MAX_HURDLE_POOL = 6;
 const HURDLE_SPACING = 40;
 const HURDLE_HIT_DEPTH = 0.35;
 const JUMP_ACTION_DISTANCE = 4.5;
@@ -46,21 +46,6 @@ for (let i = 0; i < SEGMENT_COUNT; i++) {
 
 const hurdles = [];
 
-// Alternate jump hurdles with lane gates. A lane gate blocks one lane completely.
-for (let i = 0; i < HURDLE_COUNT; i++) {
-  const isLaneGate = i % 2 === 1;
-  const openLane = Math.floor(i / 2) % 2 === 0 ? 1 : 0;
-  const hurdle = isLaneGate ? createLaneGate(openLane) : createHurdle();
-  hurdle.userData.obstacleType = isLaneGate ? 'switch' : 'jump';
-  hurdle.userData.openLane = isLaneGate ? openLane : null;
-  hurdle.userData.resolved = false;
-  hurdle.userData.encounter = 0;
-  hurdle.userData.obstacleId = i;
-  hurdle.position.z = -(i + 1) * HURDLE_SPACING;
-  scene.add(hurdle);
-  hurdles.push(hurdle);
-}
-
 const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
 let activeRenderer = null;
 let activeGameOptions = {};
@@ -71,8 +56,14 @@ let lastObstacleTarget = 'Jump';
 let lastEncounterId = '';
 let lastExpectedAction = 'jump';
 let pendingGestureAction = null;
-const STARTING_LIVES = 5;
-let lives = STARTING_LIVES;
+const DEFAULT_OBSTACLE_COUNT = 20;
+const DEFAULT_STARTING_LIVES = 3;
+let obstacleLimit = DEFAULT_OBSTACLE_COUNT;
+let startingLives = DEFAULT_STARTING_LIVES;
+let obstaclesSpawned = 0;
+let obstaclesResolved = 0;
+let lastObstacleIndex = 1;
+let lives = startingLives;
 let runOver = false;
 const previousHurdleZ = new WeakMap();
 
@@ -176,8 +167,10 @@ export function mountGame(container, options = {}) {
   };
 
   activeGameOptions = options;
+  obstacleLimit = wholeNumber(options.obstacleCount, DEFAULT_OBSTACLE_COUNT, 1, 200);
+  startingLives = wholeNumber(options.startingLives, DEFAULT_STARTING_LIVES, 1, 10);
   resetGame();
-  activeGameOptions.onLivesChange?.(lives, STARTING_LIVES);
+  activeGameOptions.onLivesChange?.(lives, startingLives);
 
   const renderer = new THREE.WebGLRenderer();
   renderer.domElement.style.display = 'block';
@@ -381,11 +374,91 @@ function placeLaneGate(group, openLane) {
 function upcomingLaneGates() {
   return hurdles
     .filter((hurdle) => (
-      hurdle.userData.obstacleType === 'switch'
+      hurdle.userData.active
+      && hurdle.userData.obstacleType === 'switch'
       && !hurdle.userData.resolved
       && hurdle.position.z < 0
     ))
     .sort((left, right) => right.position.z - left.position.z);
+}
+
+function wholeNumber(value, fallback, minimum, maximum) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) return fallback;
+  return Math.min(maximum, Math.max(minimum, parsed));
+}
+
+function createObstacle(index) {
+  const isLaneGate = index % 2 === 1;
+  const openLane = Math.floor(index / 2) % 2 === 0 ? 1 : 0;
+  const hurdle = isLaneGate ? createLaneGate(openLane) : createHurdle();
+  hurdle.userData.obstacleType = isLaneGate ? 'switch' : 'jump';
+  hurdle.userData.openLane = isLaneGate ? openLane : null;
+  hurdle.userData.obstacleId = index;
+  hurdle.userData.resolved = false;
+  hurdle.userData.encounter = 0;
+  hurdle.userData.spawnIndex = index;
+  hurdle.userData.active = false;
+  scene.add(hurdle);
+  return hurdle;
+}
+
+function ensureObstacle(index) {
+  if (!hurdles[index]) hurdles[index] = createObstacle(index);
+  return hurdles[index];
+}
+
+function farthestActiveZ(except) {
+  let farthest = -HURDLE_SPACING;
+  let found = false;
+  for (const hurdle of hurdles) {
+    if (!hurdle.userData.active || hurdle === except) continue;
+    if (!found || hurdle.position.z < farthest) {
+      farthest = hurdle.position.z;
+      found = true;
+    }
+  }
+  return farthest;
+}
+
+function retireHurdle(hurdle) {
+  hurdle.userData.active = false;
+  hurdle.visible = false;
+  hurdle.position.z = SEGMENT_LENGTH + HURDLE_SPACING;
+  previousHurdleZ.delete(hurdle);
+}
+
+function resolveObstacle(hurdle, correct) {
+  const isLaneGate = hurdle.userData.obstacleType === 'switch';
+  hurdle.userData.resolved = true;
+  obstaclesResolved += 1;
+  lastObstacleIndex = (hurdle.userData.spawnIndex ?? 0) + 1;
+  completeUntil = performance.now() + 700;
+  lastObstacleResult = correct;
+  lastObstacleTarget = isLaneGate ? 'Switch Lane' : 'Jump';
+  lastExpectedAction = isLaneGate ? 'switch-lane' : 'jump';
+  lastEncounterId = `${hurdle.userData.obstacleId}:${hurdle.userData.encounter}`;
+  if (!correct) {
+    lives = Math.max(0, lives - 1);
+    activeGameOptions.onLivesChange?.(lives, startingLives);
+    if (isLaneGate) retargetUpcomingGates(laneIndex);
+  }
+  activeGameOptions.onObstacleResult?.({
+    correct,
+    encounterId: lastEncounterId,
+    expectedAction: lastExpectedAction,
+  });
+  if (lives === 0) {
+    runOver = true;
+    activeGameOptions.onGameOver?.();
+    return true;
+  }
+  if (obstaclesResolved >= obstacleLimit) {
+    runOver = true;
+    activeGameOptions.onRunComplete?.();
+    return true;
+  }
+  return false;
 }
 
 // Rebuild the walls still ahead so each one requires a switch action
@@ -409,8 +482,10 @@ function continueGateSequence(hurdle) {
 
 function resetGame() {
   pendingGestureAction = null;
-  lives = STARTING_LIVES;
+  lives = startingLives;
   runOver = false;
+  obstaclesResolved = 0;
+  lastObstacleIndex = 1;
   laneIndex = 0;
   isSwitching = false;
   if (characterRoot) {
@@ -432,10 +507,21 @@ function resetGame() {
     groundSegments[i].position.z = -i * SEGMENT_LENGTH;
   }
 
-  for (let i = 0; i < hurdles.length; i++) {
-    hurdles[i].position.z = -(i + 1) * HURDLE_SPACING;
-    hurdles[i].userData.resolved = false;
-    hurdles[i].userData.encounter += 1;
+  const poolSize = Math.min(obstacleLimit, MAX_HURDLE_POOL);
+  obstaclesSpawned = poolSize;
+  for (let i = 0; i < Math.max(hurdles.length, poolSize); i += 1) {
+    if (i >= poolSize) {
+      if (hurdles[i]) retireHurdle(hurdles[i]);
+      continue;
+    }
+    const hurdle = ensureObstacle(i);
+    hurdle.visible = true;
+    hurdle.userData.active = true;
+    hurdle.userData.resolved = false;
+    hurdle.userData.spawnIndex = i;
+    hurdle.userData.encounter = 0;
+    hurdle.position.z = -(i + 1) * HURDLE_SPACING;
+    previousHurdleZ.set(hurdle, hurdle.position.z);
   }
   retargetUpcomingGates(laneIndex);
 }
@@ -478,19 +564,12 @@ function animate() {
     }
   }
 
-  // Recycle hurdles
+  // Move the set number of obstacles. Once that many have spawned, passed ones are retired.
   for (const hurdle of hurdles) {
+    if (!hurdle.userData.active) continue;
+
     const previousZ = previousHurdleZ.get(hurdle) ?? hurdle.position.z;
     hurdle.position.z += RUN_SPEED * delta;
-    previousHurdleZ.set(hurdle, hurdle.position.z);
-
-    if (hurdle.position.z > SEGMENT_LENGTH) {
-      hurdle.position.z -= HURDLE_COUNT * HURDLE_SPACING;
-      hurdle.userData.resolved = false;
-      hurdle.userData.encounter += 1;
-      previousHurdleZ.set(hurdle, hurdle.position.z);
-      if (hurdle.userData.obstacleType === 'switch') continueGateSequence(hurdle);
-    }
 
     const isLaneGate = hurdle.userData.obstacleType === 'switch';
     const encounterId = `${hurdle.userData.obstacleId}:${hurdle.userData.encounter}`;
@@ -510,51 +589,33 @@ function animate() {
     const passedCorrectly = isLaneGate
       ? laneIndex === hurdle.userData.openLane
       : isJumping;
+    const crossedPlayer = previousZ <= HURDLE_HIT_DEPTH && hurdle.position.z > HURDLE_HIT_DEPTH;
 
-    if (
+    if (!hurdle.userData.resolved && crossedPlayer) {
+      if (resolveObstacle(hurdle, passedCorrectly)) break;
+    } else if (
       !hurdle.userData.resolved
       && Math.abs(hurdle.position.z) < HURDLE_HIT_DEPTH
       && !passedCorrectly
     ) {
-      hurdle.userData.resolved = true;
-      completeUntil = performance.now() + 700;
-      lastObstacleResult = false;
-      lastObstacleTarget = isLaneGate ? 'Switch Lane' : 'Jump';
-      lastExpectedAction = isLaneGate ? 'switch-lane' : 'jump';
-      lastEncounterId = `${hurdle.userData.obstacleId}:${hurdle.userData.encounter}`;
-      lives = Math.max(0, lives - 1);
-      activeGameOptions.onLivesChange?.(lives, STARTING_LIVES);
-      activeGameOptions.onObstacleResult?.({
-        correct: false,
-        encounterId: lastEncounterId,
-        expectedAction: lastExpectedAction,
-      });
-      // Readjusts gates to account for missed lane switch
-      if (isLaneGate) retargetUpcomingGates(laneIndex);
-      if (lives === 0) {
-        runOver = true;
-        activeGameOptions.onGameOver?.();
-        break;
+      if (resolveObstacle(hurdle, false)) break;
+    }
+
+    if (hurdle.userData.active && hurdle.position.z > SEGMENT_LENGTH) {
+      if (obstaclesSpawned >= obstacleLimit) {
+        retireHurdle(hurdle);
+        continue;
       }
+      const nextIndex = obstaclesSpawned;
+      obstaclesSpawned += 1;
+      hurdle.position.z = farthestActiveZ(hurdle) - HURDLE_SPACING;
+      hurdle.userData.resolved = false;
+      hurdle.userData.spawnIndex = nextIndex;
+      hurdle.userData.encounter += 1;
+      if (hurdle.userData.obstacleType === 'switch') continueGateSequence(hurdle);
     }
-    if (
-      !hurdle.userData.resolved
-      && previousZ <= HURDLE_HIT_DEPTH
-      && hurdle.position.z > HURDLE_HIT_DEPTH
-      && passedCorrectly
-    ) {
-      hurdle.userData.resolved = true;
-      completeUntil = performance.now() + 700;
-      lastObstacleResult = true;
-      lastObstacleTarget = isLaneGate ? 'Switch Lane' : 'Jump';
-      lastExpectedAction = isLaneGate ? 'switch-lane' : 'jump';
-      lastEncounterId = `${hurdle.userData.obstacleId}:${hurdle.userData.encounter}`;
-      activeGameOptions.onObstacleResult?.({
-        correct: true,
-        encounterId: lastEncounterId,
-        expectedAction: lastExpectedAction,
-      });
-    }
+
+    previousHurdleZ.set(hurdle, hurdle.position.z);
   }
 
   updateObstacleCue();
@@ -567,6 +628,11 @@ function updateObstacleCue() {
   if (now - lastCueUpdate < 80) return;
   lastCueUpdate = now;
 
+  const progressFields = {
+    trialIndex: lastObstacleIndex,
+    trialCount: obstacleLimit,
+  };
+
   if (now < completeUntil) {
     activeGameOptions.onQteUpdate?.({
       status: 'complete',
@@ -575,12 +641,13 @@ function updateObstacleCue() {
       resultLabel: lastObstacleResult ? 'Correct — obstacle cleared' : 'Missed — life lost',
       encounterId: lastEncounterId,
       expectedAction: lastExpectedAction,
+      ...progressFields,
     });
     return;
   }
 
   const upcoming = hurdles
-    .filter((hurdle) => hurdle.position.z <= 0)
+    .filter((hurdle) => hurdle.userData.active && hurdle.position.z <= 0)
     .sort((left, right) => right.position.z - left.position.z)[0];
   const distance = upcoming ? -upcoming.position.z : HURDLE_SPACING;
   const targetGestureName = upcoming?.userData.obstacleType === 'switch'
@@ -593,7 +660,13 @@ function updateObstacleCue() {
   const switchDirection = upcoming?.userData.obstacleType === 'switch'
     ? upcoming.userData.openLane - laneIndex
     : 0;
-  const cueContext = { encounterId, expectedAction, switchDirection };
+  const cueContext = {
+    encounterId,
+    expectedAction,
+    switchDirection,
+    trialIndex: upcoming ? (upcoming.userData.spawnIndex ?? 0) + 1 : lastObstacleIndex,
+    trialCount: obstacleLimit,
+  };
 
   if (distance > 30) {
     activeGameOptions.onQteUpdate?.({ status: 'rest', progress: 0, targetGestureName, ...cueContext });

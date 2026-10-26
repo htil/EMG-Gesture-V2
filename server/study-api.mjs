@@ -4,7 +4,9 @@ import crypto from 'node:crypto';
 import { zipStore } from './zip-store.mjs';
 
 const ID_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const EXPERIMENT_HEADERS = ['id', 'name', 'repetitions', 'captures_per_round', 'captures_min', 'captures_max', 'status', 'notes', 'created_at'];
+const EXPERIMENT_HEADERS = ['id', 'name', 'repetitions', 'captures_per_round', 'captures_min', 'captures_max', 'obstacle_count', 'starting_lives', 'status', 'notes', 'created_at'];
+const DEFAULT_OBSTACLE_COUNT = 20;
+const DEFAULT_STARTING_LIVES = 3;
 const PARTICIPANT_HEADERS = ['id', 'experiment_id', 'condition', 'status', 'current_round', 'created_at', 'generation'];
 const ROUND_HEADERS = ['participant_id', 'experiment_id', 'round', 'trial_count', 'saved_count', 'usable_count', 'completed_at'];
 const EVENT_TYPES = new Set(['capture_started', 'capture_completed', 'capture_cancelled', 'capture_error', 'sample_deleted', 'sample_replaced']);
@@ -150,13 +152,29 @@ function sampleBounds(experiment) {
   };
 }
 
+function gameLimits(experiment) {
+  const obstacles = Number(experiment?.obstacle_count);
+  const lives = Number(experiment?.starting_lives);
+  return {
+    obstacleCount: Number.isInteger(obstacles) && obstacles >= 1 && obstacles <= 200
+      ? obstacles
+      : DEFAULT_OBSTACLE_COUNT,
+    startingLives: Number.isInteger(lives) && lives >= 1 && lives <= 10
+      ? lives
+      : DEFAULT_STARTING_LIVES,
+  };
+}
+
 function withSampleLimits(experiment) {
   const bounds = sampleBounds(experiment);
+  const game = gameLimits(experiment);
   return {
     ...experiment,
     captures_min: String(bounds.min),
     captures_max: String(bounds.max),
     captures_per_round: String(bounds.max),
+    obstacle_count: String(game.obstacleCount),
+    starting_lives: String(game.startingLives),
   };
 }
 
@@ -246,6 +264,7 @@ function sanitizeStoredRun(run, participant) {
 function summarizeExperiment(experiment, participants) {
   const mine = participants.filter((participant) => participant.experiment_id === experiment.id);
   const bounds = sampleBounds(experiment);
+  const game = gameLimits(experiment);
   return {
     id: experiment.id,
     name: experiment.name,
@@ -253,6 +272,8 @@ function summarizeExperiment(experiment, participants) {
     capturesMin: bounds.min,
     capturesMax: bounds.max,
     capturesPerRound: bounds.max,
+    obstacleCount: game.obstacleCount,
+    startingLives: game.startingLives,
     status: experiment.status,
     notes: experiment.notes,
     createdAt: experiment.created_at,
@@ -538,6 +559,7 @@ export function createStudyDesk(dataDir) {
           throw Object.assign(new Error('This session is not open.'), { status: 403 });
         }
         const bounds = sampleBounds(experiment);
+        const game = gameLimits(experiment);
         if (participant.status === 'completed') {
           return {
             status: 200,
@@ -549,6 +571,8 @@ export function createStudyDesk(dataDir) {
               capturesMin: bounds.min,
               capturesMax: bounds.max,
               capturesPerRound: bounds.max,
+              obstacleCount: game.obstacleCount,
+              startingLives: game.startingLives,
               round: Number(experiment.repetitions),
               condition: participant.condition,
               generation: participantGeneration(participant),
@@ -573,6 +597,8 @@ export function createStudyDesk(dataDir) {
               capturesMin: bounds.min,
               capturesMax: bounds.max,
               capturesPerRound: bounds.max,
+              obstacleCount: game.obstacleCount,
+              startingLives: game.startingLives,
               round: Number(participant.current_round) || 1,
             condition: participant.condition,
             generation: participantGeneration(participant),
@@ -805,6 +831,8 @@ export function createStudyDesk(dataDir) {
         const repetitions = integerInRange(body.repetitions ?? 3, 1, 30, 'Repetitions');
         const capturesMin = integerInRange(body.capturesMin ?? body.capturesPerRound ?? 3, 1, 20, 'Minimum samples');
         const capturesMax = integerInRange(body.capturesMax ?? body.capturesPerRound ?? capturesMin, 1, 20, 'Maximum samples');
+        const obstacleCount = integerInRange(body.obstacleCount ?? DEFAULT_OBSTACLE_COUNT, 1, 200, 'Obstacle count');
+        const startingLives = integerInRange(body.startingLives ?? DEFAULT_STARTING_LIVES, 1, 10, 'Lives');
         if (capturesMin > capturesMax) {
           throw Object.assign(new Error('The minimum cannot be higher than the maximum.'), { status: 400 });
         }
@@ -815,6 +843,8 @@ export function createStudyDesk(dataDir) {
           captures_per_round: String(capturesMax),
           captures_min: String(capturesMin),
           captures_max: String(capturesMax),
+          obstacle_count: String(obstacleCount),
+          starting_lives: String(startingLives),
           status: 'active',
           notes: String(body.notes ?? '').trim(),
           created_at: nowIso(),
@@ -836,6 +866,12 @@ export function createStudyDesk(dataDir) {
           experiment.name = name;
         }
         if (body.notes !== undefined) experiment.notes = String(body.notes).trim();
+        if (body.obstacleCount !== undefined) {
+          experiment.obstacle_count = String(integerInRange(body.obstacleCount, 1, 200, 'Obstacle count'));
+        }
+        if (body.startingLives !== undefined) {
+          experiment.starting_lives = String(integerInRange(body.startingLives, 1, 10, 'Lives'));
+        }
         if (body.status !== undefined) {
           if (body.status !== 'active' && body.status !== 'closed') {
             throw Object.assign(new Error('Status must be active or closed.'), { status: 400 });

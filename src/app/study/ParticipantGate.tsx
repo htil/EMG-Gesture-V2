@@ -1,7 +1,18 @@
 import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router';
 import { Activity, ArrowRight } from 'lucide-react';
-import { joinStudy, loadClientSession, saveClientSession, type ClientSession, type RestoredSession } from './api';
+import {
+  clampStudyCount,
+  DEFAULT_OBSTACLE_COUNT,
+  DEFAULT_STARTING_LIVES,
+  joinStudy,
+  loadClientSession,
+  MAX_OBSTACLE_COUNT,
+  MAX_STARTING_LIVES,
+  saveClientSession,
+  type ClientSession,
+  type RestoredSession,
+} from './api';
 
 type JoinedSession = Awaited<ReturnType<typeof joinStudy>>;
 
@@ -33,6 +44,8 @@ function pickSession(joined: JoinedSession, existing: ClientSession | null): Cli
     capturesMin,
     capturesMax,
     capturesPerRound: capturesMax,
+    obstacleCount: clampStudyCount(joined.obstacleCount, DEFAULT_OBSTACLE_COUNT, 1, MAX_OBSTACLE_COUNT),
+    startingLives: clampStudyCount(joined.startingLives, DEFAULT_STARTING_LIVES, 1, MAX_STARTING_LIVES),
     round: joined.round,
     condition,
     manualTrigger: Boolean(joined.manualTrigger),

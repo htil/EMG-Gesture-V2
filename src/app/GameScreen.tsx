@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, ArrowLeft, CheckCircle2, Heart, XCircle, Zap } from 'lucide-react';
 import {
+  DEFAULT_OBSTACLE_COUNT,
+  DEFAULT_STARTING_LIVES,
+} from './study/api';
+import {
   DEFAULT_DIFFICULTY,
   submitGameRun,
   type GestureTestOutcome,
@@ -225,6 +229,8 @@ export default function GameScreen({
   actionGestures,
   predictWindow,
   condition,
+  obstacleCount = DEFAULT_OBSTACLE_COUNT,
+  startingLives = DEFAULT_STARTING_LIVES,
 }: {
   onExit: () => void;
   exitLabel?: string;
@@ -237,17 +243,21 @@ export default function GameScreen({
   actionGestures?: { jump: Gesture; switchLane: Gesture };
   predictWindow?: (points: Array<{ time: number; raw: number }>) => GamePrediction | null;
   condition?: 'button' | 'threshold';
+  obstacleCount?: number;
+  startingLives?: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [runnerQteState, setRunnerQteState] = useState<GameQteViewState>({
     status: 'rest',
     progress: 0,
     targetGestureName: 'Jump',
+    trialIndex: 1,
+    trialCount: obstacleCount,
   });
   const [runnerScore, setRunnerScore] = useState(0);
   const [runnerStreak, setRunnerStreak] = useState(0);
-  const [lives, setLives] = useState(5);
-  const [maxLives, setMaxLives] = useState(5);
+  const [lives, setLives] = useState(startingLives);
+  const [maxLives, setMaxLives] = useState(startingLives);
   const [correctAttempts, setCorrectAttempts] = useState(0);
   const [totalAttempts, setTotalAttempts] = useState(0);
   const [feedback, setFeedback] = useState<{ correct: boolean; id: number } | null>(null);
@@ -261,7 +271,8 @@ export default function GameScreen({
   const processedEncountersRef = useRef(new Set<string>());
   const predictionsRef = useRef(new Map<string, GamePrediction | null>());
   const outcomesRef = useRef<GestureTestOutcome[]>([]);
-  const finishRunRef = useRef<() => void>(() => {});
+  const scoreRef = useRef(0);
+  const finishRunRef = useRef<(obstacleSuccess?: boolean) => void>(() => {});
   const gameOverStartedRef = useRef(false);
 
   useEffect(() => {
@@ -282,11 +293,30 @@ export default function GameScreen({
 
     let cancelled = false;
     let unmountGame = () => {};
+    scoreRef.current = 0;
+    outcomesRef.current = [];
+    gameOverStartedRef.current = false;
+    processedEncountersRef.current = new Set();
+    predictionsRef.current = new Map();
+    setLives(startingLives);
+    setMaxLives(startingLives);
+    setRunnerScore(0);
+    setRunnerStreak(0);
+    setCorrectAttempts(0);
+    setTotalAttempts(0);
+
+    const endRun = (obstacleSuccess: boolean) => {
+      if (gameOverStartedRef.current) return;
+      gameOverStartedRef.current = true;
+      finishRunRef.current(obstacleSuccess);
+    };
 
     import('../../game/main.js').then((game) => {
       if (!cancelled) {
         gameModuleRef.current = game;
         unmountGame = game.mountGame(container, {
+          obstacleCount,
+          startingLives,
           onQteUpdate: (nextState) => {
             const gestures = actionGesturesRef.current;
             const expectedGesture = nextState.expectedAction === 'switch-lane'
@@ -348,8 +378,9 @@ export default function GameScreen({
             if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
             feedbackTimerRef.current = setTimeout(() => setFeedback(null), 850);
             if (correct) {
+              scoreRef.current += 100;
               setCorrectAttempts((current) => current + 1);
-              setRunnerScore((current) => current + 100);
+              setRunnerScore(scoreRef.current);
               setRunnerStreak((current) => current + 1);
             } else {
               setRunnerStreak(0);
@@ -381,11 +412,8 @@ export default function GameScreen({
             setLives(nextLives);
             setMaxLives(nextMaxLives);
           },
-          onGameOver: () => {
-            if (gameOverStartedRef.current) return;
-            gameOverStartedRef.current = true;
-            finishRunRef.current();
-          },
+          onGameOver: () => endRun(false),
+          onRunComplete: () => endRun(true),
         });
       }
     });
@@ -396,7 +424,7 @@ export default function GameScreen({
       gameModuleRef.current = null;
       if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
     };
-  }, []);
+  }, [obstacleCount, startingLives]);
 
   const visibleQteState = qteState ?? runnerQteState;
   const visibleScore = score ?? runnerScore;
@@ -407,13 +435,14 @@ export default function GameScreen({
     ? `${visibleQteState.trialIndex} / ${visibleQteState.trialCount}`
     : '—';
 
-  const finishRun = () => {
+  const finishRun = (obstacleSuccess?: boolean) => {
     if (condition) {
       const submitted = submitGameRun({
         condition,
         difficulty: DEFAULT_DIFFICULTY,
-        gameScore: visibleScore,
+        gameScore: score ?? scoreRef.current,
         outcomes: [...outcomesRef.current],
+        obstacleSuccess: typeof obstacleSuccess === 'boolean' ? obstacleSuccess : null,
       });
       if (submitted) return;
     }
@@ -434,7 +463,7 @@ export default function GameScreen({
         <div className="flex items-stretch gap-2">
           <div className="rounded-2xl border border-rose-300/20 bg-slate-950/80 px-3 py-2.5 shadow-2xl backdrop-blur-md md:px-4" aria-live="polite">
             <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-rose-300">Lives</p>
-            <div className="mt-1 flex items-center gap-1" role="img" aria-label={`${lives} of ${maxLives} lives remaining`}>
+            <div className="mt-1 flex max-w-36 flex-wrap items-center gap-1" role="img" aria-label={`${lives} of ${maxLives} lives remaining`}>
               {Array.from({ length: maxLives }, (_, index) => (
                 <Heart
                   key={index}
@@ -464,7 +493,7 @@ export default function GameScreen({
             <p className="mt-0.5 text-base font-semibold tabular-nums text-cyan-100">{totalAttempts ? `${accuracy}%` : '—'}</p>
           </div>
           <div className="hidden rounded-2xl border border-cyan-300/15 bg-slate-950/80 px-4 py-2.5 shadow-2xl backdrop-blur-md sm:block">
-            <p className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-500">Trial</p>
+            <p className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-500">Obstacle</p>
             <p className="mt-0.5 text-base font-semibold tabular-nums text-cyan-100">{trialLabel}</p>
           </div>
           <div
@@ -514,7 +543,7 @@ export default function GameScreen({
         </section>
         <EmgTrace points={emgPoints} qteState={visibleQteState} />
         {onSecondary && secondaryLabel && (
-          <button type="button" onClick={finishRun} className="pointer-events-auto self-end rounded-xl border border-white/10 bg-slate-950/80 px-4 py-2 text-xs font-medium text-slate-300 shadow-lg backdrop-blur-md transition hover:bg-white/10 hover:text-white">
+          <button type="button" onClick={() => finishRun()} className="pointer-events-auto self-end rounded-xl border border-white/10 bg-slate-950/80 px-4 py-2 text-xs font-medium text-slate-300 shadow-lg backdrop-blur-md transition hover:bg-white/10 hover:text-white">
             {secondaryLabel}
           </button>
         )}

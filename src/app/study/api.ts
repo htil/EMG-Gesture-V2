@@ -6,6 +6,17 @@ export type Assignment = 'button' | 'threshold';
 export type StudyStage = 'capture' | 'review' | 'game' | 'results' | 'done';
 export type FlowStage = Exclude<StudyStage, 'done'>;
 
+export const DEFAULT_OBSTACLE_COUNT = 20;
+export const DEFAULT_STARTING_LIVES = 3;
+export const MAX_OBSTACLE_COUNT = 200;
+export const MAX_STARTING_LIVES = 10;
+
+export function clampStudyCount(value: unknown, fallback: number, min: number, max: number) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) return fallback;
+  return parsed;
+}
+
 export interface Experiment {
   id: string;
   name: string;
@@ -13,6 +24,8 @@ export interface Experiment {
   capturesMin: number;
   capturesMax: number;
   capturesPerRound: number;
+  obstacleCount: number;
+  startingLives: number;
   status: ExperimentStatus;
   notes: string;
   createdAt: string;
@@ -115,6 +128,8 @@ export interface ClientSession {
   capturesMin: number;
   capturesMax: number;
   capturesPerRound: number;
+  obstacleCount: number;
+  startingLives: number;
   round: number;
   modelRevisionId: string | null;
   condition: Assignment;
@@ -158,6 +173,8 @@ export function loadClientSession(): ClientSession | null {
       ? parsed.capturesMax
       : (typeof parsed.capturesPerRound === 'number' ? parsed.capturesPerRound : 1);
     const capturesMin = typeof parsed.capturesMin === 'number' ? parsed.capturesMin : capturesMax;
+    const obstacleCount = clampStudyCount(parsed.obstacleCount, DEFAULT_OBSTACLE_COUNT, 1, MAX_OBSTACLE_COUNT);
+    const startingLives = clampStudyCount(parsed.startingLives, DEFAULT_STARTING_LIVES, 1, MAX_STARTING_LIVES);
     if (stage !== 'capture' && stage !== 'review' && stage !== 'game' && stage !== 'results' && stage !== 'done') return null;
     if (unlockedThrough !== 'capture' && unlockedThrough !== 'review' && unlockedThrough !== 'game' && unlockedThrough !== 'results') return null;
     return {
@@ -171,6 +188,8 @@ export function loadClientSession(): ClientSession | null {
       capturesMin,
       capturesMax,
       capturesPerRound: capturesMax,
+      obstacleCount,
+      startingLives,
       round: Number(parsed.round) || 1,
       modelRevisionId: typeof parsed.modelRevisionId === 'string' ? parsed.modelRevisionId : null,
       condition: parsed.condition === 'button' || parsed.condition === 'threshold'
@@ -265,7 +284,15 @@ export function listExperiments(pin: string) {
   return request<{ experiments: Experiment[] }>('/api/study/experiments', undefined, pin);
 }
 
-export function createExperiment(pin: string, input: { name: string; repetitions: number; capturesMin: number; capturesMax: number; notes: string }) {
+export function createExperiment(pin: string, input: {
+  name: string;
+  repetitions: number;
+  capturesMin: number;
+  capturesMax: number;
+  obstacleCount?: number;
+  startingLives?: number;
+  notes: string;
+}) {
   return request<Experiment>('/api/study/experiments', {
     method: 'POST',
     body: JSON.stringify(input),
@@ -279,6 +306,8 @@ export function updateExperiment(pin: string, id: string, patch: Partial<{
   repetitions: number;
   capturesMin: number;
   capturesMax: number;
+  obstacleCount: number;
+  startingLives: number;
 }>) {
   return request<Experiment>(`/api/study/experiments/${encodeURIComponent(id)}`, {
     method: 'PATCH',

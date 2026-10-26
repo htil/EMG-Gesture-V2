@@ -25,6 +25,10 @@ import {
   signInAdmin,
   updateExperiment,
   updateParticipant,
+  DEFAULT_OBSTACLE_COUNT,
+  DEFAULT_STARTING_LIVES,
+  MAX_OBSTACLE_COUNT,
+  MAX_STARTING_LIVES,
   type Assignment,
   type Experiment,
   type Participant,
@@ -65,6 +69,8 @@ export default function AdminApp() {
   const [draftRepetitions, setDraftRepetitions] = useState(3);
   const [draftMin, setDraftMin] = useState(3);
   const [draftMax, setDraftMax] = useState(3);
+  const [draftObstacleCount, setDraftObstacleCount] = useState(DEFAULT_OBSTACLE_COUNT);
+  const [draftLives, setDraftLives] = useState(DEFAULT_STARTING_LIVES);
   const [newName, setNewName] = useState('');
   const [generateCount, setGenerateCount] = useState(8);
   const [assignment, setAssignment] = useState<'balanced' | Assignment>('balanced');
@@ -107,6 +113,8 @@ export default function AdminApp() {
     setDraftRepetitions(selected.repetitions);
     setDraftMin(selected.capturesMin);
     setDraftMax(selected.capturesMax);
+    setDraftObstacleCount(selected.obstacleCount ?? DEFAULT_OBSTACLE_COUNT);
+    setDraftLives(selected.startingLives ?? DEFAULT_STARTING_LIVES);
   }, [selected]);
 
   useEffect(() => {
@@ -246,6 +254,8 @@ export default function AdminApp() {
                   repetitions: 3,
                   capturesMin: 3,
                   capturesMax: 3,
+                  obstacleCount: DEFAULT_OBSTACLE_COUNT,
+                  startingLives: DEFAULT_STARTING_LIVES,
                   notes: '',
                 });
                 setNewName('');
@@ -309,6 +319,12 @@ export default function AdminApp() {
                 <Field label="Maximum samples per gesture">
                   <input type="number" min={1} max={20} value={draftMax} onChange={(event) => setDraftMax(Number(event.target.value))} className={inputClass} />
                 </Field>
+                <Field label="Obstacles per run">
+                  <input type="number" min={1} max={MAX_OBSTACLE_COUNT} value={draftObstacleCount} onChange={(event) => setDraftObstacleCount(Number(event.target.value))} className={inputClass} />
+                </Field>
+                <Field label="Lives">
+                  <input type="number" min={1} max={MAX_STARTING_LIVES} value={draftLives} onChange={(event) => setDraftLives(Number(event.target.value))} className={inputClass} />
+                </Field>
                 <Field label="Session access">
                   <DarkSelect
                     label="Session access"
@@ -327,6 +343,7 @@ export default function AdminApp() {
               </div>
               <p className="mt-3 text-xs leading-5 text-slate-500">
                 A gesture can be finished once it reaches the minimum. Capture stops at the maximum. The round record stores how many samples were actually kept.
+                Each run faces the obstacle count above and starts with that many lives. Clearing the last obstacle with a life remaining opens the results screen.
               </p>
               <Field label="Notes">
                 <textarea value={draftNotes} onChange={(event) => setDraftNotes(event.target.value)} rows={2} className={inputClass} />
@@ -340,6 +357,8 @@ export default function AdminApp() {
                     notes: draftNotes,
                     ...(draftRepetitions !== selected.repetitions ? { repetitions: draftRepetitions } : {}),
                     ...(draftMin !== selected.capturesMin || draftMax !== selected.capturesMax ? { capturesMin: draftMin, capturesMax: draftMax } : {}),
+                    ...(draftObstacleCount !== selected.obstacleCount ? { obstacleCount: draftObstacleCount } : {}),
+                    ...(draftLives !== selected.startingLives ? { startingLives: draftLives } : {}),
                   });
                   await refreshExperiments(pin, selected.id);
                   setNotice('Experiment saved.');

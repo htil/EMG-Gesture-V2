@@ -1453,6 +1453,8 @@ export default function StudySession() {
             }}
             predictWindow={predictGameWindow}
             condition={condition}
+            obstacleCount={session.obstacleCount}
+            startingLives={session.startingLives}
           />
         )}
 
