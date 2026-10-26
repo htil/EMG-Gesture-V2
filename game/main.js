@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { clone as cloneSkinnedModel } from 'three/addons/utils/SkeletonUtils.js';
 
 const TRACK_WIDTH = 10;
 const LANE_WIDTH = 2.2;
@@ -10,7 +11,9 @@ const RUN_SPEED = 10;
 const CHARACTER_SCALE = 4;
 
 const HURDLE_WIDTH = 2.4;
-const HURDLE_HEIGHT = 0.45;
+const HURDLE_HEIGHT = 0.6;
+const HURDLE_BOARD_HEIGHT = 0.16;
+const JUMP_LIFT = 0.25;
 const MAX_HURDLE_POOL = 6;
 const HURDLE_SPACING = 40;
 const HURDLE_HIT_DEPTH = 0.35;
@@ -31,6 +34,26 @@ const groundMaterial = new THREE.MeshStandardMaterial({
   map: groundTexture,
   roughness: 1,
 });
+
+const hurdleMetalMaterial = new THREE.MeshStandardMaterial({
+  color: 0xf4f4f5,
+  metalness: 0.62,
+  roughness: 0.32,
+});
+const hurdleBoardMaterial = new THREE.MeshStandardMaterial({
+  map: createHurdleBoardTexture(),
+  roughness: 0.58,
+  metalness: 0.04,
+});
+const laneArrowMaterial = new THREE.MeshBasicMaterial({
+  map: createLaneArrowTexture(),
+  transparent: true,
+  depthWrite: false,
+});
+const hurdleFootGeometry = new THREE.BoxGeometry(0.16, 0.05, 0.62);
+const hurdlePostGeometry = new THREE.BoxGeometry(0.05, HURDLE_HEIGHT, 0.05);
+const hurdleRailGeometry = new THREE.BoxGeometry(HURDLE_WIDTH - 0.12, 0.03, 0.03);
+const hurdleBoardGeometry = new THREE.BoxGeometry(HURDLE_WIDTH, HURDLE_BOARD_HEIGHT, 0.04);
 
 const groundSegments = [];
 
@@ -91,6 +114,10 @@ const loader = new GLTFLoader();
 
 let characterModel = null;
 let loadId = 0;
+let auburnGltf = null;
+let defenderRunClip = null;
+const defenderMixers = [];
+const pendingDefenderGates = [];
 
 let characterRoot = null;
 let laneIndex = 0;
@@ -100,6 +127,18 @@ let switchTo = -LANE_OFFSET;
 let switchElapsed = 0;
 
 const LANE_SWITCH_TIME = 0.3;
+
+loader.load(
+  '/models/Auburn_Player.glb',
+  (gltf) => {
+    auburnGltf = gltf;
+    attachPendingDefenders();
+  },
+  undefined,
+  (error) => {
+    console.error('Failed to load Auburn player:', error);
+  }
+);
 
 loader.load(
   '/models/Football_Player.glb',
@@ -202,18 +241,18 @@ export function mountGame(container, options = {}) {
   };
 }
 
-// Removes horizontal movement from jump animations
+// Removes horizontal movement from jump animations.
 function lockRootXZ(clip) {
   for (const track of clip.tracks) {
     if (!track.name.endsWith('Hips.position')) continue;
 
     const values = track.values;
     const baseX = values[0];
-    const baseZ = values[1];
+    const baseY = values[1];
 
     for (let i = 0; i < values.length; i += 3) {
       values[i] = baseX;
-      values[i+1] = baseZ;
+      values[i + 1] = baseY;
     }
   }
 }
@@ -242,6 +281,46 @@ export function startLaneSwitch(direction) {
 
 export function queueGestureAction(action, direction, encounterId) {
   pendingGestureAction = { action, direction, encounterId };
+}
+
+function createHurdleBoardTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#dc2626';
+  ctx.fillRect(0, 0, 42, canvas.height);
+  ctx.fillRect(canvas.width - 42, 0, 42, canvas.height);
+  ctx.fillStyle = '#e2e8f0';
+  ctx.fillRect(0, 0, canvas.width, 5);
+  ctx.fillRect(0, canvas.height - 5, canvas.width, 5);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+function createLaneArrowTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d');
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#67e8f9';
+  ctx.fillRect(48, 78, 32, 150);
+  ctx.beginPath();
+  ctx.moveTo(64, 18);
+  ctx.lineTo(114, 96);
+  ctx.lineTo(14, 96);
+  ctx.fill();
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
 }
 
 function createGroundTexture() {
@@ -288,38 +367,30 @@ function createGroundSegment() {
   return segment;
 }
 
+function addLaneHurdle(group, centerX) {
+  const postX = HURDLE_WIDTH / 2 - 0.08;
+
+  for (const side of [-1, 1]) {
+    const foot = new THREE.Mesh(hurdleFootGeometry, hurdleMetalMaterial);
+    foot.position.set(centerX + side * postX, 0.03, 0.2);
+
+    const post = new THREE.Mesh(hurdlePostGeometry, hurdleMetalMaterial);
+    post.position.set(centerX + side * postX, HURDLE_HEIGHT / 2, 0);
+    group.add(foot, post);
+  }
+
+  const rail = new THREE.Mesh(hurdleRailGeometry, hurdleMetalMaterial);
+  rail.position.set(centerX, HURDLE_HEIGHT * 0.42, 0);
+
+  const board = new THREE.Mesh(hurdleBoardGeometry, hurdleBoardMaterial);
+  board.position.set(centerX, HURDLE_HEIGHT + HURDLE_BOARD_HEIGHT / 2, 0);
+  group.add(rail, board);
+}
+
 function createHurdle() {
   const group = new THREE.Group();
-  const material = new THREE.MeshStandardMaterial({
-    color: 0xFF0000,
-    metalness: 0.35,
-    roughness: 0.45,
-  });
-
-  const postGeo = new THREE.BoxGeometry(0.08, HURDLE_HEIGHT, 0.08);
-  const barGeo = new THREE.BoxGeometry(HURDLE_WIDTH, 0.06, 0.06);
-
-  // Create left lane hurdle
-  const leftPostL = new THREE.Mesh(postGeo, material);
-  leftPostL.position.set(-HURDLE_WIDTH/2 - LANE_OFFSET, HURDLE_HEIGHT/2, 0);
-
-  const rightPostL = new THREE.Mesh(postGeo, material);
-  rightPostL.position.set(HURDLE_WIDTH/2 - LANE_OFFSET, HURDLE_HEIGHT/2, 0);
-
-  const barL = new THREE.Mesh(barGeo, material);
-  barL.position.set(-LANE_OFFSET, HURDLE_HEIGHT, 0);
-
-  // Create right lane hurdle
-  const leftPostR = new THREE.Mesh(postGeo, material);
-  leftPostR.position.set(-HURDLE_WIDTH/2 + LANE_OFFSET, HURDLE_HEIGHT/2, 0);
-
-  const rightPostR = new THREE.Mesh(postGeo, material);
-  rightPostR.position.set(HURDLE_WIDTH/2 + LANE_OFFSET, HURDLE_HEIGHT/2, 0);
-
-  const barR = new THREE.Mesh(barGeo, material);
-  barR.position.set(LANE_OFFSET, HURDLE_HEIGHT, 0);
-
-  group.add(leftPostL, rightPostL, barL, leftPostR, rightPostR, barR);
+  addLaneHurdle(group, -LANE_OFFSET);
+  addLaneHurdle(group, LANE_OFFSET);
   return group;
 }
 
@@ -329,48 +400,67 @@ function laneX(lane) {
 
 function createLaneGate(openLane) {
   const group = new THREE.Group();
-  const wallMaterial = new THREE.MeshStandardMaterial({
-    color: 0xef4444,
-    emissive: 0x5f0a16,
-    metalness: 0.25,
-    roughness: 0.55,
-  });
-  const frameMaterial = new THREE.MeshStandardMaterial({
-    color: 0x22d3ee,
-    emissive: 0x083344,
-    metalness: 0.45,
-    roughness: 0.35,
-  });
-
-  const wall = new THREE.Mesh(new THREE.BoxGeometry(LANE_WIDTH, 2.6, 0.32), wallMaterial);
-  group.add(wall);
-
-  // Bright frame makes the single open lane readable from a distance.
-  const postGeometry = new THREE.BoxGeometry(0.1, 2.6, 0.12);
-  const topGeometry = new THREE.BoxGeometry(LANE_WIDTH, 0.12, 0.12);
-  const leftPost = new THREE.Mesh(postGeometry, frameMaterial);
-  const rightPost = new THREE.Mesh(postGeometry, frameMaterial);
-  const topBar = new THREE.Mesh(topGeometry, frameMaterial);
-  group.add(leftPost, rightPost, topBar);
-  group.userData.parts = { wall, leftPost, rightPost, topBar };
+  const defender = new THREE.Group();
+  const stripe = new THREE.Mesh(
+    new THREE.PlaneGeometry(LANE_WIDTH * 0.72, 3.4),
+    laneArrowMaterial,
+  );
+  stripe.rotation.x = -Math.PI / 2;
+  stripe.renderOrder = 1;
+  group.add(defender, stripe);
+  group.userData.parts = { defender, stripe };
+  group.userData.defenderMixer = null;
   placeLaneGate(group, openLane);
+
+  if (auburnGltf) attachDefender(group);
+  else pendingDefenderGates.push(group);
 
   return group;
 }
 
-// Moves an existing wall so `openLane` is the gap and the other lane is blocked.
+function sourceRunClip(gltf) {
+  return THREE.AnimationClip.findByName(gltf.animations, 'Running') || gltf.animations[0];
+}
+
+function attachDefender(group) {
+  if (!auburnGltf || group.userData.defenderMixer) return;
+  const clip = sourceRunClip(auburnGltf);
+  if (!clip) return;
+  if (!defenderRunClip) {
+    defenderRunClip = clip.clone();
+    lockRootXZ(defenderRunClip);
+  }
+
+  const model = cloneSkinnedModel(auburnGltf.scene);
+  model.position.set(0, 0, 0);
+  model.rotation.set(0, 0, 0);
+  model.scale.setScalar(CHARACTER_SCALE);
+  group.userData.parts.defender.add(model);
+
+  const defenderMixer = new THREE.AnimationMixer(model);
+  const action = defenderMixer.clipAction(defenderRunClip);
+  action.play();
+  action.time = Math.random() * defenderRunClip.duration;
+  group.userData.defenderMixer = defenderMixer;
+  defenderMixers.push(defenderMixer);
+}
+
+function attachPendingDefenders() {
+  for (const group of pendingDefenderGates) attachDefender(group);
+  pendingDefenderGates.length = 0;
+}
+
+// Moves the oncoming player onto the closed lane and the arrow onto the open one.
 function placeLaneGate(group, openLane) {
   const closedX = laneX(openLane === 0 ? 1 : 0);
   const openX = laneX(openLane);
-  const { wall, leftPost, rightPost, topBar } = group.userData.parts;
-  wall.position.set(closedX, 1.3, 0);
-  leftPost.position.set(openX - LANE_WIDTH / 2, 1.3, 0);
-  rightPost.position.set(openX + LANE_WIDTH / 2, 1.3, 0);
-  topBar.position.set(openX, 2.55, 0);
+  const { defender, stripe } = group.userData.parts;
+  defender.position.set(closedX, 0, 0);
+  stripe.position.set(openX, 0.045, 0);
   group.userData.openLane = openLane;
 }
 
-// Nearest unresolved wall first. Passed and already-hit walls are left alone.
+// Nearest unresolved oncoming player first. Passed and already-hit gates are left alone.
 function upcomingLaneGates() {
   return hurdles
     .filter((hurdle) => (
@@ -533,6 +623,7 @@ function animate() {
     return;
   }
   if (mixer) mixer.update(delta);
+  for (const defenderMixer of defenderMixers) defenderMixer.update(delta);
 
   // Ease lane switch animation
   if (isSwitching && characterRoot) {
@@ -553,6 +644,14 @@ function animate() {
       isSwitching = false;
       characterRoot.position.set(switchTo, 0, 0);
     }
+  }
+
+  if (isJumping && characterRoot && jumpAction) {
+    const duration = jumpAction.getClip().duration || 1;
+    const jumpTime = Math.min(jumpAction.time / duration, 1);
+    characterRoot.position.y = Math.sin(jumpTime * Math.PI) * JUMP_LIFT;
+  } else if (!isSwitching && characterRoot) {
+    characterRoot.position.y = 0;
   }
 
   // Recycle ground segments
