@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SignalPoint } from './useSignalSource';
 
 export type RecorderState = 'idle' | 'recording' | 'cooldown';
+export type CaptureTriggerMode = 'threshold' | 'button';
 
 export type RecorderWaveformPoint = {
   time: number;
@@ -13,6 +14,7 @@ export interface CompletedGestureSegment {
   triggeredAt: number;
   completedAt: number;
   preTriggerPointCount: number;
+  triggerMode: CaptureTriggerMode;
 }
 
 interface UseGestureRecorderOptions {
@@ -25,6 +27,9 @@ interface UseGestureRecorderOptions {
   preTriggerWindowMs?: number;
   cooldownMs?: number;
   hysteresisRatio?: number;
+  triggerMode?: CaptureTriggerMode;
+  manualTriggerToken?: number;
+  isArmed?: boolean;
 }
 
 interface GestureRecorderDiagnostics {
@@ -61,6 +66,9 @@ export function useGestureRecorder({
   preTriggerWindowMs = DEFAULT_PRE_TRIGGER_WINDOW_MS,
   cooldownMs = DEFAULT_COOLDOWN_MS,
   hysteresisRatio = DEFAULT_HYSTERESIS_RATIO,
+  triggerMode = 'threshold',
+  manualTriggerToken = 0,
+  isArmed = true,
 }: UseGestureRecorderOptions): UseGestureRecorderResult {
   const [recorderState, setRecorderState] = useState<RecorderState>('idle');
   const [recordingStartTime, setRecordingStartTime] = useState<number | null>(null);
@@ -78,8 +86,20 @@ export function useGestureRecorder({
   const recordingTriggerTimeRef = useRef<number | null>(null);
   const cooldownUntilRef = useRef<number | null>(null);
   const aboveThresholdRef = useRef(false);
+  const hasSeenRestingSignalRef = useRef(false);
   const recorderStateRef = useRef<RecorderState>('idle');
   const preTriggerPointCountRef = useRef(0);
+  const lastManualTriggerTokenRef = useRef(manualTriggerToken);
+  const manualTriggerPendingRef = useRef(false);
+
+  useEffect(() => {
+    if (manualTriggerToken !== lastManualTriggerTokenRef.current) {
+      lastManualTriggerTokenRef.current = manualTriggerToken;
+      if (triggerMode === 'button' && isArmed) {
+        manualTriggerPendingRef.current = true;
+      }
+    }
+  }, [isArmed, manualTriggerToken, triggerMode]);
 
   const resetRecorder = useCallback(() => {
     setRecorderState('idle');
@@ -96,12 +116,16 @@ export function useGestureRecorder({
     recordingTriggerTimeRef.current = null;
     cooldownUntilRef.current = null;
     aboveThresholdRef.current = false;
+    hasSeenRestingSignalRef.current = false;
     recorderStateRef.current = 'idle';
     preTriggerPointCountRef.current = 0;
+    manualTriggerPendingRef.current = false;
   }, []);
 
   useEffect(() => {
     resetRecorder();
+    // A method switch must not replay the previous method's buffered points.
+    lastProcessedTimeRef.current = signalPoints[signalPoints.length - 1]?.time ?? null;
     setNormalizedActivity(0);
   }, [isStreaming, resetKey]);
 
@@ -126,18 +150,24 @@ export function useGestureRecorder({
       setNormalizedActivity(point.normalizedActivity);
 
       const wasAboveThreshold = aboveThresholdRef.current;
-      const crossesThreshold = !wasAboveThreshold && point.normalizedActivity >= threshold;
+      const crossesThreshold = hasSeenRestingSignalRef.current && !wasAboveThreshold && point.normalizedActivity >= threshold;
+      const manualTriggerRequested = triggerMode === 'button' && manualTriggerPendingRef.current;
+      const shouldTrigger = isArmed && (
+        triggerMode === 'threshold' ? crossesThreshold : manualTriggerRequested
+      );
 
       if (point.normalizedActivity >= threshold) {
         aboveThresholdRef.current = true;
       } else if (point.normalizedActivity <= lowerThreshold) {
         aboveThresholdRef.current = false;
+        hasSeenRestingSignalRef.current = true;
       }
 
       const currentRecorderState = recorderStateRef.current;
 
       if (currentRecorderState === 'idle') {
-        if (crossesThreshold) {
+        if (shouldTrigger) {
+          manualTriggerPendingRef.current = false;
           const preTriggerPoints = [...preTriggerBufferRef.current];
           const seededSegment = [...preTriggerPoints, { time: point.time, value: point.raw }];
 
@@ -195,6 +225,7 @@ export function useGestureRecorder({
             triggeredAt: triggerTime,
             completedAt: point.time,
             preTriggerPointCount: preTriggerPointCountRef.current,
+            triggerMode,
           });
         }
 
@@ -225,6 +256,8 @@ export function useGestureRecorder({
     signalPoints,
     threshold,
     cooldownMs,
+    isArmed,
+    triggerMode,
   ]);
 
   const acknowledgeCompletedSegment = () => {
