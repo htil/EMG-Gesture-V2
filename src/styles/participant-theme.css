@@ -1,0 +1,44 @@
+/* Scoped to participant routes; dark content retains its existing styling. */
+[data-participant-theme] { color-scheme: dark; background: #050812; }
+.participant-theme-toolbar { position: relative; z-index: 41; display: flex; justify-content: flex-end; padding: 6px 16px; }
+.participant-theme-toggle { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 6px 12px; border: 1px solid #64748b; border-radius: 10px; background: #0f172a; color: #e2e8f0; font-size: 12px; cursor: pointer; }
+.participant-theme-toggle:hover { background: #1e293b; }
+/* Full-screen play is a z-100 overlay; keep the visual control reachable. */
+[data-participant-theme]:has([class~="z-[100]"]) .participant-theme-toolbar { position: fixed; right: 0; bottom: 0; z-index: 101; }
+[data-participant-theme] :is(button, input, select, textarea, a, [tabindex]):focus-visible { outline: 2px solid #22d3ee; outline-offset: 3px; }
+/* Re-map existing participant utility colours, not signal values or game pixels. */
+[data-participant-theme="light"] {
+  color-scheme: light; background: #f8fafc; color: #0f172a;
+  --color-slate-50: #0f172a; --color-slate-100: #0f172a;
+  --color-slate-200: #1e293b; --color-slate-300: #334155;
+  --color-slate-400: #475569; --color-slate-500: #475569;
+  --color-slate-600: #64748b; --color-slate-700: #94a3b8;
+  --color-slate-800: #e2e8f0; --color-slate-900: #f1f5f9; --color-slate-950: #ffffff;
+}
+[data-participant-theme="light"] .participant-theme-toggle { background: #fff; color: #0f172a; border-color: #64748b; }
+[data-participant-theme="light"] .participant-theme-toggle:hover { background: #e2e8f0; }
+[data-participant-theme="light"] [class*="bg-[#050812]"] { background-color: #f8fafc; }
+[data-participant-theme="light"] :is([class*="bg-black/"], [class*="bg-white/"], [class~="bg-white"]) { background-color: #f1f5f9; }
+[data-participant-theme="light"] :is([class~="text-white"], [class*="text-white/"]) { color: #0f172a; }
+[data-participant-theme="light"] [class~="text-slate-950"] { color: #0f172a; }
+[data-participant-theme="light"] :is([class*="text-cyan-"], [class*="text-teal-"]) { color: #0e596b; }
+[data-participant-theme="light"] :is([class*="text-emerald-"], [class*="text-green-"]) { color: #166534; }
+[data-participant-theme="light"] :is([class*="text-amber-"], [class*="text-yellow-"]) { color: #854d0e; }
+[data-participant-theme="light"] :is([class*="text-rose-"], [class*="text-red-"]) { color: #9f1239; }
+[data-participant-theme="light"] :is([class*="text-violet-"], [class*="text-purple-"]) { color: #6b21a8; }
+[data-participant-theme="light"] [class*="border-white/"] { border-color: #cbd5e1; }
+[data-participant-theme="light"] input::placeholder { color: #64748b; }
+/* Existing DarkSelect uses inline dark styles; keep changes local to its public roles. */
+[data-participant-theme="light"] :is([aria-haspopup="listbox"], [role="listbox"], [role="option"] button) { background-color: #f1f5f9 !important; color: #0f172a !important; }
+[data-participant-theme="light"] [role="option"][aria-selected="true"] button { background-color: #cffafe !important; color: #0e596b !important; }
+[data-participant-theme="light"] [role="option"] button:hover { background-color: #e2e8f0 !important; }
+[data-participant-theme="light"] :is(button, input, select, textarea, a, [tabindex]):focus-visible { outline-color: #0369a1; }
+/* SVG chart presentation only; deliberately no canvas, filter, or inversion rules. */
+[data-participant-theme="light"] svg circle[fill="rgba(2, 6, 23, .74)"] { fill: #f1f5f9; }
+[data-participant-theme="light"] svg [stroke="#22d3ee"] { stroke: #0e7490; }
+[data-participant-theme="light"] svg [stroke="#94a3b8"] { stroke: #475569; }
+[data-participant-theme="light"] svg [stroke="#fbbf24"] { stroke: #a16207; }
+[data-participant-theme="light"] svg :is([fill="#22d3ee"], [fill="#67e8f9"]) { fill: #0e7490; }
+[data-participant-theme="light"] .recharts-cartesian-axis-tick text { fill: #475569; }
+[data-participant-theme="light"] :is(.recharts-cartesian-axis-line, .recharts-cartesian-axis-tick-line) { stroke: #64748b; }
+[data-participant-theme="light"] .recharts-cartesian-grid-horizontal line { stroke: #cbd5e1; }

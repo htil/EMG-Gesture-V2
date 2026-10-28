@@ -1,0 +1,82 @@
+export interface WavePoint {
+  time: number;
+  value: number;
+}
+
+export interface WaveDomain {
+  xMin: number;
+  xMax: number;
+  yMin: number;
+  yMax: number;
+}
+
+const DISPLAY_ENVELOPE_WINDOW_MS = 75;
+
+export function alignWaveform(
+  points: Array<{ time: number; value: number }>,
+  preTriggerPointCount: number,
+  triggeredAt: number,
+): WavePoint[] {
+  const triggerOffset = points[preTriggerPointCount]?.time ?? triggeredAt;
+  return points.map((point) => ({
+    time: Math.round(point.time - triggerOffset),
+    value: point.value,
+  }));
+}
+
+export function displayEnvelopeWaveform(points: WavePoint[]): WavePoint[] {
+  let windowStart = 0;
+  let sumSquares = 0;
+
+  return points.map((point, index) => {
+    sumSquares += point.value * point.value;
+    while (
+      windowStart < index
+      && points[windowStart].time < point.time - DISPLAY_ENVELOPE_WINDOW_MS
+    ) {
+      sumSquares -= points[windowStart].value * points[windowStart].value;
+      windowStart += 1;
+    }
+
+    return {
+      time: point.time,
+      value: Math.sqrt(Math.max(0, sumSquares) / Math.max(1, index - windowStart + 1)),
+    };
+  });
+}
+
+export function sharedWaveDomain(series: WavePoint[][]): WaveDomain {
+  let xMin = 0;
+  let xMax = 1;
+  let yMin = -1;
+  let yMax = 1;
+  let seen = false;
+
+  series.forEach((points) => {
+    points.forEach((point) => {
+      if (!seen) {
+        xMin = point.time;
+        xMax = point.time;
+        yMin = point.value;
+        yMax = point.value;
+        seen = true;
+        return;
+      }
+      xMin = Math.min(xMin, point.time);
+      xMax = Math.max(xMax, point.time);
+      yMin = Math.min(yMin, point.value);
+      yMax = Math.max(yMax, point.value);
+    });
+  });
+
+  if (xMax <= xMin) xMax = xMin + 1;
+  const ySpan = yMax - yMin;
+  const yMagnitude = Math.max(Math.abs(yMin), Math.abs(yMax));
+  const yPad = Math.max(ySpan * 0.08, yMagnitude * 0.02, 1e-9);
+  return {
+    xMin,
+    xMax,
+    yMin: yMin - yPad,
+    yMax: yMax + yPad,
+  };
+}

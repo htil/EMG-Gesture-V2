@@ -1,7 +1,44 @@
 
 # EMG Gesture V2
 
-EMG Gesture V2 is an EMG training and data-collection interface for testing gesture capture with either mock data or a live OpenBCI Ganglion signal.
+## Current laptop review instructions
+
+Start with **[LAPTOP_START.md](LAPTOP_START.md)**. Use `npm run review:practice` to generate fresh disposable IDs without copying participant data. All IDs now default to real input; Mock must be selected explicitly for test-mode review. The older workflow notes and seeded-ID examples below are not the current laptop review recipe.
+
+EMG Gesture V2 is a biosignal capture study interface for comparing threshold-triggered and participant button-triggered recording with either mock data or a live OpenBCI Ganglion signal.
+
+## Study flow
+
+Participants receive an ID and enter it on the site. The ID is looked up in `data/participants.csv` and assigned to either the button version or the threshold version. The session itself does not say which version is running.
+
+Each round is the same path:
+
+1. `Capture`: record the required examples of each gesture with the assigned version.
+2. `Review`: inspect those waveforms, delete an example if needed, and train once the set is complete.
+3. `Play`: John's runner from the gamification branch. Arrow keys jump and switch lanes. Testing stays closed until that condition's model is ready.
+4. `Results`: see the game score against the previous run at the same difficulty, plus recognition accuracy. Then continue to the next round.
+
+After Results, the round loops back to Capture until the experiment's repetition count is finished. Full waveforms for each finished round are written to `data/sessions/`. The play step uses the game merged from the `gamification` branch. That game does not report a score yet. When it does, it should call `submitGameRun` with the score and each gesture attempt.
+
+The paired lab canvas, with both trigger methods visible, remains at `/lab`.
+
+## Run a blinded session
+
+From the project root:
+
+```bash
+npm install
+npm run dev
+```
+
+Open the local Vite URL.
+
+- Participants use `/` and enter the ID they were given.
+- Organizers use `/admin`. The default pin is `emg-admin` (`data/settings.json`).
+- The admin desk creates experiments, sets how many times the three-step loop repeats, generates IDs, and assigns each ID to button or threshold.
+- Do not show `data/participants.csv` to participants. That file is the assignment list.
+
+Sample IDs for the seeded experiment are `K7M2QP`, `H4N8LR`, `P3W6TX`, and `Q9C2VD`. Their assignments are visible only in the admin desk.
 
 ## Run the app
 
