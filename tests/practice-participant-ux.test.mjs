@@ -34,14 +34,13 @@ test('Space on a details summary never starts a manual capture',async t=>{
  assert.equal(JSON.parse(localStorage.getItem('emg-study-session')).openCapture,null,'opening details must not arm countdown/recording');assert.equal(prevented,false,'summary keeps native keyboard activation');
 });
 
-for (const condition of ['threshold', 'button']) test(`${condition} rest-role guidance stays manual and restful from introduction through recording`,async t=>{
+for (const condition of ['threshold', 'button']) test(`${condition} selected wrist guidance matches actual initiation before introduction and through capture`,async t=>{
  const h=await mount(t,condition);await h.click('Begin practice');await h.click('Start mock stream');await h.click('I’m ready to rest');await h.click('Begin resting recording');await h.advance(10500);
- await h.settle(()=>h.renderer.root.findAllByType('darkselect-fixture').find(n=>n.props.label==='Gesture').props.onChange('relax'));
+ await h.settle(()=>h.renderer.root.findAllByType('darkselect-fixture').find(n=>n.props.label==='Gesture').props.onChange('wrist-down'));
  const guidance=()=>text(h.renderer.root.findByProps({'aria-label':'Practice guidance'}));
- assert.match(guidance(),/For Relax, keep your hand resting/);assert.match(guidance(),/Press Capture/);assert.doesNotMatch(guidance(),/starts on its own|automatically|make Relax/);
- await h.click('Begin gesture practice');await h.click('Capture Space');assert.match(guidance(),/keep your hand resting/i);assert.doesNotMatch(guidance(),/make Relax/);
- await h.advance(1100);assert.match(guidance(),/keep your hand resting/i);assert.doesNotMatch(guidance(),/Keep doing Relax/);
- await h.advance(4000);assert.equal((await h.read()).filter(r=>r.kind==='capture'&&r.gestureId==='relax').length,1,'rest remains an actual separately cued capture');
+ assert.match(guidance(),/make Wrist down/);assert.match(guidance(),condition==='button'?/Press Capture/:/automatically/);assert.doesNotMatch(guidance(),/make Wrist up|make Relax/);
+ await h.click('Begin gesture practice');if(condition==='button'){await h.click('Capture Space');assert.match(guidance(),/Wrist down/);await h.advance(1100);assert.match(guidance(),/Wrist down/);}
+ await h.advance(6500);assert.ok((await h.read()).some(r=>r.kind==='capture'&&r.gestureId==='wrist-down'),'actual selected wrist capture is archived');
 });
 
 test('guidance uses configured rest labels and actual manual trigger mode',async()=>{
@@ -50,6 +49,7 @@ test('guidance uses configured rest labels and actual manual trigger mode',async
  const m=new Module(root+'tests/guidance-labels.cjs');m._compile(bundle.outputFiles[0].text,root+'tests/guidance-labels.cjs');
  const state={stage:'capture',condition:'threshold',streaming:true,calibrated:true,introduced:false,relax:true,manual:true,gestureName:'Resting hand',nextGesture:'Wrist turn'};
  for(const phase of [{introduced:false},{introduced:true,countdown:true},{introduced:true,recording:true}]){const guide=m.exports.practiceGuidance({...state,...phase});assert.match(guide.body,/For Resting hand, keep your hand resting/);assert.doesNotMatch(guide.body,/Relax|automatically|make Resting hand/);}
+ const resultGuide=m.exports.practiceGuidance({...state,stage:'results'});assert.equal(resultGuide.target,undefined,'Results explanation must be in flow, never a fixed overlay over bottom actions');
  const guide=m.exports.practiceGuidance({...state,relax:false,gestureName:'Wrist turn'});assert.match(guide.body,/Press Capture/);assert.doesNotMatch(guide.body,/automatically/);
 });
 

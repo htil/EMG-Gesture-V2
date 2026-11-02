@@ -4,7 +4,7 @@ import type { ClientSession } from './api';
 
 export interface PracticeSettings { segmentDurationMs: number; preTriggerWindowMs: number; countdownMs: number; activityThreshold: number }
 export interface PracticeRecord {
-  id: string; attemptId: string; flowVersion: 2; kind: string; participantId: string; experimentId: string;
+  id: string; attemptId: string; flowVersion: 3; kind: string; participantId: string; experimentId: string;
   sessionId: string; generation: number; condition: 'button' | 'threshold'; round: number;
   signalSource: 'mock' | 'live'; channelIndex: number; createdAt: number; settings: PracticeSettings;
   points: Array<{ time: number; value: number; activityEnvelope?: number }>;
@@ -32,7 +32,7 @@ export async function savePracticeRecord(record: PracticeRecord) {
   return saved as PracticeRecord;
 }
 export function rehearsalSession(session: ClientSession): ClientSession {
-  return { ...session, stage: 'capture', unlockedThrough: 'capture', capturesMin: 1, capturesMax: 1, capturesPerRound: 1,
+  return { ...session, stage: 'capture', unlockedThrough: 'capture', capturesMin: 3, capturesMax: 3, capturesPerRound: 3,
     trials: [], runs: [], modelRevisionId: null, trainingRun: null, openCapture: null, pendingReplacements: [] };
 }
 
@@ -86,8 +86,8 @@ export class PracticeArchive {
           signalSource: sample.signalSource, channelIndex: sample.channelIndex,
           settings: { segmentDurationMs: sample.settings.segmentDurationMs, preTriggerWindowMs: sample.settings.preTriggerWindowMs,
             countdownMs: sample.settings.countdownMs, activityThreshold: sample.settings.activityThreshold },
-          triggerMode: sample.gestureId === 'relax' ? 'button' : this.rest.condition,
-          captureProcedure: sample.gestureId === 'relax' ? 'cued_rest' : this.rest.condition,
+          triggerMode: this.rest.condition,
+          captureProcedure: this.rest.condition,
           triggeredAt: sample.triggeredAt, completedAt: sample.recordingEndedAt, preTriggerPointCount: sample.preTriggerPointCount,
           ...(sample.calibration !== undefined ? { calibration: sample.calibration, firstCrossingAt: sample.firstCrossingAt ?? null } : {}) }));
       } else if (item.kind === 'event') {

@@ -69,19 +69,19 @@ async function mount(t, mode, phase) {
   if (mode === 'practice') {
     // This synthetic fixture archives Mock samples; select that source explicitly.
     await settle(() => renderer.root.findByType('guidedpractice-fixture').props.onSource('mock'));
-    const rest = { ...f.record, flowVersion: 2, calibration: restCalibration(f.record) };
+    const rest = { ...f.record, flowVersion: 3, calibration: restCalibration(f.record) };
     assert.equal((await f.call('POST', '/practice', { id: f.participant.id, record: rest })).status,200);
     await settle(() => renderer.root.findByType('guidedpractice-fixture').props.onComplete(rest));
   } else {
     // Begin measured capture without introducing any synthetic practice lineage.
     // The empty session starts in setup; emulate a restored measured capture.
     await settle(() => renderer.unmount());
-    session.trials = [makeTrial('pinch', f.capture('pinch').points)];
+    session.trials = [makeTrial('wrist-up', f.capture('wrist-up').points)];
     localStorage.setItem('emg-study-session',JSON.stringify(session));
     await settle(() => { renderer = create(React.createElement(api.StudySession)); });
   }
   function makeTrial(id, points) { return { id: 'practice-'+id, gestureId:id, gestureName:id, pairIndex:1, capturedAt:20000, triggeredAt:10200, completedAt:11400, preTriggerPointCount:4, points, quality:'usable', metrics:{durationMs:1200,rms:0.1,peak:0.2,range:0.1} }; }
-  for (const id of mode === 'practice' ? ['pinch','squeeze','relax'] : ['squeeze','relax']) {
+  for (const id of mode === 'practice' ? ['wrist-up','wrist-up','wrist-up','wrist-down','wrist-down','wrist-down'] : ['wrist-down']) {
     await settle(() => renderer.root.findAllByType('darkselect-fixture').find(n=>n.props.label==='Gesture').props.onChange(id));
     const points = f.capture(id).points;
     await settle(() => { state.segment = {points,triggeredAt:10200,completedAt:11400,preTriggerPointCount:4,triggerMode:'button'}; redraw(); });

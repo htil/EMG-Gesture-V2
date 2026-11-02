@@ -87,7 +87,7 @@ export default function GuidedPractice(props: Props) {
         windowRef.current = null; setRestRunning(false); onCue('auto');
         const issue = practicePointIssue(window.points, PRACTICE_REST_MS);
         if (issue) { fail(issue); return; }
-        const record: PracticeRecord = { id: collectionId('practice-rest'), attemptId, flowVersion: 2, kind: 'rest',
+        const record: PracticeRecord = { id: collectionId('practice-rest'), attemptId, flowVersion: 3, kind: 'rest',
           participantId: session.participantId, experimentId: session.experimentId, sessionId: session.sessionId,
           generation: session.generation, condition: session.condition, round: session.round,
           signalSource: source, channelIndex: channel, createdAt: Date.now(), settings, points: window.points };

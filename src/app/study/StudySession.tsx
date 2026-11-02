@@ -1038,6 +1038,11 @@ export default function StudySession() {
   }
 
   if (!session) return null;
+  // Do not reinterpret or migrate a saved movement to a different physical class.
+  if (session.trials.some(trial => !DEFAULT_GESTURES.some(gesture => gesture.id === trial.gestureId))
+    || session.runs.some(run => run.outcomes.some(outcome => !DEFAULT_GESTURES.some(gesture => gesture.id === outcome.expectedGestureId)))) {
+    return <main className="mx-auto max-w-2xl p-8 text-white"><h1 className="text-xl">Historical gesture set</h1><p className="mt-4">This saved session uses an earlier gesture set. Its records have not been renamed or deleted. Ask the researcher to archive it and use a new participant session for Wrist up / Wrist down (palm down). Do not mix earlier examples with wrist examples.</p></main>;
+  }
 
   const signalValue = calibratedSignalData[calibratedSignalData.length - 1]?.value ?? 0;
   const captureStatus: CaptureStatus = liveConnectionStatus === 'error'
@@ -1375,7 +1380,7 @@ export default function StudySession() {
             revisionRef.current = null; openCapture.current = null;
             setRehearsal(rehearsalSession(session)); setGestureId(DEFAULT_GESTURES[0].id); setPracticeMode('rehearsal');
           }} />}
-        {practiceGuide && <PracticeGuide step={practiceGuide} busy={isRecording || countingDown || training || saving || inspectedTrialId !== null} />}
+        {practiceGuide && inspectedTrialId === null && <PracticeGuide step={practiceGuide} busy={isRecording || countingDown || training || saving} />}
         {inPractice && gameIntroduction && <section aria-label="Practice game introduction" className="rounded-3xl border border-cyan-300/40 bg-slate-900 p-6 text-white">
           <p className="text-sm uppercase tracking-wide text-cyan-200">Before the practice game</p>
           <h1 className="mt-2 text-2xl">Try your practice model, not a surprise task</h1>
@@ -1393,6 +1398,7 @@ export default function StudySession() {
         </section>}
         {inPractice && !gameIntroduction && <section aria-label="Practice objective" className="rounded-3xl border-2 border-cyan-300/50 bg-slate-900 p-5">
           <p className="text-sm font-semibold uppercase tracking-wider text-cyan-200">Practice — separate model and records</p>
+          <p className="mt-2 text-sm text-slate-200">Keep your palm down. Wrist up means bend your wrist upward (extension); Wrist down means bend it downward (flexion). Practise three examples of each. Rest between movements; resting is setup, not a gesture class.</p>
           {practiceArchive.current && <p className="mt-2 text-xs text-slate-300">{practiceArchive.current.pending.length ? `${practiceArchive.current.pending.length} practice records waiting to save` : 'Practice records saved and read back'}</p>}
           <DismissibleNotice message={practiceArchive.current?.error ?? ''} summary="Practice save issue" />
           {!!practiceArchive.current?.pending.length && <button data-practice-target="practice-save-retry" type="button" className="mt-3 rounded-xl border border-white/30 px-4 py-2" onClick={() => void practiceArchive.current?.flush()}>Retry saving practice</button>}
@@ -1731,6 +1737,7 @@ export default function StudySession() {
       </main>
       {inspectedTrialId && trials.some((trial) => trial.id === inspectedTrialId) && (
         <SampleGraphPanel
+          guided={inPractice}
           trial={trials.find((trial) => trial.id === inspectedTrialId) ?? trials[0]}
           trials={trials.filter((trial) => trial.gestureId === trials.find((item) => item.id === inspectedTrialId)?.gestureId)}
           onClose={() => setInspectedTrialId(null)}

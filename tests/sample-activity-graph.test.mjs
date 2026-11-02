@@ -13,6 +13,15 @@ async function load(){
  }}]});
  const m=new Module(root+'tests/sample-graph.cjs');m.paths=require.resolve.paths('react');m._compile(bundle.outputFiles[0].text,root+'tests/sample-graph.cjs');return m.exports;
 }
+test('Practice graph guidance lives in the actual modal and points at its real close X',async()=>{
+ const module=await load();let closed=0,renderer;
+ const trial={id:'sample',gestureName:'Wrist up',capturedAt:1,points:[{time:0,value:-1},{time:50,value:1}]};
+ await act(()=>{renderer=create(React.createElement(module.default,{trial,trials:[trial],guided:true,onClose(){closed++;},onSelect(){}}));});
+ try{const dialog=renderer.root.findByProps({role:'dialog'});assert.equal(dialog.props['aria-modal'],true);
+ const guide=dialog.findByProps({'aria-label':'Saved graph guidance'});assert.match(text(guide),/time|seconds/i);assert.match(text(guide),/not.*better/i);assert.match(text(guide),/X.*top right/i);
+ const close=dialog.findByProps({'data-practice-target':'graph-close'});assert.match(close.props.className,/ring/);await act(()=>close.props.onClick());assert.equal(closed,1);
+ }finally{await act(()=>renderer.unmount());}
+});
 test('expanded participant sample graph uses the existing positive activity display without changing raw data',async()=>{
  const module=await load();const points=[{time:1000,value:-3},{time:1025,value:4},{time:1025,value:-2},{time:1100,value:1}];const trial={id:'sample-1',gestureName:'Wrist up',capturedAt:2000,points};const original=structuredClone(trial);let renderer;
  await act(()=>{renderer=create(React.createElement(module.default,{trial,trials:[trial],onClose(){},onSelect(){}}));});

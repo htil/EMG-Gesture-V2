@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Line,
   LineChart,
@@ -78,12 +78,33 @@ export default function SampleGraphPanel({
   trials,
   onClose,
   onSelect,
+  guided = false,
 }: {
   trial: StoredTrial;
   trials: StoredTrial[];
   onClose: () => void;
   onSelect: (sampleId: string) => void;
+  guided?: boolean;
 }) {
+  const dialog = useRef<HTMLElement | null>(null);
+  const closeButton = useRef<HTMLButtonElement | null>(null);
+  const close = useRef(onClose);
+  close.current = onClose;
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const previous = document.activeElement as HTMLElement | null;
+    closeButton.current?.focus();
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); close.current(); }
+      if (event.key !== 'Tab') return;
+      const controls = Array.from(dialog.current?.querySelectorAll<HTMLElement>('button, summary, [tabindex="0"]') ?? []).filter(node => node.getClientRects().length > 0 && !node.hasAttribute('disabled'));
+      const first = controls[0], last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    };
+    document.addEventListener('keydown', keydown);
+    return () => { document.removeEventListener('keydown', keydown); if (previous?.isConnected) previous.focus(); };
+  }, []);
   const [hovered, setHovered] = useState<ChartPoint | null>(null);
   const [tooltip, setTooltip] = useState<{ x: number; y: number } | null>(null);
   const [copied, setCopied] = useState(false);
@@ -144,19 +165,20 @@ export default function SampleGraphPanel({
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/50">
-      <button type="button" className="absolute inset-0 cursor-default" aria-label="Close sample graph" onClick={onClose} />
-      <aside className="relative flex h-full w-full max-w-xl flex-col border-l border-white/10 bg-slate-900 text-white shadow-2xl">
+      <button type="button" tabIndex={-1} className="absolute inset-0 cursor-default" aria-label="Close sample graph backdrop" onClick={onClose} />
+      <aside ref={dialog} role="dialog" aria-modal={true} aria-label="Saved sample graph" className="relative flex h-full w-full max-w-xl flex-col border-l border-white/10 bg-slate-900 text-white shadow-2xl">
         <div className="flex items-start justify-between gap-3 border-b border-white/10 px-5 py-4">
           <div>
             <p className="text-[10px] uppercase tracking-[0.18em] text-cyan-300/80">Saved sample</p>
             <h2 className="mt-1 text-lg font-medium text-white">{trial.gestureName}</h2>
             <p className="mt-1 text-sm leading-6 text-white/70">This shows the activity recorded during your movement. A higher line means more activity, not a better movement.</p>
           </div>
-          <button type="button" onClick={onClose} className="rounded-lg p-1.5 text-white/60 hover:bg-white/10 hover:text-white" aria-label="Close sample graph">
+          <button ref={closeButton} data-practice-target="graph-close" type="button" onClick={onClose} className={`shrink-0 rounded-lg p-2.5 text-white/80 hover:bg-white/10 hover:text-white ${guided ? 'ring-2 ring-cyan-300 ring-offset-2 ring-offset-slate-900' : ''}`} aria-label="Close sample graph">
             <X className="h-4 w-4" />
           </button>
         </div>
 
+        {guided && <section aria-label="Saved graph guidance" className="shrink-0 border-b border-cyan-300/40 bg-cyan-300/10 px-5 py-3 text-sm leading-5 text-cyan-50">Use this larger graph to inspect a saved example. Left to right is time in seconds; the line shows recorded muscle activity. A higher line is not a better movement or a recognition score. The highlighted X at the top right closes this graph and returns to your examples. You can also press Escape.</section>}
         {ordered.length > 1 && (
           <div className="flex gap-2 overflow-x-auto border-b border-white/10 px-5 py-3">
             {ordered.map((item, index) => (

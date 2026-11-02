@@ -22,7 +22,7 @@ macOS/Linux use `npm ci` and `npm run review:practice` instead. Package installa
 - This is the verified development/review launcher, not a production deployment recipe.
 - Tests, typecheck and build passed on Linux with cached dependencies; native Windows installation/execution and physical BLE were not observed by the agent.
 - Private minified preview still fails with the inherited `exports is not defined` runtime error. Build success does not resolve that blocker.
-- Planned gesture names are Wrist up / Wrist down, but gesture-set/game mapping changes are deferred. Current temporary Pinch/Squeeze/Relax defaults remain unchanged; this delivery does not claim those have been replaced.
+- This isolated refinement candidate uses Wrist up (extension) / Wrist down (flexion), palm down, with three retained Practice examples each. Rest calibration remains separate. Historical IDs are not renamed. This candidate has not been published or deployed to the laptop; see `docs/TWO_WRIST_REFINEMENT.md` for verification and remaining limits.
 - Real participant data belongs only on the machine running its study API. The whole `/data/` directory is ignored to prevent accidental publishing. This branch does not migrate your existing IDs or records.
 
-The feature branch is for review; it does not merge into main. See `docs/ACTIVITY_FEEDBACK_REFINEMENT.md` for the latest UI delta and limitations.
+The feature branch is for review; it does not merge into main. See `docs/TWO_WRIST_REFINEMENT.md` for the latest UI delta and limitations; `docs/ACTIVITY_FEEDBACK_REFINEMENT.md` records the earlier delivered pass.

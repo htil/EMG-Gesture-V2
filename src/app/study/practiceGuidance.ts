@@ -35,6 +35,6 @@ export function practiceGuidance(s: GuidanceState): PracticeGuideStep | null {
     if (!s.modelReady) return step('train', 'Teach the app your movements', 'Press Train model. The app will use the examples you kept to try recognising your movements.', 'train');
     return step('game-handoff', 'Try your examples in the game', 'Press Play to read how the game works. The game will not start yet.', 'play');
   }
-  if (s.stage === 'results') return step('results', 'How did practice go?', 'Look at your game score and the movements the app recognised. You can check your examples again before starting the study.', 'results');
+  if (s.stage === 'results') return step('results', 'How did practice go?', 'Read What these results mean: game score is not recognition accuracy. Unknown is unsuccessful recognition; recording failures are separate. Replay game keeps the same samples and model. Review Samples / Retrain checks or changes examples. Begin collection leaves Practice for measured work.');
   return null;
 }

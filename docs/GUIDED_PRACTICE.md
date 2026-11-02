@@ -1,5 +1,7 @@
 # Guided rehearsal using the actual study flow
 
+> Historical implementation snapshot (flowVersion 2). The current two-wrist candidate supersedes the class list, Practice dose, Graph/Results guidance and calibration description below; see [TWO_WRIST_REFINEMENT.md](TWO_WRIST_REFINEMENT.md). Version 2 records remain historical, not relabelled wrist data. The current resting recording computes the frozen mean + 3 population-SD detector boundary.
+
 ## Scope and checkpoint
 
 The faithful rehearsal pass starts from local checkpoint `dc1ab3ed3cf87ef9c56cc593574db8df96a6b613` (participant theme/error/debug controls), following guided Practice/rest fixes in `4b31811`. The user-accessible branch is `feature/real-flow-practice`. No branch was pushed. This is not the older calibration candidate.

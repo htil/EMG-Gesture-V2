@@ -24,7 +24,7 @@ test('actual measured hook capture survives reload as evidence only, then rest-o
  assert.equal(JSON.parse(localStorage.getItem('emg-study-session')).trials.length,0,'uncalibrated Threshold has no adaptive fallback');
  await h.click('Redo resting setup');await h.click('Begin resting recording');await h.advance(17500);
  let saved=JSON.parse(localStorage.getItem('emg-study-session'));assert.equal(saved.trials.length,1);const first=saved.trials[0];assert.ok(first.calibration);
- await h.remount();await h.click('Start mock stream');await h.settle(()=>h.renderer.root.findAllByType('darkselect-fixture').find(n=>n.props.label==='Gesture').props.onChange('squeeze'));await h.advance(6000);
+ await h.remount();await h.click('Start mock stream');await h.settle(()=>h.renderer.root.findAllByType('darkselect-fixture').find(n=>n.props.label==='Gesture').props.onChange('wrist-down'));await h.advance(6000);
  saved=JSON.parse(localStorage.getItem('emg-study-session'));assert.equal(saved.trials.length,1,'reload cannot rearm historical rest');
  await h.click('Redo resting setup');await h.click('Begin resting recording');await h.advance(17500);
  saved=JSON.parse(localStorage.getItem('emg-study-session'));assert.equal(saved.trials.length,2);assert.deepEqual(saved.trials.find(x=>x.id===first.id).calibration,first.calibration);assert.notEqual(saved.trials.find(x=>x.id!==first.id).calibration.revision,first.calibration.revision);
@@ -37,16 +37,17 @@ test('mounted Threshold UI has a read-only envelope boundary rather than a misle
  assert.ok(h.renderer.root.findAllByProps({'aria-label':'Fixed envelope boundary'}).length===1);
 });
 
-test('rest-only recalibration returns to the separately cued Relax source rather than Mock active cycling',async t=>{
- const h=await mount(t,'threshold',true);await h.click('Back to capture');await h.click('Start mock stream');await h.settle(()=>h.renderer.root.findAllByType('darkselect-fixture').find(n=>n.props.label==='Gesture').props.onChange('relax'));
+test('rest-only recalibration archives idle reference separately from active wrist captures',async t=>{
+ const h=await mount(t,'threshold',true);await h.click('Back to capture');await h.click('Start mock stream');
  await h.click('Redo resting setup');await h.click('Begin resting recording');await h.advance(17500);
- const panel=h.renderer.root.findAll(n=>n.type?.name==='LivePanel')[0];assert.ok(panel.props.recordingSignalData.every(point=>point.activityEnvelope<.3),'Relax remains actual idle Mock input after reference cleanup');
+ const records=await h.read();assert.ok(records.find(r=>r.kind==='rest').points.every(point=>point.activityEnvelope<.3),'reference remains idle Mock input');
+ const saved=JSON.parse(localStorage.getItem('emg-study-session'));assert.equal(saved.trials[0].gestureId,'wrist-up');assert.ok(saved.trials[0].points.some(point=>Math.abs(point.value)>.3),'active gesture resumes after resting reference');
 });
 
 test('rest-only recalibration after actual capture and Train preserves measured dataset/model and invalidates a changed channel',async t=>{
  const h=await mount(t,'button',true);await h.click('Back to capture');await h.click('Start mock stream');await h.click('Redo resting setup');await h.click('Begin resting recording');await h.advance(10500);
- for(const id of ['pinch','squeeze','relax']){await h.settle(()=>h.renderer.root.findAllByType('darkselect-fixture').find(n=>n.props.label==='Gesture').props.onChange(id));await h.click('Capture Space');await h.advance(5000);}
- let saved=JSON.parse(localStorage.getItem('emg-study-session'));assert.equal(saved.trials.length,3);await h.click('Review captures');await h.click('Train model');await h.advance(1500);
+ for(const id of ['wrist-up','wrist-down']){await h.settle(()=>h.renderer.root.findAllByType('darkselect-fixture').find(n=>n.props.label==='Gesture').props.onChange(id));await h.click('Capture Space');await h.advance(5000);}
+ let saved=JSON.parse(localStorage.getItem('emg-study-session'));assert.equal(saved.trials.length,2);await h.click('Review captures');await h.click('Train model');await h.advance(1500);
  saved=JSON.parse(localStorage.getItem('emg-study-session'));assert.ok(saved.modelRevisionId,'actual constructed and archived model');const revision=saved.modelRevisionId,ids=saved.trials.map(t=>t.id);
  await h.click('Back to capture');await h.settle(()=>h.renderer.root.findAllByType('darkselect-fixture').find(n=>n.props.label==='Channel').props.onChange('1'));await h.advance(500);
  assert.match(text(h.renderer.toJSON()),/Redo your resting setup before recording/);await h.click('Redo resting setup');await h.click('Begin resting recording');await h.advance(10500);

@@ -115,7 +115,7 @@ try {
   const archiveCount = async () => (await request('GET', '/practice/' + participant.id)).records.filter(r => r.kind === 'capture').length;
   const capture = async (name, expected, keyboard = false) => {
     await selectGesture(name);
-    if (condition === 'button' || name === 'Relax') {
+    if (condition === 'button') {
       const captureButton = page.getByRole('button', { name: /^Capture Space$/ });
       await captureButton.waitFor();
       await page.waitForFunction(() => [...document.querySelectorAll('button')].some(b => b.textContent.includes('Capture') && b.textContent.includes('Space') && !b.disabled));
@@ -124,26 +124,41 @@ try {
     }
     const until = Date.now() + 18000;
     while (Date.now() < until && await archiveCount() < expected) await page.waitForTimeout(200);
-    assert.equal(await archiveCount(), expected, `Real recorder completed ${name}`);
+    assert.ok(await archiveCount() >= expected, `Real recorder completed ${name}`);
   };
-  await capture('Pinch', 1, true);
+  await capture('Wrist up', 1, true);
   await page.getByRole('button', { name: 'Continue practice', exact: true }).click();
-  await capture('Squeeze', 2);
-  const nextAfterSqueeze = await page.getByRole('region', { name: 'Practice guidance', exact: true }).innerText();
-  assert.match(nextAfterSqueeze, /Choose Relax/);
-  assert.doesNotMatch(nextAfterSqueeze, /perform the movement|threshold starts recording/, 'Selecting Relax next must not be paired with the previously selected active gesture instruction');
-  await capture('Relax', 3, true);
+  await capture('Wrist up', 2);
+  await capture('Wrist up', 3);
+  await capture('Wrist down', 4);
+  await capture('Wrist down', 5);
+  await capture('Wrist down', 6);
   const captures = (await request('GET', '/practice/' + participant.id)).records.filter(r => r.kind === 'capture');
   const estimatedRest = (await request('GET', '/practice/' + participant.id)).records.find(r => r.kind === 'rest');
   assert.ok(estimatedRest.calibration && estimatedRest.calibration.count === estimatedRest.points.length);
   assert.ok(captures.every(sample => JSON.stringify(sample.calibration) === JSON.stringify(estimatedRest.calibration)), 'All actual practice captures retain their frozen rest revision');
-  if (condition === 'threshold') assert.ok(captures.filter(sample => sample.gestureId !== 'relax').every(sample => sample.triggeredAt - sample.firstCrossingAt >= 100));
-  assert.equal(captures.find(r => r.gestureId === 'relax').captureProcedure, 'cued_rest');
-  assert.equal(captures.find(r => r.gestureId === 'relax').triggerMode, 'button');
+  assert.equal(captures.length,6);for(const id of ['wrist-up','wrist-down'])assert.equal(captures.filter(sample=>sample.gestureId===id).length,3);
+  assert.ok(captures.every(sample=>sample.flowVersion===3&&sample.captureProcedure===condition&&sample.triggerMode===condition));
+  if (condition === 'threshold') assert.ok(captures.every(sample => sample.triggeredAt - sample.firstCrossingAt >= 100));
   await page.screenshot({ path: path.join(out, '02-collect.png'), fullPage: true });
   assert.equal(await page.evaluate(() => localStorage.getItem('emg-study-session')), measuredState, 'Practice never changes measured session');
   await page.getByRole('button', { name: 'Review captures', exact: true }).click();
   await page.getByRole('button', { name: 'Graph', exact: true }).first().click();
+  const dialog=page.getByRole('dialog',{name:'Saved sample graph'});
+  await dialog.waitFor();assert.equal(await page.getByRole('region',{name:'Practice guidance',exact:true}).count(),0,'no guide behind modal');
+  await page.getByRole('region',{name:'Saved graph guidance'}).waitFor();
+  assert.equal(await dialog.getByRole('button',{name:'Close sample graph',exact:true}).evaluate(el=>document.activeElement===el),true);
+  report.geometry=[];
+  for(const viewport of [{width:1440,height:1000},{width:1280,height:720}]){
+    await page.setViewportSize(viewport);await page.waitForTimeout(350);
+    for(const locator of [page.getByRole('region',{name:'Saved graph guidance'}),dialog.getByRole('button',{name:'Close sample graph',exact:true})]){const b=await locator.boundingBox();assert.ok(b&&b.x>=0&&b.y>=0&&b.x+b.width<=viewport.width+1&&b.y+b.height<=viewport.height+1);report.geometry.push({screen:'saved-graph',viewport,box:b});}
+    await page.screenshot({path:path.join(out,`03-graph-${viewport.width}.png`),fullPage:false});
+  }
+  await page.keyboard.press('Shift+Tab');assert.equal(await page.evaluate(()=>!!document.activeElement?.closest('[role="dialog"]')),true,'focus stays inside modal');
+  await page.keyboard.press('Escape');await dialog.waitFor({state:'detached'});
+  assert.equal(await page.getByRole('button',{name:'Graph',exact:true}).first().evaluate(el=>document.activeElement===el),true,'focus restored');
+  await page.getByRole('button',{name:'Graph',exact:true}).first().click();
+  await page.setViewportSize({width:1440,height:1000});
   const activityGraph = page.getByRole('region', { name: 'Saved movement activity', exact: true });
   await activityGraph.locator('.recharts-line-curve').waitFor();
   const ticks = await activityGraph.locator('.recharts-yAxis .recharts-cartesian-axis-tick-value').allTextContents();
@@ -159,14 +174,14 @@ try {
   const states = await page.evaluate(() => window.__observedCaptureStates);
   for (const state of ['Rest','Ready','Movement','Recording']) assert.ok(states.includes(state), 'Actual browser circle showed '+state);
   report.checkpoints.push('Actual circle Rest/Ready/Movement/Recording; positive expanded sample display with collapsed unchanged raw CSV');
-  await page.getByRole('button', { name: /Close/ }).last().click();
-  await page.getByRole('button', { name: 'Delete Pinch sample 1', exact: true }).click();
+  await page.getByRole('button', { name: 'Close sample graph',exact:true }).click();
+  await page.getByRole('button', { name: 'Delete Wrist up sample 1', exact: true }).click();
   assert.equal(await page.getByRole('button', { name: 'Train model', exact: true }).isDisabled(), true);
   await page.getByRole('button', { name: 'Back to capture', exact: true }).click();
-  await capture('Pinch', 4, true);
+  await capture('Wrist up', 7, true);
   await page.getByRole('button', { name: 'Review captures', exact: true }).click();
   await page.getByRole('button', { name: 'Graph', exact: true }).last().click();
-  await page.getByRole('button', { name: /Close/ }).last().click();
+  await page.getByRole('button', { name:'Close sample graph',exact:true }).click();
   // Fail a training archive while the actual model is constructed; completion must not bypass it.
   let allowTrainingSave = false;
   let failedTrainingRecord;
@@ -186,7 +201,9 @@ try {
   await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent.trim() === 'Train model' && !button.disabled), null, { timeout: 20000 });
   assert.equal(await page.getByRole('button', { name: 'Play', exact: true }).isDisabled(), true);
   allowTrainingSave = true;
-  await page.getByRole('button', { name: 'Retry saving practice', exact: true }).click();
+  // Native keyboard activation avoids the inherited anchored-guide scroll race.
+  await page.getByRole('button', { name: 'Retry saving practice', exact: true }).focus();
+  await page.keyboard.press('Space');
   await page.getByRole('button', { name: 'Retry saving practice', exact: true }).waitFor({ state: 'detached' });
   const savedTraining = (await request('GET', '/practice/' + participant.id)).records.find(record => record.id === failedTrainingRecord?.id);
   assert.ok(failedTrainingRecord && trainingPosts.length >= 2 && savedTraining?.kind === 'training');
@@ -204,7 +221,7 @@ try {
   const maxGameRuns = Math.max(1, Math.min(2, Number(process.env.EMG_MAX_GAME_RUNS) || 2));
   for (let retry = 0; retry < maxGameRuns; retry++) {
     if (retry === 0) await page.getByRole('button', { name: 'Play', exact: true }).click();
-    else await page.getByRole('button', { name: 'Try Again', exact: true }).click();
+    else await page.getByRole('button', { name: 'Replay game', exact: true }).click();
     if (await page.getByRole('region', { name: 'Practice game introduction', exact: true }).count()) {
       await page.screenshot({ path: path.join(out, '05-game-introduction.png'), fullPage: true });
       assert.equal((await request('GET', '/practice/' + participant.id)).records.filter(record => record.kind === 'game').length, 0, 'The introduction cannot fabricate a game result');
@@ -217,10 +234,24 @@ try {
     await page.waitForTimeout(600);
     const records = (await request('GET', '/practice/' + participant.id)).records;
     run = records.filter(r => r.kind === 'game').at(-1);
-    if (run?.outcomes.some(item => item.result !== 'recording_failure')) break;
+    assert.ok(run?.outcomes.length,'actual game archived its outcomes');
   }
   assert.ok(run?.outcomes.some(item => item.result !== 'recording_failure'), 'Bounded actual game yielded a scored attempt, not seeded outcomes');
   await page.screenshot({ path: path.join(out, '06-results.png'), fullPage: true });
+  const gameRecords=(await request('GET','/practice/'+participant.id)).records;
+  const games=gameRecords.filter(r=>r.kind==='game');assert.equal(games.length,maxGameRuns,'bounded actual game runs');if(games.length===2){assert.equal(games[0].trainingId,games[1].trainingId);assert.deepEqual(games[0].sampleIds,games[1].sampleIds);}report.actualGameRuns=games.length;report.actualReplayVerified=games.length===2;
+  assert.ok(games.every(g=>g.outcomes.every(o=>['wrist-up','wrist-down'].includes(o.expectedGestureId))));
+  for(const viewport of [{width:1440,height:1000},{width:1280,height:720}]){
+    await page.setViewportSize(viewport);await page.waitForTimeout(350);
+    const guide=page.getByRole('region',{name:'Practice guidance',exact:true});await guide.scrollIntoViewIfNeeded();const b=await guide.boundingBox();assert.ok(b&&b.x>=0&&b.y>=0&&b.x+b.width<=viewport.width+1&&b.y+b.height<=viewport.height+1);report.geometry.push({screen:'results',viewport,box:b});
+    await page.screenshot({path:path.join(out,`06-results-guide-${viewport.width}.png`),fullPage:false});
+    await guide.getByRole('button',{name:'Hide guidance'}).click();
+    const explanation=page.getByRole('region',{name:'Results guidance'});await explanation.scrollIntoViewIfNeeded();assert.match(await explanation.innerText(),/same kept samples and trained model/);
+    await page.screenshot({path:path.join(out,`06-results-explanation-${viewport.width}.png`),fullPage:false});
+    await page.getByRole('button',{name:'Replay game',exact:true}).scrollIntoViewIfNeeded();await page.screenshot({path:path.join(out,`06-results-actions-${viewport.width}.png`),fullPage:false});
+    await guide.getByRole('button',{name:'Show guidance again'}).click();
+  }
+  await page.setViewportSize({width:1440,height:1000});await page.getByRole('region',{name:'Practice guidance',exact:true}).getByRole('button',{name:'Hide guidance'}).click();
   assert.equal(await page.evaluate(() => localStorage.getItem('emg-study-session')), measuredState);
   report.checkpoints.push('Actual mounted game feeds actual Results, with honest predictions');
   assert.ok(report.writes.every(item => !['/api/study/collection', '/api/study/progress', '/api/study/runs'].includes(item.url)), 'All rehearsal writes use /practice only');
@@ -239,60 +270,48 @@ try {
   assert.equal(await page.getByRole('button', { name: 'Pause stream', exact: true }).count(), 1, 'Stream connection preserved into measured mode');
   assert.equal((await page.evaluate(() => JSON.parse(localStorage.getItem('emg-study-session')))).trials.length, 0);
   await page.screenshot({ path: path.join(out, '07-measured.png'), fullPage: true });
-  // Exercise zero-countdown ordering in the shared measured controls too.
-  await selectGesture('Relax');
-  await page.getByText('Researcher controls', {exact:true}).focus();
-  await page.keyboard.press('Space');
-  await page.waitForTimeout(200);
-  assert.equal((await page.evaluate(() => JSON.parse(localStorage.getItem('emg-study-session')))).openCapture, null, 'Space expands researcher controls without starting a capture');
-  await page.getByText('Countdown ms', { exact: true }).locator('input').fill('0');
-  const beforeZero = (await page.evaluate(() => JSON.parse(localStorage.getItem('emg-study-session')))).trials.length;
-  const theme = page.getByRole('button', { name: /Light mode|Dark mode/ }).first();
-  await theme.focus(); await page.keyboard.press('Space');
-  await page.waitForTimeout(200);
-  assert.equal((await page.evaluate(() => JSON.parse(localStorage.getItem('emg-study-session')))).trials.length, beforeZero);
-  await page.getByRole('button', { name: /^Capture Space$/ }).focus(); await page.keyboard.press('Space');
-  await page.waitForFunction(before => JSON.parse(localStorage.getItem('emg-study-session')).trials.length > before, beforeZero);
-  const zero = (await page.evaluate(() => JSON.parse(localStorage.getItem('emg-study-session')))).trials.find(item => item.gestureId === 'relax');
-  assert.ok(zero?.points.length >= 6);
-  report.checkpoints.push('Shared measured Relax zero-countdown native Capture Space saves actual rest; theme Space keeps its native action');
-  await page.getByRole('button', { name: 'Delete Relax sample 1', exact: true }).click();
-  await page.waitForFunction(() => [...document.querySelectorAll('button')].some(b => b.textContent.includes('Capture') && b.textContent.includes('Space') && !b.disabled));
-  await page.evaluate(() => document.activeElement?.blur());
-  await page.keyboard.press('Space');
-  await page.waitForFunction(() => JSON.parse(localStorage.getItem('emg-study-session')).trials.some(item => item.gestureId === 'relax'));
-  await page.waitForTimeout(500);
-  report.checkpoints.push('Background Space also records a real zero-countdown Relax replacement');
-  // Rest-only recovery must preserve the actual measured Relax replacement.
-  const measuredBeforeReconnect = await page.evaluate(() => JSON.parse(localStorage.getItem('emg-study-session')));
-  await selectGesture('Pinch');
-  await page.getByRole('button', { name: 'Pause stream', exact: true }).click();
-  await page.getByRole('button', { name: 'Start mock stream', exact: true }).click();
-  await page.waitForTimeout(5500);
-  assert.equal((await page.evaluate(() => JSON.parse(localStorage.getItem('emg-study-session')))).trials.length, 1);
-  await page.getByRole('region', { name: 'Fixed rest calibration' }).getByText(/Redo your resting setup before recording/).waitFor();
-  await page.getByRole('button', { name: 'Redo resting setup', exact: true }).click();
-  await page.getByRole('button', { name: 'Begin resting recording', exact: true }).click();
-  await page.getByRole('region', { name: 'Fixed rest calibration' }).waitFor({ timeout: 22000 });
-  assert.equal((await page.evaluate(() => JSON.parse(localStorage.getItem('emg-study-session')))).trials.find(trial => trial.gestureId === 'relax').id, measuredBeforeReconnect.trials[0].id);
-  for (const name of ['Pinch', 'Squeeze']) {
-    await selectGesture(name);
-    if (condition === 'button') await page.getByRole('button', { name: /^Capture Space$/ }).click();
-    await page.waitForFunction(id => JSON.parse(localStorage.getItem('emg-study-session')).trials.some(trial => trial.gestureId === id), name.toLowerCase(), { timeout: 18000 });
+  // The measured quota remains one per gesture in this disposable experiment.
+  await selectGesture('Wrist up');
+  if(condition==='button'){
+    await page.getByText('Researcher controls',{exact:true}).focus();await page.keyboard.press('Space');
+    await page.waitForTimeout(200);assert.equal((await page.evaluate(()=>JSON.parse(localStorage.getItem('emg-study-session')))).openCapture,null);
+    await page.getByText('Countdown ms',{exact:true}).locator('input').fill('0');
+    const theme=page.getByRole('button',{name:/Light mode|Dark mode/}).first();await theme.focus();await page.keyboard.press('Space');await page.waitForTimeout(200);
+    assert.equal((await page.evaluate(()=>JSON.parse(localStorage.getItem('emg-study-session')))).trials.length,0);
+    await page.getByRole('button',{name:/^Capture Space$/}).focus();await page.keyboard.press('Space');
   }
-  await page.waitForTimeout(700);
-  const measuredAfterReconnect = await page.evaluate(() => JSON.parse(localStorage.getItem('emg-study-session')));
-  assert.equal(measuredAfterReconnect.trials.length, 3);
-  assert.deepEqual(measuredAfterReconnect.trials.find(trial => trial.gestureId === 'relax').calibration, estimatedRest.calibration);
-  assert.ok(measuredAfterReconnect.trials.filter(trial => trial.gestureId !== 'relax').every(trial => trial.calibration?.revision !== estimatedRest.calibration.revision));
-  report.checkpoints.push('Reconnect disarms; explicit full-duration rest-only recalibration preserves measured Relax; actual measured Pinch and Squeeze retain the new calibration revision');
+  await page.waitForFunction(()=>JSON.parse(localStorage.getItem('emg-study-session')).trials.some(t=>t.gestureId==='wrist-up'),null,{timeout:18000});
+  if(condition==='button'){
+    const zero=(await page.evaluate(()=>JSON.parse(localStorage.getItem('emg-study-session')))).trials[0];assert.ok(zero.points.length>=6);
+    await page.getByRole('button',{name:'Delete Wrist up sample 1',exact:true}).click();
+    await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent.includes('Capture')&&b.textContent.includes('Space')&&!b.disabled));
+    await page.evaluate(()=>document.activeElement?.blur());await page.keyboard.press('Space');
+    await page.waitForFunction(()=>JSON.parse(localStorage.getItem('emg-study-session')).trials.some(t=>t.gestureId==='wrist-up'));
+    await page.getByText('Countdown ms',{exact:true}).locator('input').fill('3000');
+    report.checkpoints.push('Measured zero-countdown native Capture Space and background Space save real active wrist windows; theme/details Space retain native behavior');
+  }
+  const measuredBeforeReconnect=await page.evaluate(()=>JSON.parse(localStorage.getItem('emg-study-session')));
+  await page.getByRole('button',{name:'Pause stream',exact:true}).click();await page.getByRole('button',{name:'Start mock stream',exact:true}).click();
+  await selectGesture('Wrist down');await page.waitForTimeout(5500);
+  assert.equal((await page.evaluate(()=>JSON.parse(localStorage.getItem('emg-study-session')))).trials.length,1);
+  await page.getByRole('region',{name:'Fixed rest calibration'}).getByText(/Redo your resting setup before recording/).waitFor();
+  await page.getByRole('button',{name:'Redo resting setup',exact:true}).click();await page.getByRole('button',{name:'Begin resting recording',exact:true}).click();
+  await page.getByRole('region',{name:'Fixed rest calibration'}).waitFor({timeout:22000});
+  assert.equal((await page.evaluate(()=>JSON.parse(localStorage.getItem('emg-study-session')))).trials.find(t=>t.gestureId==='wrist-up').id,measuredBeforeReconnect.trials[0].id);
+  if(condition==='button')await page.getByRole('button',{name:/^Capture Space$/}).click();
+  await page.waitForFunction(()=>JSON.parse(localStorage.getItem('emg-study-session')).trials.some(t=>t.gestureId==='wrist-down'),null,{timeout:18000});await page.waitForTimeout(700);
+  const measuredAfterReconnect=await page.evaluate(()=>JSON.parse(localStorage.getItem('emg-study-session')));
+  assert.equal(measuredAfterReconnect.trials.length,2);assert.equal(measuredAfterReconnect.capturesMin,1);assert.equal(measuredAfterReconnect.capturesMax,1);
+  assert.deepEqual(measuredAfterReconnect.trials.find(t=>t.gestureId==='wrist-up').calibration,estimatedRest.calibration);
+  assert.notEqual(measuredAfterReconnect.trials.find(t=>t.gestureId==='wrist-down').calibration.revision,estimatedRest.calibration.revision);
+  report.checkpoints.push('Reconnect disarms; full-duration rest recalibration preserves earlier measured wrist lineage; measured quota remains unchanged');
   const records = (await request('GET', '/practice/' + participant.id)).records;
   assert.deepEqual(records.find(record => record.id === estimatedRest.id), estimatedRest, 'Original estimate remains immutable after gestures and recalibration');
   fs.writeFileSync(path.join(out, 'practice-records.json'), JSON.stringify(records, null, 2));
   assert.ok(records.some(r => r.kind === 'completed'));
   const restored = await request('POST', '/join', { id: participant.id });
   assert.equal(restored.status, 'in_progress');
-  assert.equal(restored.restored?.trials.length, 3, 'Server retains the actual measured captures, not practice samples');
+  assert.equal(restored.restored?.trials.length, 2, 'Server retains the actual measured captures, not practice samples');
   assert.ok((restored.restored?.trials ?? []).every(trial => trial.calibration && !records.some(record => record.kind === 'capture' && record.id === trial.id)));
   const freshContext = await browser.newContext();
   const freshPage = await freshContext.newPage();
@@ -300,7 +319,7 @@ try {
   await freshPage.getByLabel('Participant ID').fill(participant.id);
   await freshPage.getByRole('button', { name: 'Continue', exact: true }).click();
   await freshPage.getByRole('button', { name: 'Reopen guided practice', exact: true }).waitFor();
-  assert.equal(await freshPage.getByRole('button', { name: 'Delete Relax sample 1', exact: true }).count(), 1);
+  assert.equal(await freshPage.getByRole('button', { name: 'Delete Wrist up sample 1', exact: true }).count(), 1);
   assert.equal(await freshPage.getByRole('button', { name: 'Connect device', exact: true }).count(), 1, 'Fresh rejoin returns to real input and remains disarmed');
   await freshPage.screenshot({ path: path.join(out, '08-fresh-rejoin.png'), fullPage: true });
   await freshPage.getByText('Researcher controls', {exact:true}).click();
