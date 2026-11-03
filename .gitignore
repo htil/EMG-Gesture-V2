@@ -1,5 +1,5 @@
 # Dependencies
-node_modules/
+node_modules
 
 # Build output
 dist/
@@ -32,3 +32,11 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Local study records and settings are never published
+/data/
+
+# Study records written while a session runs
+data/rounds.csv
+data/sessions/*
+!data/sessions/.gitkeep

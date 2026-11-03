@@ -25,6 +25,7 @@ const GANGLION_SEND_UUID = '2d30c083-f39f-4ce6-923f-3484ea480596';
 const START_STREAM_COMMAND = 'b';
 const STOP_STREAM_COMMAND = 's';
 const BOARD_NAME = 'ganglion';
+const GANGLION_SAMPLE_INTERVAL_MS = 1000 / 200;
 
 export interface GanglionPacket {
   packetId: number;
@@ -127,6 +128,7 @@ export async function connectGanglion(): Promise<GanglionConnection> {
   const sampleListeners = new Set<SampleListener>();
   const disconnectedListeners = new Set<() => void>();
   const rawDataPacketToSample = constants.rawDataToSampleObjectDefault(channelCount);
+  let lastSampleTimestamp = 0;
   const server = await device.gatt.connect();
   const service = await server.getPrimaryService(GANGLION_SERVICE_UUID);
   const receiveCharacteristic = await service.getCharacteristic(GANGLION_RECEIVE_UUID);
@@ -140,7 +142,10 @@ export async function connectGanglion(): Promise<GanglionConnection> {
       return;
     }
 
-    const parsedSamples = parseSamples(bytes, rawDataPacketToSample);
+    const parsedSamples = parseSamples(bytes, rawDataPacketToSample, lastSampleTimestamp);
+    if (parsedSamples.length > 0) {
+      lastSampleTimestamp = parsedSamples[parsedSamples.length - 1].timestamp;
+    }
     const packet = packetFromBytes(bytes, parsedSamples);
 
     listeners.forEach((listener) => listener(packet));
@@ -188,12 +193,23 @@ function dataViewToBytes(value?: DataView) {
 
 function parseSamples(
   bytes: Uint8Array,
-  rawDataPacketToSample: { rawDataPacket?: Buffer }
+  rawDataPacketToSample: { rawDataPacket?: Buffer },
+  lastSampleTimestamp: number,
 ): GanglionSample[] {
   rawDataPacketToSample.rawDataPacket = Buffer.from(bytes);
+  const parsedSamples = utilities.parseGanglion(rawDataPacketToSample);
+  const receivedAt = Date.now();
+  const firstFallbackTimestamp = Math.max(
+    receivedAt - Math.max(0, parsedSamples.length - 1) * GANGLION_SAMPLE_INTERVAL_MS,
+    lastSampleTimestamp + GANGLION_SAMPLE_INTERVAL_MS,
+  );
 
-  return utilities.parseGanglion(rawDataPacketToSample)
-    .map((sample) => renameDataProp(sample, bytes[0]))
+  return parsedSamples
+    .map((sample, index) => renameDataProp(
+      sample,
+      bytes[0],
+      firstFallbackTimestamp + index * GANGLION_SAMPLE_INTERVAL_MS,
+    ))
     .filter((sample): sample is GanglionSample => sample.data.length > 0);
 }
 
@@ -203,11 +219,15 @@ function renameDataProp(
     timestamp?: number;
     channelData?: number[];
   },
-  packetId: number
+  packetId: number,
+  fallbackTimestamp: number,
 ): GanglionSample {
   return {
     packetId: sample.sampleNumber ?? packetId,
-    timestamp: sample.timestamp ?? Date.now(),
+    // Compressed Ganglion packets commonly decode to two samples without
+    // timestamps. Give each sample its 200 Hz position instead of assigning
+    // both the same Date.now(), which would make the recorder drop one.
+    timestamp: sample.timestamp ?? fallbackTimestamp,
     data: sample.channelData ?? [],
   };
 }
