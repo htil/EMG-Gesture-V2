@@ -9,6 +9,7 @@ import {
   submitGameRun,
   type GestureTestOutcome,
 } from './study/gameHandoff';
+import { recognitionResult } from './study/recognition';
 import type { Gesture } from './pipeline';
 
 export type QteStatus = 'rest' | 'ready' | 'recording' | 'processing' | 'complete';
@@ -231,6 +232,8 @@ export default function GameScreen({
   condition,
   obstacleCount = DEFAULT_OBSTACLE_COUNT,
   startingLives = DEFAULT_STARTING_LIVES,
+  testControls = true,
+  practice = false,
 }: {
   onExit: () => void;
   exitLabel?: string;
@@ -245,8 +248,12 @@ export default function GameScreen({
   condition?: 'button' | 'threshold';
   obstacleCount?: number;
   startingLives?: number;
+  testControls?: boolean;
+  practice?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [debugKeyboardEnabled, setDebugKeyboardEnabled] = useState(true);
+  const debugKeyboardEnabledRef = useRef(true);
   const [runnerQteState, setRunnerQteState] = useState<GameQteViewState>({
     status: 'rest',
     progress: 0,
@@ -293,6 +300,8 @@ export default function GameScreen({
 
     let cancelled = false;
     let unmountGame = () => {};
+    debugKeyboardEnabledRef.current = testControls;
+    setDebugKeyboardEnabled(testControls);
     scoreRef.current = 0;
     outcomesRef.current = [];
     gameOverStartedRef.current = false;
@@ -315,6 +324,7 @@ export default function GameScreen({
       if (!cancelled) {
         gameModuleRef.current = game;
         unmountGame = game.mountGame(container, {
+          isDebugKeyboardEnabled: () => debugKeyboardEnabledRef.current,
           obstacleCount,
           startingLives,
           onQteUpdate: (nextState) => {
@@ -396,13 +406,7 @@ export default function GameScreen({
                 attemptId: encounterId,
                 expectedGestureId: expectedGesture.id,
                 expectedGestureName: expectedGesture.name,
-                result: !prediction
-                  ? 'recording_failure'
-                  : prediction.predictedGestureId === 'unknown'
-                    ? 'unknown'
-                    : correct
-                      ? 'correct'
-                      : 'wrong',
+                result: recognitionResult(expectedGesture.id, prediction),
                 predictedGestureId: prediction?.predictedGestureId ?? null,
                 predictedGestureName: prediction?.predictedGestureName ?? null,
               });
@@ -421,10 +425,11 @@ export default function GameScreen({
     return () => {
       cancelled = true;
       unmountGame();
+      debugKeyboardEnabledRef.current = testControls;
       gameModuleRef.current = null;
       if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
     };
-  }, [obstacleCount, startingLives]);
+  }, [obstacleCount, startingLives, testControls]);
 
   const visibleQteState = qteState ?? runnerQteState;
   const visibleScore = score ?? runnerScore;
@@ -475,6 +480,7 @@ export default function GameScreen({
           <div className="rounded-2xl border border-cyan-300/15 bg-slate-950/80 px-3 py-2.5 shadow-2xl backdrop-blur-md md:px-4">
             <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-cyan-300">EMG Gesture</p>
             <p className="text-sm font-semibold text-white">Neural Runner</p>
+            {practice && <p className="mt-1 text-sm font-semibold text-cyan-200">Practice — separate model</p>}
           </div>
         </div>
 
@@ -559,9 +565,23 @@ export default function GameScreen({
         <ArrowLeft className="h-4 w-4" />
       </button>
 
-      <div className="pointer-events-none fixed bottom-4 left-1/2 z-40 -translate-x-1/2 rounded-full border border-white/10 bg-slate-950/65 px-4 py-2 text-[10px] uppercase tracking-[0.16em] text-slate-300 backdrop-blur-md">
-        Arrow keys to jump and switch lanes
-      </div>
+      {testControls && <div className="pointer-events-auto fixed bottom-4 left-1/2 z-[110] -translate-x-1/2 rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-2 text-xs text-slate-300 backdrop-blur-md">
+        <label className="flex cursor-pointer items-center justify-center gap-2">
+          <input
+            type="checkbox"
+            checked={debugKeyboardEnabled}
+            onChange={(event) => {
+              debugKeyboardEnabledRef.current = event.target.checked;
+              setDebugKeyboardEnabled(event.target.checked);
+            }}
+            className="accent-cyan-400"
+          />
+          Debug keyboard controls
+        </label>
+        <p className="mt-1 text-center text-[10px] text-slate-400">
+          {debugKeyboardEnabled ? 'Arrow keys: jump / switch lanes · not EMG validation' : 'Arrow keys off · gesture recognition unchanged'}
+        </p>
+      </div>}
     </div>
   );
 }

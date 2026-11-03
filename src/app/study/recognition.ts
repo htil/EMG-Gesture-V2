@@ -17,6 +17,12 @@ export interface RecognitionSummary {
   breakdown: GestureBreakdown[];
 }
 
+export function recognitionResult(expectedGestureId: string, prediction: { predictedGestureId: string } | null): GestureTestOutcome['result'] {
+  if (!prediction) return 'recording_failure';
+  if (prediction.predictedGestureId === 'unknown') return 'unknown';
+  return prediction.predictedGestureId === expectedGestureId ? 'correct' : 'wrong';
+}
+
 export function summarizeRecognition(outcomes: GestureTestOutcome[], gestures: Gesture[]): RecognitionSummary {
   const recordingFailures = outcomes.filter((outcome) => outcome.result === 'recording_failure').length;
   const scored = outcomes.filter((outcome) => outcome.result !== 'recording_failure');

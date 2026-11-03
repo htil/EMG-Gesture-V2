@@ -18,6 +18,7 @@ type UseSignalSourceResult = {
   recordingSignalData: SignalPoint[];
   signalSourceMode: SignalSourceMode;
   isStreaming: boolean;
+  streamEpoch: number;
   selectSignalSourceMode: (mode: SignalSourceMode) => Promise<void>;
   startStream: () => Promise<void>;
   startStreamForMode: (mode: SignalSourceMode) => Promise<void>;
@@ -84,6 +85,7 @@ export function useSignalSource(
   const [recordingSignalData, setRecordingSignalData] = useState<SignalPoint[]>([]);
   const [signalSourceMode, setSignalSourceMode] = useState<SignalSourceMode>('mock');
   const [isStreaming, setIsStreaming] = useState(false);
+  const [streamEpoch, setStreamEpoch] = useState(0);
   const [liveConnectionStatus, setLiveConnectionStatus] = useState<LiveConnectionStatus>('disconnected');
   const [liveConnectionMessage, setLiveConnectionMessage] = useState('Idle. Select a source and start stream.');
   const [liveDeviceName, setLiveDeviceName] = useState<string | null>(null);
@@ -109,6 +111,7 @@ export function useSignalSource(
   }, [displaySensitivity]);
 
   useEffect(() => {
+    setStreamEpoch(epoch => epoch + 1);
     selectedChannelIndexRef.current = selectedChannelIndex;
     featureWindowRef.current = [];
     activityReferenceWindowRef.current = [];
@@ -152,6 +155,7 @@ export function useSignalSource(
   }, []);
 
   const resetDisplayState = useCallback(() => {
+    setStreamEpoch(epoch => epoch + 1);
     setSignalData([]);
     setRecordingSignalData([]);
     setLivePacketCount(0);
@@ -185,6 +189,7 @@ export function useSignalSource(
   }, []);
 
   const selectSignalSourceMode = useCallback(async (mode: SignalSourceMode) => {
+    setStreamEpoch(epoch => epoch + 1);
     await disconnectGanglion();
     setIsStreaming(false);
     setSignalSourceMode(mode);
@@ -199,6 +204,7 @@ export function useSignalSource(
   }, [disconnectGanglion, resetDisplayState]);
 
   const startMockStream = useCallback(async () => {
+    setStreamEpoch(epoch => epoch + 1);
     await disconnectGanglion();
     resetDisplayState();
     setSignalSourceMode('mock');
@@ -209,6 +215,7 @@ export function useSignalSource(
   }, [disconnectGanglion, resetDisplayState]);
 
   const connectGanglion = useCallback(async () => {
+    setStreamEpoch(epoch => epoch + 1);
     if (!isWebBluetoothAvailable()) {
       setLiveConnectionStatus('error');
       setLiveConnectionMessage('Web Bluetooth needs Chrome or Edge on localhost/HTTPS.');
@@ -260,6 +267,7 @@ export function useSignalSource(
       });
 
       connection.onDisconnected(() => {
+        setStreamEpoch(epoch => epoch + 1);
         if (ganglionRef.current === connection) {
           ganglionRef.current = null;
         }
@@ -297,6 +305,7 @@ export function useSignalSource(
   }, [signalSourceMode, startStreamForMode]);
 
   const stopStream = useCallback(async () => {
+    setStreamEpoch(epoch => epoch + 1);
     await disconnectGanglion();
     setIsStreaming(false);
     resetDisplayState();
@@ -420,6 +429,7 @@ export function useSignalSource(
     recordingSignalData,
     signalSourceMode,
     isStreaming,
+    streamEpoch,
     selectSignalSourceMode,
     startStream,
     startStreamForMode,

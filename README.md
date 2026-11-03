@@ -1,6 +1,12 @@
 
 # EMG Gesture V2
 
+See **[Study integration notes](docs/STUDY_INTEGRATION.md)** for the current merged changes, retained game behavior, verification results and remaining study checks.
+
+## Current laptop review instructions
+
+Start with **[LAPTOP_START.md](LAPTOP_START.md)**. Use `npm run review:practice` to generate fresh disposable IDs without copying participant data. All IDs now default to real input; Mock must be selected explicitly for test-mode review. The older workflow notes and seeded-ID examples below are not the current laptop review recipe.
+
 EMG Gesture V2 is a biosignal capture study interface for comparing threshold-triggered and participant button-triggered recording with either mock data or a live OpenBCI Ganglion signal.
 
 ## Study flow

@@ -220,7 +220,8 @@ export function mountGame(container, options = {}) {
   clock.getDelta();
 
   const onKeyDown = (event) => {
-    if (event.repeat) return;
+    // Gate only debug keyboard input; gesture/QTE control entry points stay active.
+    if (event.repeat || options.isDebugKeyboardEnabled?.() === false) return;
     if (event.code == 'ArrowUp') startJump();
     if (event.code == 'ArrowLeft') startLaneSwitch(-1);
     if (event.code == 'ArrowRight') startLaneSwitch(1);

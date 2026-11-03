@@ -60,6 +60,8 @@ export interface CollectionEvent {
 }
 
 export interface SampleRecord {
+  calibration?: import('./frozenCalibration.mjs').FrozenCalibration | null;
+  firstCrossingAt?: number | null;
   sampleId: string;
   sessionId: string;
   participantId: string;

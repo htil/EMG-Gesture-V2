@@ -1,0 +1,94 @@
+[[AdvancedFormat]]
+
+[[Block:Background - once per participant]]
+[[Question:DB]]
+[[ID:BACKGROUND_INSTRUCTIONS]]
+Questionnaire draft for advisor review. Complete this form once before using the application. You may skip any question. Please do not enter names or contact details. Submit this background response separately.
+
+[[Question:TE:SingleLine]]
+[[ID:GROUP_CODE]]
+Enter the group code given to you, preserving its case exactly.
+
+[[Question:TE:SingleLine]]
+[[ID:INDIVIDUAL_SUFFIX]]
+Enter your individual suffix exactly as given, preserving its case. Do not enter a name.
+
+[[Question:TE:SingleLine]]
+[[ID:DEM_AGE]]
+Enter your age.
+
+[[Question:MC:SingleAnswer:Vertical]]
+[[ID:DEM_GENDER]]
+What is your gender?
+[[AdvancedChoices]]
+[[Choice:1]]
+Male
+[[Choice:2]]
+Female
+[[Choice:3]]
+Prefer not to say
+[[Choice:4]]
+Prefer to self-describe
+
+[[Question:TE:SingleLine]]
+[[ID:DEM_GENDER_DESCRIPTION]]
+Optional: if you chose "Prefer to self-describe", you may describe your gender here.
+
+[[Question:MC:MultipleAnswer:Vertical]]
+[[ID:DEM_ETHNICITY]]
+What is your ethnicity? Select all that apply.
+[[AdvancedChoices]]
+[[Choice:1]]
+Asian
+[[Choice:2]]
+Black/African
+[[Choice:3]]
+Caucasian
+[[Choice:4]]
+Hispanic/Latinx
+[[Choice:5]]
+Native American
+[[Choice:6]]
+Pacific Islander
+[[Choice:7]]
+Prefer not to answer
+
+[[Question:MC:SingleAnswer:Vertical]]
+[[ID:PRE_EMG_EXPERIENCE]]
+Have you ever used muscle signals (EMG) to control a game or application?
+[[AdvancedChoices]]
+[[Choice:1]]
+No
+[[Choice:2]]
+Yes
+[[Choice:3]]
+Unsure
+
+[[Question:MC:SingleAnswer:Vertical]]
+[[ID:PRE_ML_EXPERIENCE]]
+Have you collected examples to train a machine-learning model before?
+[[AdvancedChoices]]
+[[Choice:1]]
+Never
+[[Choice:2]]
+Once
+[[Choice:3]]
+A few times
+[[Choice:4]]
+Many times
+[[Choice:5]]
+Unsure
+
+[[Question:MC:SingleAnswer:Vertical]]
+[[ID:PRE_DOMINANT_HAND]]
+Which hand do you consider your dominant hand?
+[[AdvancedChoices]]
+[[Choice:1]]
+Left
+[[Choice:2]]
+Right
+[[Choice:3]]
+No clear dominant hand
+[[Choice:4]]
+Unsure
+

@@ -38,6 +38,7 @@ export interface Experiment {
 
 export interface Participant {
   id: string;
+  isTestParticipant: boolean;
   experimentId: string;
   condition: Assignment;
   status: ParticipantStatus;
@@ -56,6 +57,8 @@ export interface RoundLog {
 }
 
 export interface StoredTrial {
+  calibration?: import('./frozenCalibration.mjs').FrozenCalibration | null;
+  firstCrossingAt?: number | null;
   id: string;
   gestureId: string;
   gestureName: string;
@@ -119,6 +122,7 @@ export interface SaveAlert {
 
 export interface ClientSession {
   participantId: string;
+  isTestParticipant: boolean;
   experimentId: string;
   experimentName: string;
   sessionId: string;
@@ -179,6 +183,7 @@ export function loadClientSession(): ClientSession | null {
     if (unlockedThrough !== 'capture' && unlockedThrough !== 'review' && unlockedThrough !== 'game' && unlockedThrough !== 'results') return null;
     return {
       participantId: String(parsed.participantId ?? ''),
+      isTestParticipant: parsed.isTestParticipant === true,
       experimentId: String(parsed.experimentId ?? ''),
       experimentName: String(parsed.experimentName ?? ''),
       sessionId: parsed.sessionId || `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -327,7 +332,7 @@ export function listParticipants(pin: string, experimentId: string) {
   );
 }
 
-export function generateParticipants(pin: string, input: { experimentId: string; count: number; assignment: 'balanced' | Assignment }) {
+export function generateParticipants(pin: string, input: { experimentId: string; count: number; assignment: 'balanced' | Assignment; isTestParticipant?: boolean }) {
   return request<{ participants: Participant[] }>('/api/study/participants/generate', {
     method: 'POST',
     body: JSON.stringify(input),
