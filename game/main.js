@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinnedModel } from 'three/addons/utils/SkeletonUtils.js';
+import { createStadium, STADIUM_CONFIG } from './stadium/index.js';
 
 const TRACK_WIDTH = 10;
 const LANE_WIDTH = 2.2;
@@ -21,8 +22,7 @@ const JUMP_ACTION_DISTANCE = 4.5;
 const LANE_SWITCH_ACTION_DISTANCE = 3.5;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87ceeb);
-scene.fog = new THREE.Fog(0x87ceeb, 15, 50);
+const stadium = createStadium(scene);
 
 const roadMaterial = new THREE.MeshStandardMaterial({
   color: 0x8d8d8d,
@@ -90,12 +90,16 @@ let lives = startingLives;
 let runOver = false;
 const previousHurdleZ = new WeakMap();
 
-const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.2);
+const hemiLight = new THREE.HemisphereLight(
+  STADIUM_CONFIG.hemiSky,
+  STADIUM_CONFIG.hemiGround,
+  STADIUM_CONFIG.hemiIntensity,
+);
 hemiLight.position.set(0, 20, 0);
 scene.add(hemiLight);
 
-const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
-dirLight.position.set(3, 10, 5);
+const dirLight = new THREE.DirectionalLight(STADIUM_CONFIG.sunColor, STADIUM_CONFIG.sunIntensity);
+dirLight.position.set(STADIUM_CONFIG.sunX, STADIUM_CONFIG.sunY, STADIUM_CONFIG.sunZ);
 scene.add(dirLight);
 
 // Camera framing for a forefront runner
@@ -596,6 +600,7 @@ function resetGame() {
   for (let i = 0; i < groundSegments.length; i++) {
     groundSegments[i].position.z = -i * SEGMENT_LENGTH;
   }
+  stadium.reset();
 
   const poolSize = Math.min(obstacleLimit, MAX_HURDLE_POOL);
   obstaclesSpawned = poolSize;
@@ -654,14 +659,17 @@ function animate() {
     characterRoot.position.y = 0;
   }
 
-  // Recycle ground segments
+  // Recycle ground segments. The stadium uses the same distance so the
+  // stands stay locked to the field without a second clock.
+  const distance = RUN_SPEED * delta;
   for (const segment of groundSegments) {
-    segment.position.z += RUN_SPEED * delta;
+    segment.position.z += distance;
 
     if (segment.position.z > SEGMENT_LENGTH) {
       segment.position.z -= SEGMENT_COUNT * SEGMENT_LENGTH;
     }
   }
+  stadium.advance(distance);
 
   // Move the set number of obstacles. Once that many have spawned, passed ones are retired.
   for (const hurdle of hurdles) {
