@@ -1,3 +1,4 @@
+import DismissibleNotice from './DismissibleNotice';
 import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router';
 import { Activity, ArrowRight } from 'lucide-react';
@@ -37,6 +38,7 @@ function pickSession(joined: JoinedSession, existing: ClientSession | null): Cli
     : null;
   const shared = {
     participantId: joined.participantId,
+    isTestParticipant: joined.isTestParticipant === true,
     experimentId: joined.experimentId,
     experimentName: joined.experimentName,
     generation,
@@ -162,7 +164,7 @@ export default function ParticipantGate() {
             className="mt-3 w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-4 font-mono text-2xl tracking-[0.18em] text-white outline-none placeholder:text-slate-700 focus:border-cyan-300/40"
             placeholder="••••••"
           />
-          {error && <p className="mt-3 text-sm text-rose-300">{error}</p>}
+          <DismissibleNotice message={error} summary="Participant access issue" resetKey={busy} className="mt-3" />
           {finished && (
             <p className="mt-3 text-sm leading-6 text-emerald-200">
               This session is already finished. You can close the page.

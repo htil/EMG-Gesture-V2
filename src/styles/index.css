@@ -3,3 +3,4 @@
 @import '@xyflow/react/dist/style.css';
 @import './theme.css';
 @import '../app/study-flow.css';
+@import './participant-theme.css';

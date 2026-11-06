@@ -1,3 +1,4 @@
+import DismissibleNotice from './DismissibleNotice';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import {
@@ -41,13 +42,18 @@ import DarkSelect from './DarkSelect';
 import {
   collectionId,
   makeEvent,
-  recordCollection,
+  recordCollection as recordMeasuredCollection,
   whenCollectionSaved,
   type CollectionContext,
 } from './collection';
 import { DEFAULT_DIFFICULTY, registerGameRunListener, type StoredGameRun } from './gameHandoff';
 import SampleGraphPanel from './SampleGraphPanel';
 import ResultsPanel from './ResultsPanel';
+import GuidedPractice from './GuidedPractice';
+import PracticeGuide from './PracticeGuide';
+import { practiceGuidance } from './practiceGuidance';
+import type { FrozenCalibration } from './frozenCalibration.mjs';
+import { PracticeArchive, rehearsalSession } from './practiceArchive';
 import { gestureQuotas, keptForGesture, sampleNumber, samplesComplete } from './samplePlan';
 import { alignWaveform, displayEnvelopeWaveform, sharedWaveDomain, type WaveDomain } from './waveScale';
 import {
@@ -113,7 +119,7 @@ function StepMap({
 }) {
   const activeIndex = stage === 'done' ? STEPS.length : STEPS.findIndex((step) => step.id === stage);
   return (
-    <section className="rounded-[28px] border border-white/10 bg-slate-950/55 p-4 md:p-6" aria-label="Session steps">
+    <section className="rounded-[28px] border border-white/25 bg-slate-900/80 p-4 md:p-6" aria-label="Session steps">
       <div className="mb-4 flex items-end justify-between gap-3">
         <div>
           <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-cyan-300/80">Round {round} of {repetitions}</p>
@@ -135,12 +141,12 @@ function StepMap({
                   active
                     ? 'border-cyan-300/40 bg-cyan-300/10'
                     : available
-                      ? 'border-white/10 bg-white/[0.03] hover:bg-white/[0.06]'
-                      : 'border-white/8 bg-transparent opacity-45'
+                      ? 'border-white/25 bg-white/[0.03] hover:bg-white/[0.06]'
+                      : 'border-white/20 bg-transparent opacity-45'
                 }`}
               >
                 <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-medium ${
-                  active ? 'bg-cyan-300 text-slate-950' : visited ? 'bg-emerald-300/15 text-emerald-200' : 'border border-white/10 text-slate-500'
+                  active ? 'bg-cyan-300 text-slate-950' : visited ? 'bg-emerald-300/15 text-emerald-200' : 'border border-white/25 text-slate-500'
                 }`}>
                   {visited ? <Check className="h-4 w-4" /> : String(index + 1).padStart(2, '0')}
                 </span>
@@ -157,14 +163,21 @@ function StepMap({
   );
 }
 
+interface CaptureStatus {
+  label: 'Rest' | 'Ready' | 'Recording' | 'Error' | 'Movement';
+  detail: string;
+}
+
 function CaptureCounter({
   isRecording,
   recordingProgress,
   segmentDurationMs,
+  status,
 }: {
   isRecording: boolean;
   recordingProgress: number;
   segmentDurationMs: number;
+  status: CaptureStatus;
 }) {
   const radius = 26;
   const circumference = 2 * Math.PI * radius;
@@ -172,7 +185,9 @@ function CaptureCounter({
   const dashOffset = isRecording ? circumference * (1 - recordingProgress) : circumference;
 
   return (
-    <div className={`relative flex h-16 w-16 items-center justify-center rounded-full border bg-slate-950/80 ${isRecording ? 'border-cyan-300/40' : 'border-white/10 opacity-40'}`}>
+    <div role="status" aria-label="Capture status" data-capture-state={status.label} className="flex items-center gap-3">
+      <p className="max-w-32 text-right text-xs leading-5 text-slate-300">{status.detail}</p>
+    <div className={`relative flex h-20 w-20 shrink-0 items-center justify-center rounded-full border bg-slate-950/80 ${status.label === 'Error' ? 'border-rose-300/60 text-rose-200' : status.label === 'Ready' ? 'border-emerald-300/60 text-emerald-200' : isRecording ? 'border-cyan-300/60 text-cyan-200' : 'border-amber-200/40 text-amber-100'}`}>
       <svg className="absolute inset-0 -rotate-90" viewBox="0 0 64 64" aria-hidden="true">
         <circle cx="32" cy="32" r={radius} fill="none" stroke="rgba(255,255,255,0.12)" strokeWidth="4" />
         <circle
@@ -188,11 +203,10 @@ function CaptureCounter({
         />
       </svg>
       <div className="relative text-center">
-        <div className={`text-xs font-medium tabular-nums ${isRecording ? 'text-cyan-200' : 'text-slate-500'}`}>
-          {isRecording ? `${Math.ceil(secondsRemaining * 10) / 10}s` : '--'}
-        </div>
-        <div className="text-[10px] text-slate-500">{isRecording ? `${Math.round(recordingProgress * 100)}%` : 'idle'}</div>
+        <div className="text-xs font-medium">{status.label}</div>
+        {isRecording && <div aria-hidden="true" className="text-[10px] tabular-nums text-cyan-100">{`${Math.ceil(secondsRemaining * 10) / 10}s`}</div>}
       </div>
+    </div>
     </div>
   );
 }
@@ -207,6 +221,7 @@ function LivePanel({
   thresholdGuideValue,
   segmentDurationMs,
   overlay,
+  captureStatus,
 }: {
   signalData: SignalPoint[];
   recordingSignalData: SignalPoint[];
@@ -217,6 +232,7 @@ function LivePanel({
   thresholdGuideValue: number;
   segmentDurationMs: number;
   overlay: { label: string; text: string } | null;
+  captureStatus: CaptureStatus;
 }) {
   const chartEnd = Math.max(
     signalData[signalData.length - 1]?.time ?? 0,
@@ -229,13 +245,14 @@ function LivePanel({
   const activeSegmentEnd = recordingStartTime !== null
     ? Math.min(recordingStartTime + segmentDurationMs, chartEnd)
     : null;
+  const visibleSegmentStart = recordingStartTime !== null ? Math.max(recordingStartTime, chartStart) : null;
   const segmentLabelLeft = recordingStartTime !== null
     ? Math.max(0, Math.min(78, ((recordingStartTime - chartStart) / DISPLAY_WINDOW_MS) * 100))
     : null;
 
   return (
-    <section className={`overflow-hidden rounded-[28px] border bg-slate-950/55 transition-colors ${isRecording ? 'border-cyan-300/40 shadow-[0_0_48px_rgba(34,211,238,0.14)]' : 'border-white/10'}`}>
-      <div className="flex items-center justify-between gap-3 border-b border-white/8 px-5 py-4">
+    <section className={`overflow-hidden rounded-[28px] border bg-slate-900/80 transition-colors ${isRecording ? 'border-cyan-300/40 shadow-[0_0_48px_rgba(34,211,238,0.14)]' : 'border-white/25'}`}>
+      <div className="flex items-center justify-between gap-3 border-b border-white/20 px-5 py-4">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-cyan-400/10 text-cyan-300">
             <Waves className="h-5 w-5" />
@@ -251,10 +268,10 @@ function LivePanel({
               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300" /> Capturing
             </span>
           )}
-          <CaptureCounter isRecording={isRecording} recordingProgress={recordingProgress} segmentDurationMs={segmentDurationMs} />
+          <CaptureCounter isRecording={isRecording} recordingProgress={recordingProgress} segmentDurationMs={segmentDurationMs} status={captureStatus} />
         </div>
       </div>
-      <div className="relative h-[300px] px-2 pt-3">
+      <div data-practice-target="signal" className="relative h-[300px] px-2 pt-3">
         {overlay && (
           <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
             <div className="rounded-3xl border border-cyan-300/30 bg-slate-950/80 px-8 py-5 text-center shadow-2xl backdrop-blur-sm">
@@ -280,23 +297,23 @@ function LivePanel({
               </linearGradient>
             </defs>
             <CartesianGrid vertical={false} stroke="rgba(148,163,184,0.08)" />
-            <XAxis dataKey="time" type="number" domain={[chartStart, chartEnd]} hide />
+            <XAxis dataKey="time" type="number" domain={[chartStart, chartEnd]} hide allowDataOverflow />
             <YAxis domain={[0, 1]} hide />
             {showGuide && <ReferenceLine y={thresholdGuideValue} stroke="#fbbf24" strokeDasharray="6 6" opacity={0.75} />}
-            {recordingStartTime !== null && activeSegmentEnd !== null && (
+            {visibleSegmentStart !== null && activeSegmentEnd !== null && visibleSegmentStart < activeSegmentEnd && (
               <ReferenceArea
-                x1={recordingStartTime}
+                x1={visibleSegmentStart}
                 x2={activeSegmentEnd}
                 fill="#22d3ee"
                 fillOpacity={0.16}
-                ifOverflow="extendDomain"
+                ifOverflow="hidden"
               />
             )}
             <Area type="monotone" dataKey="value" stroke="#22d3ee" strokeWidth={isRecording ? 3 : 2.4} fill="url(#sessionActivity)" isAnimationActive={false} />
           </AreaChart>
         </ResponsiveContainer>
       </div>
-      <div className="border-t border-white/8 px-5 py-3">
+      <div className="border-t border-white/20 px-5 py-3">
         <p className="mb-2 text-xs text-slate-500">Raw signal</p>
         <div className="h-24">
           <ResponsiveContainer width="100%" height="100%">
@@ -343,6 +360,7 @@ function TrialCard({
   domain,
   onInspect,
   onDelete,
+  deletingDisabled = false,
 }: {
   trial: StoredTrial;
   sampleIndex: number;
@@ -352,9 +370,10 @@ function TrialCard({
   domain: WaveDomain;
   onInspect?: () => void;
   onDelete?: () => void;
+  deletingDisabled?: boolean;
 }) {
   return (
-    <article className="rounded-2xl border border-white/10 bg-slate-950/50 p-4">
+    <article data-practice-sample={trial.id} className="rounded-2xl border border-white/25 bg-slate-950/50 p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-xs text-slate-500">Sample {sampleIndex}</p>
@@ -365,8 +384,8 @@ function TrialCard({
           {onInspect && (
             <button
               type="button"
-              onClick={onInspect}
-              className="rounded-lg border border-white/10 px-2 py-1 text-[11px] text-slate-200 transition hover:bg-white/10"
+              data-practice-target="inspect-sample" onClick={onInspect}
+              className="rounded-lg border border-white/25 px-2 py-1 text-[11px] text-slate-200 transition hover:bg-white/10"
             >
               Graph
             </button>
@@ -374,7 +393,8 @@ function TrialCard({
           {onDelete && (
             <button
               type="button"
-              onClick={onDelete}
+              data-practice-target="delete-sample" onClick={onDelete}
+              disabled={deletingDisabled}
               className="rounded-lg p-1.5 text-slate-500 transition hover:bg-rose-400/10 hover:text-rose-200"
               aria-label={`Delete ${trial.gestureName} sample ${sampleIndex}`}
             >
@@ -393,7 +413,7 @@ function ModelStatusNote({ state }: { state: ConditionModelState }) {
     incomplete: {
       title: 'Incomplete',
       detail: 'Collect the required examples, then train this condition.',
-      tone: 'border-white/10 bg-white/[0.03] text-slate-300',
+      tone: 'border-white/25 bg-white/[0.03] text-slate-300',
     },
     training: {
       title: 'Training',
@@ -417,6 +437,9 @@ function ModelStatusNote({ state }: { state: ConditionModelState }) {
     },
   };
   const status = copy[state.status];
+  if (state.status === 'error' || state.status === 'outdated') {
+    return <DismissibleNotice message={status.detail} summary={`Model ${status.title} — testing blocked`} />;
+  }
   return (
     <div className={`rounded-2xl border px-4 py-3 ${status.tone}`}>
       <p className="text-xs font-medium uppercase tracking-[0.16em]">Model {status.title}</p>
@@ -427,12 +450,38 @@ function ModelStatusNote({ state }: { state: ConditionModelState }) {
 
 export default function StudySession() {
   const navigate = useNavigate();
-  const [session, setSession] = useState<ClientSession | null>(() => loadClientSession());
-  const [signalMode, setSignalMode] = useState<SignalSourceMode>('mock');
+  const [measuredSession, setMeasuredSession] = useState<ClientSession | null>(() => loadClientSession());
+  const [rehearsal, setRehearsal] = useState<ClientSession | null>(null);
+  const [captureIntroduced, setCaptureIntroduced] = useState(false);
+  const [firstSampleExplained, setFirstSampleExplained] = useState(false);
+  const [gameIntroduction, setGameIntroduction] = useState<{ scope: string; revision: string } | null>(null);
+  const [introducedGameRevision, setIntroducedGameRevision] = useState<string | null>(null);
+  const [practiceMode, setPracticeMode] = useState<'setup' | 'rehearsal' | 'measured'>(() => {
+    const saved = loadClientSession();
+    return saved?.stage === 'capture' && !saved.trials.length ? 'setup' : 'measured';
+  });
+  const [, refreshArchive] = useState(0);
+  const practiceArchive = useRef<PracticeArchive | null>(null);
+  const modeRef = useRef(practiceMode);
+  modeRef.current = practiceMode;
+  const session = rehearsal ?? measuredSession;
+  const setSession: typeof setMeasuredSession = useCallback((update) => {
+    if (modeRef.current === 'rehearsal') setRehearsal(update);
+    else setMeasuredSession(update);
+  }, []);
+  const modelScope = (current: ClientSession) => practiceArchive.current?.scope ?? current.participantId;
+  const recordCollection = useCallback((participantId: string, items: Parameters<typeof recordMeasuredCollection>[1]) => {
+    if (modeRef.current !== 'measured') return modeRef.current === 'rehearsal' && practiceArchive.current
+      ? practiceArchive.current.collect(items) : Promise.resolve();
+    return recordMeasuredCollection(participantId, items);
+  }, []);
+  const [calibrationState, setCalibrationState] = useState<{ scope: string; epoch: number; value: FrozenCalibration } | null>(null);
+  const [recalibrating, setRecalibrating] = useState(false);
+  const [signalMode, setSignalMode] = useState<SignalSourceMode>('live');
   const [channelIndex, setChannelIndex] = useState(0);
   const [segmentDurationMs, setSegmentDurationMs] = useState(DEFAULT_SEGMENT_DURATION_MS);
   const [preTriggerWindowMs, setPreTriggerWindowMs] = useState(DEFAULT_PRE_TRIGGER_WINDOW_MS);
-  const [activityThreshold, setActivityThreshold] = useState(DEFAULT_ACTIVITY_THRESHOLD);
+  const activityThreshold = DEFAULT_ACTIVITY_THRESHOLD; // Legacy metadata only; calibrated decisions use the envelope revision.
   const [countdownMs, setCountdownMs] = useState(DEFAULT_COUNTDOWN_MS);
   const [countdownEndsAt, setCountdownEndsAt] = useState<number | null>(null);
   const [countdownRemainingMs, setCountdownRemainingMs] = useState(0);
@@ -445,24 +494,36 @@ export default function StudySession() {
   const [saveError, setSaveError] = useState('');
   const [modelState, setModelState] = useState<ConditionModelState | null>(null);
   const [training, setTraining] = useState(false);
+  // This ref locks handlers synchronously, including callbacks from an older
+  // render. State alone leaves a gap before React renders disabled controls.
+  const trainingOperation = useRef<{ scope: string; condition: Assignment } | null>(null);
+  const cancelTraining = useCallback(() => {
+    const operation = trainingOperation.current;
+    trainingOperation.current = null;
+    if (operation) markDatasetChanged(operation.scope, operation.condition, []);
+  }, []);
+  useEffect(() => () => cancelTraining(), [cancelTraining]);
+  const [pendingManualStart, setPendingManualStart] = useState(false);
+  const practiceMockCue = useRef<'rest' | 'auto'>('auto');
+  const setPracticeCue = useCallback((cue: 'rest' | 'auto') => { practiceMockCue.current = cue; }, []);
 
   useEffect(() => {
     if (!session) navigate('/', { replace: true });
   }, [navigate, session]);
 
   useEffect(() => {
-    if (!session || session.stage === 'done') {
-      if (session?.stage === 'done') clearClientSession();
+    if (!measuredSession || measuredSession.stage === 'done') {
+      if (measuredSession?.stage === 'done') clearClientSession();
       return;
     }
-    saveClientSession(session);
-  }, [session]);
+    saveClientSession(measuredSession);
+  }, [measuredSession]);
 
   const gesture = DEFAULT_GESTURES.find((item) => item.id === gestureId) ?? DEFAULT_GESTURES[0];
   const generateMockSignalValue = useCallback(() => {
     const cycleMs = 4800;
     const cyclePosition = Date.now() % cycleMs;
-    const state = cyclePosition > 1500 && cyclePosition < 3300 ? 'active' : 'idle';
+    const state = practiceMockCue.current === 'rest' ? 'idle' : cyclePosition > 1500 && cyclePosition < 3300 ? 'active' : 'idle';
     return getChannelMockSignalValue(channelIndex, cyclePosition / cycleMs, state);
   }, [channelIndex]);
 
@@ -470,8 +531,9 @@ export default function StudySession() {
     signalData,
     recordingSignalData,
     isStreaming,
+    streamEpoch,
     selectSignalSourceMode,
-    startStream,
+    startStreamForMode,
     stopStream,
     liveConnectionStatus,
     liveConnectionMessage,
@@ -483,9 +545,22 @@ export default function StudySession() {
     getDisplayValueForNormalizedActivity,
   } = useSignalSource(generateMockSignalValue, DISPLAY_WINDOW_MS, channelIndex, 1);
 
+  const calibrationScope = `${session?.participantId}:${session?.experimentId}:${session?.sessionId}:${session?.generation}:${session?.round}:${session?.condition}:${signalMode}:${channelIndex}`;
+  const calibration = isStreaming && calibrationState?.scope === calibrationScope && calibrationState.epoch === streamEpoch ? calibrationState.value : null;
+  // Historical archives never imply live readiness after reload or a stream boundary.
+  useEffect(() => { setCalibrationState(null); }, [calibrationScope, streamEpoch, isStreaming]);
+  const calibratedSignalData = useMemo(() => calibration ? signalData.map(point => ({ ...point, value: Math.min(1, Math.max(0, point.activityEnvelope / calibration.displayMax)) })) : signalData, [signalData, calibration]);
+
+  useEffect(() => {
+    if (!practiceSetupRef.current) practiceMockCue.current = gesture.id === 'relax' && session?.stage === 'capture' ? 'rest' : 'auto';
+  }, [gesture.id, practiceMode, recalibrating, session?.stage]);
+
+  const practiceSetupRef = useRef(practiceMode === 'setup');
+  practiceSetupRef.current = practiceMode === 'setup' || recalibrating;
   const trials = session?.trials ?? [];
   const stage = session?.stage ?? 'capture';
-  const manualTrigger = session?.manualTrigger ?? false;
+  const isRelax = gesture.id === 'relax';
+  const manualTrigger = (session?.manualTrigger ?? false) || isRelax;
   const triggerMode: CaptureTriggerMode = manualTrigger ? 'button' : 'threshold';
   const capturesMax = session?.capturesMax ?? session?.capturesPerRound ?? 1;
   const capturesMin = Math.min(session?.capturesMin ?? capturesMax, capturesMax);
@@ -493,7 +568,10 @@ export default function StudySession() {
   const selectedFull = selectedKept >= capturesMax;
   const roundComplete = samplesComplete(DEFAULT_GESTURES, trials, capturesMin);
   const countingDown = countdownEndsAt !== null;
-  const armed = stage === 'capture' && isStreaming && !selectedFull && !countingDown;
+  const practiceSetup = practiceMode === 'setup';
+  const inPractice = practiceMode === 'rehearsal';
+  const practiceActive = practiceSetup || recalibrating;
+  const armed = !practiceActive && !saving && !training && stage === 'capture' && isStreaming && !selectedFull && !countingDown && (manualTrigger || calibration !== null) && (!inPractice || captureIntroduced) && gameIntroduction === null;
   const waveDomain = useMemo(() => sharedWaveDomain(
     trials.map((trial) => displayEnvelopeWaveform(
       alignWaveform(trial.points, trial.preTriggerPointCount, trial.triggeredAt),
@@ -502,6 +580,7 @@ export default function StudySession() {
 
   const {
     recorderState,
+    thresholdReadiness,
     isRecording,
     recordingStartTime,
     recordingProgress,
@@ -510,10 +589,11 @@ export default function StudySession() {
   } = useGestureRecorder({
     signalPoints: recordingSignalData,
     threshold: activityThreshold,
+    frozenCalibration: calibration,
     segmentDurationMs,
     preTriggerWindowMs,
     isStreaming,
-    resetKey: `${signalMode}:${channelIndex}:${gestureId}:${session?.round ?? 1}:${segmentDurationMs}:${preTriggerWindowMs}:${activityThreshold}`,
+    resetKey: `${practiceActive}:${calibrationScope}:${streamEpoch}:${calibration?.revision}:${gestureId}:${segmentDurationMs}:${preTriggerWindowMs}`,
     triggerMode,
     manualTriggerToken,
     isArmed: armed,
@@ -543,6 +623,7 @@ export default function StudySession() {
     setCountdownEndsAt(null);
     setCountdownRemainingMs(0);
     setCaptureTimerOn(false);
+    setPendingManualStart(false);
     sawRecording.current = false;
     if (!open) return;
     const context = logRef.current;
@@ -557,7 +638,7 @@ export default function StudySession() {
 
   const pressCapture = useCallback(() => {
     const current = sessionRef.current;
-    if (!current || !manualTrigger || !armed || countdownEndsAt !== null || isRecording) return;
+    if (trainingOperation.current || !current || !manualTrigger || !armed || countdownEndsAt !== null || isRecording) return;
     const sampleId = collectionId('sample');
     const next = {
       sampleId,
@@ -571,8 +652,7 @@ export default function StudySession() {
     if (countdownMs <= 0) {
       openCapture.current.started = true;
       setSession((previous) => (previous?.openCapture ? { ...previous, openCapture: { ...previous.openCapture, phase: 'recording' } } : previous));
-      setManualTriggerToken((token) => token + 1);
-      setCaptureTimerOn(true);
+      setPendingManualStart(true);
       return;
     }
     setCountdownEndsAt(Date.now() + countdownMs);
@@ -599,8 +679,7 @@ export default function StudySession() {
           ? { ...current, openCapture: { ...current.openCapture, phase: 'recording' } }
           : current
       ));
-      setManualTriggerToken((token) => token + 1);
-      setCaptureTimerOn(true);
+      setPendingManualStart(true);
     };
     timer = window.setInterval(tick, 100);
     tick();
@@ -609,6 +688,17 @@ export default function StudySession() {
       window.clearInterval(timer);
     };
   }, [countdownEndsAt]);
+
+  useEffect(() => {
+    if (!pendingManualStart || !armed || !openCapture.current) return;
+    const timer = window.setTimeout(() => {
+      if (!openCapture.current) return;
+      setManualTriggerToken(token => token + 1);
+      setCaptureTimerOn(true);
+      setPendingManualStart(false);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [pendingManualStart, armed]);
 
   useEffect(() => {
     const key = `${gestureId}|${channelIndex}|${signalMode}|${isStreaming}|${session?.round ?? ''}|${segmentDurationMs}|${preTriggerWindowMs}|${activityThreshold}`;
@@ -667,6 +757,8 @@ export default function StudySession() {
         recordingEndedAt: completedSegment.completedAt,
         triggeredAt: completedSegment.triggeredAt,
         preTriggerPointCount: completedSegment.preTriggerPointCount,
+        calibration: completedSegment.calibration ?? null,
+        firstCrossingAt: completedSegment.firstCrossingAt ?? null,
         pointCount: points.length,
         points,
         signalSource: context.signalSource,
@@ -677,7 +769,7 @@ export default function StudySession() {
       };
       const items = [
         { kind: 'sample' as const, record: sample },
-        { kind: 'event' as const, record: makeEvent(context, 'capture_completed', sampleId, null, '') },
+        { kind: 'event' as const, record: makeEvent(context, 'capture_completed', sampleId, null, `captureProcedure=${gestureIdForSample === 'relax' ? 'cued_rest' : completedSegment.triggerMode}; assignedCondition=${context.condition}; recorderTriggerMode=${completedSegment.triggerMode}`) },
       ];
       if (replacedId) items.push({ kind: 'event', record: makeEvent(context, 'sample_replaced', replacedId, sampleId, '') });
       void recordCollection(context.participantId, items);
@@ -692,6 +784,8 @@ export default function StudySession() {
           triggeredAt: completedSegment.triggeredAt,
           completedAt: completedSegment.completedAt,
           preTriggerPointCount: completedSegment.preTriggerPointCount,
+          calibration: completedSegment.calibration ?? null,
+          firstCrossingAt: completedSegment.firstCrossingAt ?? null,
           points,
           quality: points.length >= 12 && metrics.durationMs >= segmentDurationMs * 0.85 ? 'usable' : 'review',
           metrics,
@@ -759,7 +853,9 @@ export default function StudySession() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target?.matches('input, select, textarea')) return;
+      // Focused controls keep their native Space activation; only background
+      // Space starts a manual capture. This also protects the theme/notices UI.
+      if (target?.isContentEditable || target?.closest('button, a, input, select, textarea, summary, [role="button"], [data-practice-entry]')) return;
       if (event.code === 'Space' && manualTrigger && armed && recorderState === 'idle') {
         event.preventDefault();
         pressCapture();
@@ -773,7 +869,7 @@ export default function StudySession() {
     if (!session) return;
     const condition: Assignment = session.condition;
     setModelState(markDatasetChanged(
-      session.participantId,
+      modelScope(session),
       condition,
       session.trials.map((trial) => trial.id),
     ));
@@ -782,7 +878,7 @@ export default function StudySession() {
   useEffect(() => registerGameRunListener((handoff) => {
     const current = sessionRef.current;
     if (!current || handoff.condition !== current.condition) return;
-    if (!isModelReady(current.participantId, current.condition, current.trials.map((trial) => trial.id))) return;
+    if (!isModelReady(modelScope(current), current.condition, current.trials.map((trial) => trial.id))) return;
     const run: StoredGameRun = {
       id: `${current.participantId}-${Date.now()}`,
       sessionId: current.sessionId,
@@ -831,7 +927,7 @@ export default function StudySession() {
       setSession((previous) => (previous?.openCapture ? { ...previous, openCapture: null } : previous));
     }
     const training = current.trainingRun;
-    if (training?.revisionId && training.round === current.round && !isTrainingInFlight(current.participantId, current.condition)) {
+    if (training?.revisionId && training.round === current.round && !isTrainingInFlight(modelScope(current), current.condition)) {
       const key = `train:${current.generation}:${current.sessionId}:${training.revisionId}`;
       if (!recoveredInterruptions.has(key)) {
         recoveredInterruptions.add(key);
@@ -888,7 +984,7 @@ export default function StudySession() {
   useEffect(() => {
     const send = () => {
       const current = sessionRef.current;
-      if (!current || current.stage === 'done') return;
+      if (!current || current.stage === 'done' || modeRef.current !== 'measured') return;
       const body = JSON.stringify({
         id: current.participantId,
         items: [{
@@ -942,13 +1038,31 @@ export default function StudySession() {
   }
 
   if (!session) return null;
+  // Do not reinterpret or migrate a saved movement to a different physical class.
+  if (session.trials.some(trial => !DEFAULT_GESTURES.some(gesture => gesture.id === trial.gestureId))
+    || session.runs.some(run => run.outcomes.some(outcome => !DEFAULT_GESTURES.some(gesture => gesture.id === outcome.expectedGestureId)))) {
+    return <main className="mx-auto max-w-2xl p-8 text-white"><h1 className="text-xl">Historical gesture set</h1><p className="mt-4">This saved session uses an earlier gesture set. Its records have not been renamed or deleted. Ask the researcher to archive it and use a new participant session for Wrist up / Wrist down (palm down). Do not mix earlier examples with wrist examples.</p></main>;
+  }
 
-  const signalValue = signalData[signalData.length - 1]?.normalizedActivity ?? 0;
+  const signalValue = calibratedSignalData[calibratedSignalData.length - 1]?.value ?? 0;
+  const captureStatus: CaptureStatus = liveConnectionStatus === 'error'
+    ? { label: 'Error', detail: 'Check the connection message.' }
+    : !isStreaming ? { label: 'Rest', detail: 'Connect your device to begin.' }
+      : isRecording ? { label: 'Recording', detail: isRelax ? 'Keep your hand resting.' : `Keep doing ${gesture.name}.` }
+        : countingDown ? { label: 'Movement', detail: 'Get ready for the recording.' }
+          : selectedFull || roundComplete ? { label: 'Movement', detail: roundComplete ? 'Review your recorded examples.' : 'Choose the next movement.' }
+            : !manualTrigger && !calibration ? { label: 'Rest', detail: 'Complete your resting setup.' }
+              : !armed ? { label: 'Rest', detail: 'Follow the highlighted instruction.' }
+                : recorderState !== 'idle' ? { label: 'Rest', detail: 'Rest your hand before the next recording.' }
+                  : manualTrigger ? { label: 'Ready', detail: 'Press Capture when you are ready.' }
+                    : thresholdReadiness === 'ready' ? { label: 'Ready', detail: `You can make ${gesture.name}.` }
+                      : thresholdReadiness === 'movement' ? { label: 'Movement', detail: `Keep doing ${gesture.name}.` }
+                        : { label: 'Rest', detail: 'Rest your hand until Ready appears.' };
   const condition: Assignment = session.condition;
   const trialIds = trials.map((trial) => trial.id);
-  const modelReady = isModelReady(session.participantId, condition, trialIds);
+  const modelReady = !training && isModelReady(modelScope(session), condition, trialIds);
   const gamePredictionEngine = getConditionPredictionEngine(
-    session.participantId,
+    modelScope(session),
     condition,
     trialIds,
   );
@@ -974,14 +1088,16 @@ export default function StudySession() {
         minimum={quota?.minimum ?? capturesMin}
         maximum={quota?.maximum ?? capturesMax}
         domain={waveDomain}
-        onInspect={() => setInspectedTrialId(trial.id)}
+        onInspect={() => { setInspectedTrialId(trial.id); if (practiceArchive.current) void practiceArchive.current.enqueue(practiceArchive.current.record('reviewed', { referenceId: trial.id })); }}
         onDelete={() => deleteKeptTrial(trial.id)}
+        deletingDisabled={training}
       />
     );
   };
 
   const hasRunThisRound = session.runs.some((run) => run.round === session.round && run.condition === condition);
   const canVisit = (next: FlowStage) => {
+    if (trainingOperation.current) return false;
     if (stage === 'done') return false;
     if (next === 'capture') return true;
     if (next === 'review') return trials.length > 0 || stage === 'review' || stage === 'game' || stage === 'results';
@@ -990,6 +1106,7 @@ export default function StudySession() {
   };
 
   const deleteKeptTrial = (trialId: string) => {
+    if (trainingOperation.current) return;
     const trial = session.trials.find((item) => item.id === trialId);
     if (!trial) return;
     setSession((current) => {
@@ -1015,19 +1132,33 @@ export default function StudySession() {
   };
 
   const trainModel = async () => {
-    if (!roundComplete || training) return;
+    if (!roundComplete || trainingOperation.current || isRecording || countingDown || openCapture.current) return;
+    const origin = session;
+    const archive = practiceArchive.current;
+    const context = logRef.current;
+    if (!context || (modeRef.current !== 'measured' && !archive)) return;
+    const operation = { scope: archive?.scope ?? origin.participantId, condition };
+    trainingOperation.current = operation;
+    const active = () => trainingOperation.current === operation;
+    // Never choose a destination, dataset or model scope after an await.
+    const updateOrigin = archive ? setRehearsal : setMeasuredSession;
+    const collect = archive
+      ? (items: Parameters<typeof recordMeasuredCollection>[1]) => archive.collect(items)
+      : (items: Parameters<typeof recordMeasuredCollection>[1]) => recordMeasuredCollection(origin.participantId, items);
+    const barrier = () => archive ? archive.barrier() : whenCollectionSaved();
     setTraining(true);
     setModelState((current) => (current ? { ...current, status: 'training', error: '' } : current));
     const startedAt = Date.now();
     const revisionId = collectionId('rev');
     const sampleIds = trials.map((trial) => trial.id);
-    setSession((current) => (current ? { ...current, trainingRun: { revisionId, startedAt, round: current.round, sampleIds } } : current));
+    updateOrigin((current) => (current ? { ...current, trainingRun: { revisionId, startedAt, round: origin.round, sampleIds } } : current));
     try {
-      const next = await trainConditionModel(session.participantId, condition, trials, DEFAULT_GESTURES, segmentDurationMs);
+      await barrier();
+      if (!active()) return;
+      const next = await trainConditionModel(operation.scope, condition, origin.trials, DEFAULT_GESTURES, segmentDurationMs);
+      if (!active()) return;
       const success = next.status === 'ready';
-      const context = logRef.current;
-      if (context) {
-        void recordCollection(context.participantId, [{
+      await collect([{
           kind: 'training',
           record: {
             revisionId,
@@ -1044,23 +1175,59 @@ export default function StudySession() {
             status: success ? 'success' : 'failure',
             error: success ? '' : next.error,
           },
-        }]);
-      }
+      }]);
+      await barrier();
+      if (!active()) return;
       if (success) revisionRef.current = revisionId;
-      setSession((current) => (current ? {
+      updateOrigin((current) => (current ? {
         ...current,
         modelRevisionId: success ? revisionId : current.modelRevisionId,
         trainingRun: null,
       } : current));
       setModelState(next);
       setNotice(success ? 'Model ready for this condition.' : next.error || 'The model is not ready.');
+    } catch (cause) {
+      if (!active()) return;
+      // Construction can have finished before a save failed. Such a model is
+      // not playable without its archive; keep the immutable queue for Retry.
+      markDatasetChanged(operation.scope, condition, []);
+      setModelState(markDatasetChanged(operation.scope, condition, sampleIds));
+      setNotice(cause instanceof Error ? cause.message : 'Training could not finish. Retry saving, then train again.');
+      updateOrigin(current => current ? { ...current, trainingRun: null } : current);
     } finally {
-      setTraining(false);
+      if (active()) {
+        trainingOperation.current = null;
+        setTraining(false);
+      }
     }
   };
 
-  const goTo = (next: FlowStage) => {
+  const practiceGuide = inPractice && !practiceActive ? practiceGuidance({
+    stage: gameIntroduction ? 'game-introduction' : stage, condition: session.condition, streaming: isStreaming, calibrated: calibration !== null,
+    introduced: captureIntroduced, firstSampleExplained, sampleCount: trials.length, selectedFull, roundComplete,
+    gestureName: gesture.name, nextGesture: missingQuotas[0]?.gesture.name ?? 'the next gesture', relax: isRelax, manual: manualTrigger,
+    recording: isRecording, countdown: countingDown, inspecting: inspectedTrialId !== null, training,
+    missing: missingQuotas.length > 0, reviewed: practiceArchive.current?.saved.some(record => record.kind === 'reviewed' && trials.some(trial => trial.id === record.referenceId)) ?? false,
+    removed: practiceArchive.current?.saved.some(record => record.kind === 'removed') ?? false, modelReady,
+    saveError: !!practiceArchive.current?.error, introduce: () => setCaptureIntroduced(true), explainSample: () => setFirstSampleExplained(true),
+  }) : null;
+
+  const goTo = (next: FlowStage, startPracticeGame = false) => {
     if (!canVisit(next)) return;
+    if (next === 'game' && modeRef.current === 'rehearsal') {
+      const current = sessionRef.current;
+      if (!current || trainingOperation.current || !current.modelRevisionId || !isModelReady(modelScope(current), current.condition, current.trials.map(trial => trial.id))) return;
+      const scope = modelScope(current);
+      const revision = current.modelRevisionId;
+      if (startPracticeGame) {
+        if (gameIntroduction?.scope !== scope || gameIntroduction.revision !== revision) return;
+        setIntroducedGameRevision(`${scope}:${revision}`);
+      } else if (introducedGameRevision !== `${scope}:${revision}`) {
+        setGameIntroduction({ scope, revision });
+        return;
+      }
+    }
+    setGameIntroduction(null);
     setSession((current) => {
       if (!current || current.stage === 'done') return current;
       const reached = Math.max(flowIndex(current.unlockedThrough ?? current.stage), flowIndex(next));
@@ -1074,12 +1241,37 @@ export default function StudySession() {
       setNotice('Stream paused. Captures from this round are still here.');
       return;
     }
-    await startStream();
+    await startStreamForMode(signalMode);
     setNotice(manualTrigger ? 'Press Capture when the gesture begins.' : 'Perform the gesture when you are ready.');
   };
 
   const finishRound = async () => {
-    if (!roundComplete) return;
+    if (!roundComplete || trainingOperation.current) return;
+    if (practiceArchive.current) {
+      const archive = practiceArchive.current;
+      const snapshot = session;
+      setSaving(true); setSaveError('');
+      try {
+        await archive.barrier();
+        const latest = sessionRef.current;
+        if (latest !== snapshot) throw new Error('Practice changed while saving. Review the current examples, then retry.');
+        const reviewed = [...archive.saved].reverse().find(record => record.kind === 'reviewed' && snapshot.trials.some(trial => trial.id === record.referenceId));
+        const removed = archive.saved.find(record => record.kind === 'removed');
+        const game = [...snapshot.runs].reverse().find(run => run.modelRevisionId === snapshot.modelRevisionId && run.outcomes.some(item => item.result !== 'recording_failure'));
+        if (!reviewed || !removed || !game || !isModelReady(archive.scope, snapshot.condition, snapshot.trials.map(trial => trial.id))) throw new Error('Inspect a retained sample, remove and replace an example, train, and finish an actual game before collection.');
+        await archive.enqueue(archive.record('completed', { restId: archive.rest.id, sampleIds: snapshot.trials.map(trial => trial.id),
+          reviewedId: reviewed.referenceId, removedId: removed.id, trainingId: snapshot.modelRevisionId, gameId: game.id }));
+        if (archive.pending.length || archive.error) throw new Error(archive.error || 'Practice completion is still waiting to save.');
+        if (sessionRef.current !== snapshot) throw new Error('Practice changed while saving. Retry from Results.');
+        practiceArchive.current = null;
+        setRehearsal(null); setPracticeMode('measured');
+        revisionRef.current = measuredSession?.modelRevisionId ?? null;
+        openCapture.current = null; setInspectedTrialId(null);
+        setNotice('Practice saved. Now collect the measured examples using the same controls.');
+      } catch (cause) { setSaveError(cause instanceof Error ? cause.message : 'Practice could not finish.'); }
+      finally { setSaving(false); }
+      return;
+    }
     const token = ++finishToken.current;
     const snapshot = session;
     setSaving(true);
@@ -1126,6 +1318,7 @@ export default function StudySession() {
   };
 
   const leave = async () => {
+    cancelTraining();
     if (isStreaming) await stopStream();
     navigate('/');
   };
@@ -1137,7 +1330,7 @@ export default function StudySession() {
         <div className="absolute inset-0 opacity-[0.025] [background-image:linear-gradient(rgba(255,255,255,.25)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,.25)_1px,transparent_1px)] [background-size:48px_48px]" />
       </div>
 
-      <header className="sticky top-0 z-40 border-b border-white/8 bg-[#050812]/85 backdrop-blur-xl">
+      <header className="sticky top-0 z-40 border-b border-white/20 bg-[#050812]/85 backdrop-blur-xl">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3 md:px-6">
           <div className="flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-cyan-300/20 bg-cyan-300/10 text-cyan-300">
@@ -1152,11 +1345,11 @@ export default function StudySession() {
             <span className="rounded-full border border-cyan-300/15 bg-cyan-300/[0.06] px-3 py-2 text-[10px] font-medium uppercase tracking-[0.16em] text-cyan-100">
               {session.condition === 'button' ? 'Button' : 'Threshold'} · Round {session.round}/{session.repetitions}
             </span>
-            <span className="hidden items-center gap-2 rounded-full border border-white/8 px-3 py-2 text-xs text-slate-400 sm:flex">
+            <span className="hidden items-center gap-2 rounded-full border border-white/20 px-3 py-2 text-xs text-slate-400 sm:flex">
               <span className={`h-2 w-2 rounded-full ${isStreaming ? 'bg-emerald-300' : 'bg-slate-600'}`} />
               {isStreaming ? (signalMode === 'live' ? liveDeviceName ?? 'Device live' : 'Mock live') : 'Stream idle'}
             </span>
-            <button type="button" onClick={() => void leave()} className="rounded-xl border border-white/10 px-3 py-2 text-xs text-slate-400 hover:text-white">
+            <button type="button" onClick={() => void leave()} className="rounded-xl border border-white/25 px-3 py-2 text-xs text-slate-400 hover:text-white">
               Leave
             </button>
           </div>
@@ -1164,7 +1357,64 @@ export default function StudySession() {
       </header>
 
       <main className="relative mx-auto max-w-6xl space-y-5 px-4 py-6 md:px-6">
-        <StepMap stage={stage} round={session.round} repetitions={session.repetitions} reachedIndex={reachedIndex} canVisit={canVisit} onSelect={goTo} />
+        {signalMode === 'mock' && <p role="status" aria-label="Simulated signal" className="rounded-xl border border-amber-300/40 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">Simulated signal — test mode. This signal is generated by the computer and does not respond to your movements.</p>}
+        {practiceActive && <GuidedPractice
+          key={`${session.participantId}:${session.experimentId}:${session.sessionId}:${session.generation}:${session.round}:${session.condition}:${recalibrating}`} streamEpoch={streamEpoch} recalibration={recalibrating}
+          onCancel={recalibrating ? () => { setRecalibrating(false); setPracticeCue('auto'); } : undefined}
+          session={session} points={recordingSignalData} streaming={isStreaming} source={signalMode} channel={channelIndex}
+          settings={{ segmentDurationMs, preTriggerWindowMs, countdownMs, activityThreshold }}
+          bluetoothAvailable={isBluetoothAvailable} connectionMessage={liveConnectionMessage}
+          onSource={(mode) => { setSignalMode(mode); void selectSignalSourceMode(mode); }}
+          onStream={() => void toggleStream()} onCue={setPracticeCue}
+          renderSignal={(view) => <LivePanel signalData={signalData} recordingSignalData={recordingSignalData}
+            isRecording={view.active} recordingStartTime={view.start} recordingProgress={view.progress}
+            captureStatus={view.active ? { label: 'Recording', detail: 'Keep your hand resting.' } : captureStatus}
+            showGuide={false} thresholdGuideValue={activityThreshold}
+            segmentDurationMs={view.durationMs} overlay={view.overlay} />}
+          onComplete={(rest) => {
+            if (trainingOperation.current || !isStreaming || !rest.calibration) return;
+            setCalibrationState({ scope: calibrationScope, epoch: streamEpoch, value: rest.calibration as FrozenCalibration });
+            if (recalibrating) { setRecalibrating(false); return; }
+            setCaptureIntroduced(false); setFirstSampleExplained(false); setGameIntroduction(null); setIntroducedGameRevision(null);
+            practiceArchive.current = new PracticeArchive(rest, () => refreshArchive(value => value + 1));
+            revisionRef.current = null; openCapture.current = null;
+            setRehearsal(rehearsalSession(session)); setGestureId(DEFAULT_GESTURES[0].id); setPracticeMode('rehearsal');
+          }} />}
+        {practiceGuide && inspectedTrialId === null && <PracticeGuide step={practiceGuide} busy={isRecording || countingDown || training || saving} />}
+        {inPractice && gameIntroduction && <section aria-label="Practice game introduction" className="rounded-3xl border border-cyan-300/40 bg-slate-900 p-6 text-white">
+          <p className="text-sm uppercase tracking-wide text-cyan-200">Before the practice game</p>
+          <h1 className="mt-2 text-2xl">Try your practice model, not a surprise task</h1>
+          <ol className="mt-4 list-decimal space-y-3 pl-5 text-sm leading-6 text-slate-200">
+            <li>Watch the on-screen gesture cue. It tells you which gesture to perform.</li>
+            <li>Perform that gesture during the game’s response window. Predictions come from the practice model trained on your kept examples.</li>
+            <li>A wrong or Unknown prediction is feedback about this attempt, not proof that you moved incorrectly. No example or result is supplied by this guide.</li>
+            <li>After the game, read both game score and gesture recognition. They measure different things; you can review your examples before measured collection.</li>
+          </ol>
+          <p className="mt-4 text-sm text-slate-300">The game has not started. Choose Start practice game when you understand the task.</p>
+          <div className="mt-5 flex flex-wrap gap-3">
+            <button type="button" className="rounded-xl border border-white/30 px-5 py-3" onClick={() => setGameIntroduction(null)}>Back to review</button>
+            <button data-practice-target="start-game" type="button" disabled={!modelReady || training || saving || gameIntroduction.revision !== session.modelRevisionId} className="rounded-xl bg-cyan-300 px-5 py-3 text-slate-950 disabled:opacity-40" onClick={() => goTo('game', true)}>Start practice game</button>
+          </div>
+        </section>}
+        {inPractice && !gameIntroduction && <section aria-label="Practice objective" className="rounded-3xl border-2 border-cyan-300/50 bg-slate-900 p-5">
+          <p className="text-sm font-semibold uppercase tracking-wider text-cyan-200">Practice — separate model and records</p>
+          <p className="mt-2 text-sm text-slate-200">Keep your palm down. Wrist up means bend your wrist upward (extension); Wrist down means bend it downward (flexion). Practise three examples of each. Rest between movements; resting is setup, not a gesture class.</p>
+          {practiceArchive.current && <p className="mt-2 text-xs text-slate-300">{practiceArchive.current.pending.length ? `${practiceArchive.current.pending.length} practice records waiting to save` : 'Practice records saved and read back'}</p>}
+          <DismissibleNotice message={practiceArchive.current?.error ?? ''} summary="Practice save issue" />
+          {!!practiceArchive.current?.pending.length && <button data-practice-target="practice-save-retry" type="button" className="mt-3 rounded-xl border border-white/30 px-4 py-2" onClick={() => void practiceArchive.current?.flush()}>Retry saving practice</button>}
+        </section>}
+        {!practiceActive && <StepMap stage={stage} round={session.round} repetitions={session.repetitions} reachedIndex={reachedIndex} canVisit={canVisit} onSelect={goTo} />}
+        {!practiceSetup && stage === 'capture' && !inPractice && <button type="button" data-practice-entry disabled={isRecording || countingDown || saving || training}
+          onClick={() => { if (trainingOperation.current) return; cancelOpenCapture('Entering practice.'); setPracticeMode('setup'); }} className="rounded-xl border border-white/30 px-4 py-2.5 text-xs text-slate-200 disabled:opacity-40">Reopen guided practice</button>}
+
+        {!practiceActive && stage === 'capture' && <section aria-label="Fixed rest calibration" className="rounded-xl border border-white/30 p-4 text-sm">
+          <p role="status">{calibration ? 'Resting setup saved.' : 'Redo your resting setup before recording.'}</p>
+          <button data-practice-target="recalibrate" type="button" disabled={isRecording || countingDown || saving || training} onClick={() => { if (trainingOperation.current) return; cancelOpenCapture('Recalibrating rest only.'); setCalibrationState(null); setRecalibrating(true); }} className="mt-3 rounded-xl border border-white/30 px-4 py-2 disabled:opacity-40">Redo resting setup</button>
+          {session.isTestParticipant === true && <details className="mt-3 text-xs text-slate-400"><summary className="cursor-pointer">Rest setup details</summary>
+          <p role="status">{calibration ? `Fixed rest boundary ${calibration.threshold.toPrecision(4)} envelope units · revision ${calibration.revision}. 300ms rest / 100ms activity holds. Graph: 0 to ${calibration.displayMax.toPrecision(4)}, clipped at the top; guide = fixed boundary.` : 'No live rest calibration. Threshold active captures are blocked. Reconnect if needed and explicitly recalibrate; saved samples, models and results are kept.'}</p>
+          <p className="mt-2">Check fresh resting activity against the guide, then use comfortable movements in the existing Practice flow. These are detector checks, not physiological onset validation. If checks fail, ask the researcher and repeat rest; the boundary is never tuned from gestures.</p>
+          </details>}
+        </section>}
 
         {stage === 'done' && (
           <section className="rounded-[28px] border border-emerald-300/20 bg-emerald-300/10 p-8 text-center">
@@ -1176,19 +1426,18 @@ export default function StudySession() {
           </section>
         )}
 
-        {stage === 'capture' && (
+        {!practiceActive && !gameIntroduction && stage === 'capture' && (
           <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
             <div className="space-y-5">
               <LivePanel
-                signalData={signalData}
+                signalData={calibratedSignalData}
                 recordingSignalData={recordingSignalData}
                 isRecording={isRecording}
                 recordingStartTime={recordingStartTime}
                 recordingProgress={recordingProgress}
-                showGuide={!manualTrigger}
-                thresholdGuideValue={signalMode === 'live'
-                  ? getDisplayValueForNormalizedActivity(activityThreshold)
-                  : activityThreshold}
+                captureStatus={captureStatus}
+                showGuide={calibration !== null}
+                thresholdGuideValue={0.5}
                 segmentDurationMs={segmentDurationMs}
                 overlay={countingDown
                   ? { label: 'Get ready', text: String(Math.max(1, Math.ceil(countdownRemainingMs / 1000))) }
@@ -1196,14 +1445,14 @@ export default function StudySession() {
                     ? { label: 'Recording', text: `${Math.max(0, (segmentDurationMs - recordingProgress * segmentDurationMs) / 1000).toFixed(1)}s` }
                     : null}
               />
-              <section className="rounded-[24px] border border-white/8 bg-white/[0.025] p-4">
+              <section className="rounded-[24px] border border-white/20 bg-white/[0.025] p-4">
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="text-sm font-medium text-white">This round</h2>
                   <span className="text-xs tabular-nums text-slate-500">{trials.length} saved · {cappedKept}/{totalRequired} minimum</span>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
                   {quotas.map((row) => (
-                    <span key={row.gesture.id} className="rounded-full border border-white/10 px-3 py-1 text-[11px] text-slate-300">
+                    <span key={row.gesture.id} className="rounded-full border border-white/25 px-3 py-1 text-[11px] text-slate-300">
                       {row.gesture.name} <span className="tabular-nums text-slate-100">{row.kept} kept · {row.minimum}–{row.maximum}</span>
                     </span>
                   ))}
@@ -1213,7 +1462,7 @@ export default function StudySession() {
                     {trials.map((trial) => renderTrial(trial))}
                   </div>
                 ) : (
-                  <div className="mt-4 flex min-h-28 items-center justify-center rounded-2xl border border-dashed border-white/10 text-sm text-slate-500">
+                  <div className="mt-4 flex min-h-28 items-center justify-center rounded-2xl border border-dashed border-white/25 text-sm text-slate-500">
                     <div className="text-center"><CircleDot className="mx-auto mb-2 h-5 w-5 text-slate-700" />Captures will show up here</div>
                   </div>
                 )}
@@ -1221,7 +1470,7 @@ export default function StudySession() {
             </div>
 
             <aside className="space-y-4">
-              <section className="rounded-[28px] border border-white/10 bg-slate-950/70 p-5">
+              <section className="rounded-[28px] border border-white/25 bg-slate-950/70 p-5">
                 <div className="flex items-center justify-between text-[11px] text-slate-500">
                   <span>Minimum covered</span>
                   <span className="tabular-nums">{cappedKept}/{totalRequired}</span>
@@ -1231,7 +1480,7 @@ export default function StudySession() {
                 </div>
 
                 <label className="mt-5 block text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">Gesture</label>
-                <div className="mt-2">
+                <div data-practice-target="gesture" className="mt-2">
                   <DarkSelect
                     label="Gesture"
                     value={gestureId}
@@ -1240,7 +1489,7 @@ export default function StudySession() {
                   />
                 </div>
 
-                <div className="mt-4 grid grid-cols-2 gap-2">
+                {session.isTestParticipant === true && <details className="mt-4 rounded-xl border border-white/20 p-3"><summary className="cursor-pointer text-sm text-slate-300">Researcher controls</summary><fieldset disabled={inPractice || saving || isRecording || countingDown} className="disabled:opacity-60"><div className="mt-4 grid grid-cols-2 gap-2">
                   <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
                     Window ms
                     <input
@@ -1253,7 +1502,7 @@ export default function StudySession() {
                         const next = Number(event.target.value);
                         if (Number.isFinite(next)) setSegmentDurationMs(Math.min(5000, Math.max(200, next)));
                       }}
-                      className="mt-1 w-full rounded-xl border border-white/10 bg-slate-950 px-2 py-2 text-sm text-slate-100"
+                      className="mt-1 w-full rounded-xl border border-white/25 bg-slate-950 px-2 py-2 text-sm text-slate-100"
                     />
                   </label>
                   <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
@@ -1268,24 +1517,13 @@ export default function StudySession() {
                         const next = Number(event.target.value);
                         if (Number.isFinite(next)) setPreTriggerWindowMs(Math.min(2000, Math.max(0, next)));
                       }}
-                      className="mt-1 w-full rounded-xl border border-white/10 bg-slate-950 px-2 py-2 text-sm text-slate-100"
+                      className="mt-1 w-full rounded-xl border border-white/25 bg-slate-950 px-2 py-2 text-sm text-slate-100"
                     />
                   </label>
-                  <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
-                    Threshold
-                    <input
-                      type="number"
-                      min={0.05}
-                      max={1}
-                      step={0.05}
-                      value={activityThreshold}
-                      onChange={(event) => {
-                        const next = Number(event.target.value);
-                        if (Number.isFinite(next)) setActivityThreshold(Math.min(1, Math.max(0.05, next)));
-                      }}
-                      className="mt-1 w-full rounded-xl border border-white/10 bg-slate-950 px-2 py-2 text-sm text-slate-100"
-                    />
-                  </label>
+                  <div aria-label="Fixed envelope boundary" className="text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                    Rest boundary (envelope units)
+                    <output className="mt-1 block text-sm text-slate-100">{calibration ? calibration.threshold.toPrecision(4) : 'Recalibration required'}</output>
+                  </div>
                   <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
                     Countdown ms
                     <input
@@ -1298,7 +1536,7 @@ export default function StudySession() {
                         const next = Number(event.target.value);
                         if (Number.isFinite(next)) setCountdownMs(Math.min(10000, Math.max(0, next)));
                       }}
-                      className="mt-1 w-full rounded-xl border border-white/10 bg-slate-950 px-2 py-2 text-sm text-slate-100"
+                      className="mt-1 w-full rounded-xl border border-white/25 bg-slate-950 px-2 py-2 text-sm text-slate-100"
                     />
                   </label>
                 </div>
@@ -1314,18 +1552,18 @@ export default function StudySession() {
                         setSignalMode(mode);
                         void selectSignalSourceMode(mode);
                       }}
-                      className={`rounded-xl border px-3 py-2 text-xs ${signalMode === mode ? 'border-cyan-300/30 bg-cyan-300/10 text-cyan-100' : 'border-white/10 text-slate-400'} disabled:opacity-30`}
+                      className={`rounded-xl border px-3 py-2 text-xs ${signalMode === mode ? 'border-cyan-300/30 bg-cyan-300/10 text-cyan-100' : 'border-white/25 text-slate-400'} disabled:opacity-30`}
                     >
                       {mode === 'mock' ? 'Mock' : 'Ganglion'}
                     </button>
                   ))}
                 </div>
-                {signalMode === 'live' && (
+                {signalMode === 'live' && !calibration && (
                   <button
                     type="button"
                     onClick={freezeDisplayScale}
                     disabled={!isStreaming || isDisplayScaleFrozen}
-                    className="mt-3 w-full rounded-xl border border-white/10 px-3 py-2 text-xs text-slate-300 disabled:cursor-default disabled:opacity-50"
+                    className="mt-3 w-full rounded-xl border border-white/25 px-3 py-2 text-xs text-slate-300 disabled:cursor-default disabled:opacity-50"
                   >
                     {isDisplayScaleFrozen ? 'Display scale locked' : 'Lock display scale'}
                   </button>
@@ -1341,62 +1579,61 @@ export default function StudySession() {
                   />
                 </div>
 
-                <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                </fieldset></details>}
+                <div data-practice-target="capture-method" className="mt-4 rounded-2xl border border-white/25 bg-white/[0.03] p-4">
                   <p className="text-xs font-medium text-cyan-100">
-                    {!isStreaming ? 'Waiting for the stream' : countingDown ? 'Get ready' : isRecording ? 'Recording' : recorderState === 'cooldown' ? 'Short pause' : selectedFull ? `${gesture.name} has its examples` : roundComplete ? 'Required examples kept' : 'Ready'}
+                    {captureStatus.label}
                   </p>
-                  <p className="mt-2 text-xs leading-5 text-slate-400">
-                    {manualTrigger ? 'Press Capture at the start of the gesture.' : 'Recording begins when you perform the gesture.'}
+                  <p className="mt-2 text-xs leading-5 text-slate-400" hidden={inPractice}>
+                    {isRelax ? 'Press Capture. Keep your hand resting until the timer finishes.' : manualTrigger ? `Press Capture. When you see Recording, make ${gesture.name}. Keep doing it until the timer finishes.` : `Rest your hand. Then make ${gesture.name}. Recording starts on its own.`}
                   </p>
                 </div>
 
                 {manualTrigger && (
                   <button
                     type="button"
-                    onClick={pressCapture}
+                    data-practice-target="capture" onClick={pressCapture}
                     disabled={!armed || recorderState !== 'idle' || countingDown}
                     className="mt-4 flex w-full items-center justify-center gap-3 rounded-2xl border border-cyan-300/30 bg-cyan-300/10 px-5 py-5 text-sm font-medium text-cyan-50 disabled:cursor-not-allowed disabled:opacity-35"
                   >
-                    <Hand className="h-5 w-5" /> {countingDown ? `Get ready ${Math.max(1, Math.ceil(countdownRemainingMs / 1000))}` : 'Capture'} <span className="rounded-md border border-white/10 px-2 py-1 text-[10px] text-cyan-100/70">Space</span>
+                    <Hand className="h-5 w-5" /> {countingDown ? `Get ready ${Math.max(1, Math.ceil(countdownRemainingMs / 1000))}` : 'Capture'} <span className="rounded-md border border-white/25 px-2 py-1 text-[10px] text-cyan-100/70">Space</span>
                   </button>
                 )}
 
                 <button
                   type="button"
-                  onClick={() => void toggleStream()}
+                  data-practice-target="stream" onClick={() => void toggleStream()}
                   disabled={liveConnectionStatus === 'connecting'}
-                  className={`mt-3 flex w-full items-center justify-center gap-2 rounded-2xl px-5 py-3.5 text-sm font-medium ${isStreaming ? 'border border-white/10 text-slate-300' : 'bg-cyan-300 text-slate-950'} disabled:opacity-50`}
+                  className={`mt-3 flex w-full items-center justify-center gap-2 rounded-2xl px-5 py-3.5 text-sm font-medium ${isStreaming ? 'border border-white/25 text-slate-300' : 'bg-cyan-300 text-slate-950'} disabled:opacity-50`}
                 >
                   {isStreaming ? <><Pause className="h-4 w-4" /> Pause stream</> : <><Play className="h-4 w-4" /> {signalMode === 'live' ? 'Connect device' : 'Start mock stream'}</>}
                 </button>
+                <DismissibleNotice summary="Connection problem" message={liveConnectionStatus === 'error' ? liveConnectionMessage : ''} className="mt-3" />
                 <button
                   type="button"
                   disabled={trials.length === 0}
-                  onClick={() => goTo('review')}
-                  className="mt-3 flex w-full items-center justify-center gap-2 rounded-2xl border border-white/10 px-5 py-3 text-sm text-slate-200 disabled:cursor-not-allowed disabled:opacity-35"
+                  data-practice-target="review" onClick={() => goTo('review')}
+                  className="mt-3 flex w-full items-center justify-center gap-2 rounded-2xl border border-white/25 px-5 py-3 text-sm text-slate-200 disabled:cursor-not-allowed disabled:opacity-35"
                 >
                   Review captures <ArrowRight className="h-4 w-4" />
                 </button>
               </section>
 
-              <section className="rounded-[24px] border border-white/8 p-5">
-                <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span>Live context</span>
-                  <Radio className="h-4 w-4" />
-                </div>
+              <details className="rounded-[24px] border border-white/20 p-5">
+                <summary className="cursor-pointer text-sm text-slate-300">Show signal details</summary>
                 <dl className="mt-4 grid grid-cols-2 gap-4 text-sm">
                   <div><dt className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Activity</dt><dd className="mt-1 tabular-nums">{signalValue.toFixed(2)}</dd></div>
                   <div><dt className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Capture</dt><dd className="mt-1 tabular-nums">{Math.round(recordingProgress * 100)}%</dd></div>
                   <div><dt className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Sample rate</dt><dd className="mt-1">{liveSampleRateHz ? `${liveSampleRateHz} Hz` : signalMode === 'mock' && isStreaming ? '20 Hz' : '—'}</dd></div>
                   <div><dt className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Saved</dt><dd className="mt-1 tabular-nums">{trials.length}</dd></div>
                 </dl>
-                <p className="mt-4 border-t border-white/8 pt-3 text-xs leading-5 text-slate-500">{notice}</p>
-              </section>
+                <p className="mt-4 border-t border-white/20 pt-3 text-xs leading-5 text-slate-500">{notice}</p>
+              </details>
             </aside>
           </div>
         )}
 
-        {stage === 'review' && (
+        {!practiceActive && !gameIntroduction && stage === 'review' && (
           <section className="space-y-4">
             <div className="flex flex-wrap items-end justify-between gap-3">
               <div>
@@ -1404,17 +1641,17 @@ export default function StudySession() {
                 <h2 className="mt-1 text-2xl font-light text-white">Captures from this round</h2>
               </div>
               <div className="flex flex-wrap gap-2">
-                <button type="button" onClick={() => goTo('capture')} className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-300">Back to capture</button>
-                <button type="button" disabled={!roundComplete || training} onClick={() => void trainModel()} className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-100 disabled:cursor-not-allowed disabled:opacity-35">
+                <button data-practice-target="back-capture" type="button" disabled={training} onClick={() => goTo('capture')} className="rounded-xl border border-white/25 px-4 py-2.5 text-xs text-slate-300">Back to capture</button>
+                <button data-practice-target="train" type="button" disabled={!roundComplete || training} onClick={() => void trainModel()} className="rounded-xl border border-white/25 px-4 py-2.5 text-xs text-slate-100 disabled:cursor-not-allowed disabled:opacity-35">
                   {modelState?.status === 'training' || training ? 'Training' : modelState?.status === 'ready' ? 'Retrain' : 'Train model'}
                 </button>
-                <button type="button" disabled={!roundComplete || !modelReady} onClick={() => goTo('game')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950 disabled:cursor-not-allowed disabled:opacity-35">Play <ArrowRight className="h-3.5 w-3.5" /></button>
+                <button data-practice-target="play" type="button" disabled={!roundComplete || !modelReady} onClick={() => goTo('game')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950 disabled:cursor-not-allowed disabled:opacity-35">Play <ArrowRight className="h-3.5 w-3.5" /></button>
               </div>
             </div>
             {modelState && <ModelStatusNote state={modelState} />}
             <div className="flex flex-wrap gap-2">
               {quotas.map((row) => (
-                <span key={row.gesture.id} className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-xs text-slate-200">
+                <span key={row.gesture.id} className="rounded-full border border-white/25 bg-white/[0.03] px-3 py-1.5 text-xs text-slate-200">
                   {row.gesture.name} <span className="tabular-nums">{row.kept} kept · {row.minimum}–{row.maximum}</span>
                 </span>
               ))}
@@ -1440,8 +1677,10 @@ export default function StudySession() {
           </section>
         )}
 
-        {stage === 'game' && modelReady && (
+        {!practiceActive && stage === 'game' && modelReady && (
           <GameScreen
+            testControls={session.isTestParticipant === true}
+            practice={inPractice}
             onExit={() => goTo('review')}
             exitLabel="Back to review"
             onSecondary={() => goTo('results')}
@@ -1459,16 +1698,16 @@ export default function StudySession() {
           />
         )}
 
-        {stage === 'game' && !modelReady && (
-          <section className="overflow-hidden rounded-[28px] border border-dashed border-emerald-300/30 bg-slate-950/55">
-            <div className="flex flex-wrap items-end justify-between gap-3 border-b border-white/8 p-5 md:p-6">
+        {!practiceActive && stage === 'game' && !modelReady && (
+          <section className="overflow-hidden rounded-[28px] border border-dashed border-emerald-300/30 bg-slate-900/80">
+            <div className="flex flex-wrap items-end justify-between gap-3 border-b border-white/20 p-5 md:p-6">
               <div>
                 <p className="text-xs uppercase tracking-[0.18em] text-emerald-300/80">Play</p>
                 <h2 className="mt-1 text-2xl font-light text-white">Review game</h2>
                 <p className="mt-2 max-w-xl text-sm leading-6 text-slate-500">Testing stays closed until this condition’s model is ready.</p>
               </div>
               <div className="flex gap-2">
-                <button type="button" onClick={() => goTo('review')} className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-300">Back to review</button>
+                <button type="button" onClick={() => goTo('review')} className="rounded-xl border border-white/25 px-4 py-2.5 text-xs text-slate-300">Back to review</button>
                 <button type="button" disabled={!hasRunThisRound} onClick={() => goTo('results')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950 disabled:cursor-not-allowed disabled:opacity-35">Results <ArrowRight className="h-3.5 w-3.5" /></button>
               </div>
             </div>
@@ -1479,8 +1718,8 @@ export default function StudySession() {
           </section>
         )}
 
-        {stage === 'results' && (
-          <ResultsPanel
+        {!practiceActive && !gameIntroduction && stage === 'results' && (
+          <div data-practice-target="results"><ResultsPanel
             runs={session.runs}
             currentRun={session.runs
               .filter((run) => run.round === session.round && run.condition === condition)
@@ -1490,15 +1729,16 @@ export default function StudySession() {
             onTryAgain={() => goTo('game')}
             onReview={() => goTo('review')}
             onContinue={() => void finishRound()}
-            continueEnabled={roundComplete}
-            continueLabel={session.round >= session.repetitions ? 'Finish session' : 'Continue'}
+            continueEnabled={roundComplete && (!inPractice || (modelReady && session.runs.some(run => run.modelRevisionId === session.modelRevisionId && run.outcomes.some(item => item.result !== 'recording_failure'))))}
+            continueLabel={inPractice ? 'Begin collection' : session.round >= session.repetitions ? 'Finish session' : 'Continue'}
             saving={saving}
             saveError={saveError}
-          />
+          /></div>
         )}
       </main>
       {inspectedTrialId && trials.some((trial) => trial.id === inspectedTrialId) && (
         <SampleGraphPanel
+          guided={inPractice}
           trial={trials.find((trial) => trial.id === inspectedTrialId) ?? trials[0]}
           trials={trials.filter((trial) => trial.gestureId === trials.find((item) => item.id === inspectedTrialId)?.gestureId)}
           onClose={() => setInspectedTrialId(null)}

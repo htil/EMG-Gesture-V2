@@ -2,12 +2,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { zipStore } from './zip-store.mjs';
+import { sanitizePracticeRecord, canonicalPractice } from './practice-records.mjs';
+import { withPracticeTiming, validatePracticePoints } from '../src/app/study/practice.mjs';
+import { sameCalibration } from '../src/app/study/frozenCalibration.mjs';
 
 const ID_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const EXPERIMENT_HEADERS = ['id', 'name', 'repetitions', 'captures_per_round', 'captures_min', 'captures_max', 'obstacle_count', 'starting_lives', 'status', 'notes', 'created_at'];
 const DEFAULT_OBSTACLE_COUNT = 20;
 const DEFAULT_STARTING_LIVES = 3;
-const PARTICIPANT_HEADERS = ['id', 'experiment_id', 'condition', 'status', 'current_round', 'created_at', 'generation'];
+const PARTICIPANT_HEADERS = ['id', 'experiment_id', 'condition', 'status', 'current_round', 'created_at', 'generation', 'is_test_participant'];
 const ROUND_HEADERS = ['participant_id', 'experiment_id', 'round', 'trial_count', 'saved_count', 'usable_count', 'completed_at'];
 const EVENT_TYPES = new Set(['capture_started', 'capture_completed', 'capture_cancelled', 'capture_error', 'sample_deleted', 'sample_replaced']);
 const ATTEMPT_RESULTS = new Set(['correct', 'wrong', 'unknown', 'recording_failure']);
@@ -247,6 +250,7 @@ function sanitizeStoredRun(run, participant) {
     recordedAt: Number(run.recordedAt) || Date.now(),
     condition: participant.condition,
     difficulty: String(run.difficulty || 'standard'),
+    isTestParticipant: isTestParticipant(participant),
     gameScore: Number(run.gameScore),
     modelRevisionId: run.modelRevisionId ? safeToken(run.modelRevisionId, '') : null,
     obstacleSuccess: run.obstacleSuccess === true ? true : run.obstacleSuccess === false ? false : null,
@@ -285,6 +289,11 @@ function summarizeExperiment(experiment, participants) {
   };
 }
 
+// Missing legacy assignments remain study participants; never infer from source or ID.
+function isTestParticipant(participant) {
+  return participant?.is_test_participant === 'true';
+}
+
 function participantGeneration(participant) {
   const value = Number(participant?.generation);
   return Number.isInteger(value) && value > 0 ? value : 1;
@@ -305,6 +314,7 @@ function presentParticipant(participant, repetitions) {
   return {
     id: participant.id,
     experimentId: participant.experiment_id,
+    isTestParticipant: isTestParticipant(participant),
     condition: participant.condition,
     status: participant.status,
     currentRound,
@@ -340,6 +350,7 @@ export function createStudyDesk(dataDir) {
   const saveParticipants = (records) => writeTable(participantsPath, PARTICIPANT_HEADERS, records.map((participant) => ({
     ...participant,
     generation: String(participantGeneration(participant)),
+    is_test_participant: String(isTestParticipant(participant)),
   })));
   const saveRounds = (records) => writeTable(roundsPath, ROUND_HEADERS, records.map((round) => ({
     ...round,
@@ -371,6 +382,16 @@ export function createStudyDesk(dataDir) {
       return null;
     }
   };
+  const validateTrialCalibration = (trials, participant) => {
+    const root = path.join(sessionsDir, participant.id, 'collection');
+    for (const trial of Array.isArray(trials) ? trials : []) {
+      if (trial?.calibration === undefined) continue; // Read legacy data without inventing a calibration.
+      const id = safeToken(trial.id, '');
+      const sample = id && fs.existsSync(root) ? fs.readdirSync(root).map(name => readJson(path.join(root, name, 'samples', `${id}.json`))).find(Boolean) : null;
+      if (!sample || canonicalPractice(sample.calibration) !== canonicalPractice(trial.calibration)
+        || (sample.firstCrossingAt ?? null) !== (trial.firstCrossingAt ?? null)) throw Object.assign(new Error('Trial calibration does not match its archived sample.'), { status: 400 });
+    }
+  };
   const sanitizeTrial = (trial) => {
     if (!trial || typeof trial !== 'object') return null;
     const id = safeToken(trial.id, '');
@@ -385,6 +406,7 @@ export function createStudyDesk(dataDir) {
       triggeredAt: finiteNumber(trial.triggeredAt, 0),
       completedAt: finiteNumber(trial.completedAt, 0),
       preTriggerPointCount: finiteNumber(trial.preTriggerPointCount, 0),
+      ...(trial.calibration !== undefined ? { calibration: trial.calibration, firstCrossingAt: trial.firstCrossingAt ?? null } : {}),
       points,
       quality: trial.quality === 'review' ? 'review' : 'usable',
       metrics: {
@@ -404,6 +426,7 @@ export function createStudyDesk(dataDir) {
     triggeredAt: sample.triggeredAt,
     completedAt: sample.recordingEndedAt,
     preTriggerPointCount: sample.preTriggerPointCount,
+    ...(sample.calibration !== undefined ? { calibration: sample.calibration, firstCrossingAt: sample.firstCrossingAt ?? null } : {}),
     points: sample.points,
     quality: 'usable',
     metrics: {
@@ -566,6 +589,7 @@ export function createStudyDesk(dataDir) {
             body: {
               participantId: participant.id,
               experimentId: experiment.id,
+              isTestParticipant: isTestParticipant(participant),
               experimentName: experiment.name,
               repetitions: Number(experiment.repetitions),
               capturesMin: bounds.min,
@@ -592,6 +616,7 @@ export function createStudyDesk(dataDir) {
           body: {
             participantId: participant.id,
             experimentId: experiment.id,
+            isTestParticipant: isTestParticipant(participant),
             experimentName: experiment.name,
               repetitions: Number(experiment.repetitions),
               capturesMin: bounds.min,
@@ -608,6 +633,28 @@ export function createStudyDesk(dataDir) {
             restored: buildRestore(participant),
           },
         };
+      }
+
+      if (route === 'POST /practice') {
+        const participant = state.participants.find(entry => entry.id === normalizeId(body.id));
+        if (!participant) throw Object.assign(new Error('That ID was not recognized.'), { status: 404 });
+        const directory = path.join(collectionDir(sessionsDir, participant.id, body.record?.sessionId), 'practice');
+        const record = { ...sanitizePracticeRecord(body.record, participant, readJsonFiles(directory)), isTestParticipant: isTestParticipant(participant) };
+        const previous = readJsonFiles(directory).find(entry => entry.id === record.id);
+        // Compare legacy archives with the authoritative label without rewriting them.
+        if (previous && canonicalPractice({ ...withPracticeTiming(previous), isTestParticipant: isTestParticipant(participant) }) !== canonicalPractice(record)) throw Object.assign(new Error('Practice record is immutable.'), { status: 409 });
+        if (!previous) writeJsonAtomic(path.join(directory, `${record.id}.json`), record);
+        return { status: 200, body: { ok: true, id: record.id } };
+      }
+
+      const practiceRead = pathname.match(/^\/practice\/([A-Z0-9]+)$/);
+      if (practiceRead && method === 'GET') {
+        const participant = state.participants.find(entry => entry.id === practiceRead[1]);
+        if (!participant) throw Object.assign(new Error('That ID was not recognized.'), { status: 404 });
+        const root = path.join(participantRoot(participant.id), 'collection');
+        const records = fs.existsSync(root) ? fs.readdirSync(root).flatMap(name => readJsonFiles(path.join(root, name, 'practice')))
+          .filter(record => record.participantId === participant.id && record.generation === participantGeneration(participant)) : [];
+        return { status: 200, body: { records } };
       }
 
       if (route === 'POST /save-alert') {
@@ -648,10 +695,14 @@ export function createStudyDesk(dataDir) {
         const items = Array.isArray(body.items) ? body.items : [];
         for (const item of items) {
           const record = item?.record;
-          if (!record || !sameGeneration(record, participant)) continue;
+          if (!record || !sameGeneration(record, participant)) {
+            if (record && (record.calibration !== undefined || record.trials?.some(trial => trial.calibration !== undefined))) throw Object.assign(new Error('Calibration belongs to an inactive generation.'), { status: 409 });
+            continue;
+          }
           if (item?.kind === 'checkpoint') {
             const sessionId = safeToken(record.sessionId, '');
             if (!sessionId) continue;
+            validateTrialCalibration(record.trials, participant);
             const trials = (Array.isArray(record.trials) ? record.trials : []).slice(0, 200).map(sanitizeTrial).filter(Boolean);
             writeJsonAtomic(checkpointFile(participant.id), {
               sessionId,
@@ -672,6 +723,7 @@ export function createStudyDesk(dataDir) {
             writeJsonAtomic(path.join(collectionDir(sessionsDir, participant.id, sessionId), 'meta.json'), {
               ...record,
               participantId: participant.id,
+              isTestParticipant: isTestParticipant(participant),
               condition: participant.condition,
               updatedAt: nowIso(),
             });
@@ -680,6 +732,22 @@ export function createStudyDesk(dataDir) {
             const sampleId = safeToken(record.sampleId, '');
             if (!sessionId || !sampleId) continue;
             const filePath = path.join(collectionDir(sessionsDir, participant.id, sessionId), 'samples', `${sampleId}.json`);
+            let calibrationFields = {};
+            if (record.calibration !== undefined) {
+              if (!validatePracticePoints(record.points, record.settings?.segmentDurationMs)
+                || !Number.isInteger(record.preTriggerPointCount) || record.preTriggerPointCount < 0
+                || record.points[record.preTriggerPointCount]?.time !== record.triggeredAt
+                || record.points[0].time !== record.recordingStartedAt || record.points.at(-1).time !== record.recordingEndedAt
+                || record.recordingEndedAt - record.triggeredAt < record.settings.segmentDurationMs) throw Object.assign(new Error('Invalid calibrated sample waveform or anchors.'), { status: 400 });
+              if (record.calibration !== null) {
+                const reference = readJsonFiles(path.join(collectionDir(sessionsDir, participant.id, sessionId), 'practice')).find(rest => rest.kind === 'rest' && rest.id === record.calibration.restId);
+                if (!reference || !sameCalibration(record.calibration, reference.calibration)
+                  || !['participantId', 'experimentId', 'sessionId', 'generation', 'round', 'condition', 'signalSource', 'channelIndex'].every(key => record[key] === reference[key])) throw Object.assign(new Error('Sample calibration scope mismatch.'), { status: 400 });
+              } else if (participant.condition === 'threshold' && record.gestureId !== 'relax') throw Object.assign(new Error('Threshold sample requires calibration.'), { status: 400 });
+              const crossing = record.firstCrossingAt;
+              if (participant.condition === 'threshold' && record.gestureId !== 'relax' && (!Number.isFinite(crossing) || record.triggeredAt - crossing < 100)) throw Object.assign(new Error('Invalid confirmed threshold anchor.'), { status: 400 });
+              calibrationFields = { calibration: record.calibration, firstCrossingAt: crossing ?? null };
+            }
             if (fs.existsSync(filePath)) continue;
             const points = sanitizePoints(record.points);
             writeJsonAtomic(filePath, {
@@ -687,6 +755,7 @@ export function createStudyDesk(dataDir) {
               sessionId,
               participantId: participant.id,
               experimentId: participant.experiment_id,
+              isTestParticipant: isTestParticipant(participant),
               condition: participant.condition,
               round: finiteNumber(record.round, Number(participant.current_round) || 1),
               phase: String(record.phase || ''),
@@ -703,6 +772,7 @@ export function createStudyDesk(dataDir) {
               channelIndex: finiteNumber(record.channelIndex, 0),
               sampleRateHz: finiteNumber(record.sampleRateHz, null),
               settings: sanitizeSettings(record.settings),
+              ...calibrationFields,
             });
           } else if (item?.kind === 'event' && record && EVENT_TYPES.has(record.type)) {
             const sessionId = safeToken(record.sessionId, '');
@@ -714,6 +784,7 @@ export function createStudyDesk(dataDir) {
               eventId,
               sessionId,
               participantId: participant.id,
+              isTestParticipant: isTestParticipant(participant),
               condition: participant.condition,
               round: finiteNumber(record.round, 1),
               phase: String(record.phase || ''),
@@ -733,6 +804,7 @@ export function createStudyDesk(dataDir) {
               revisionId,
               sessionId,
               participantId: participant.id,
+              isTestParticipant: isTestParticipant(participant),
               condition: participant.condition,
               round: finiteNumber(record.round, 1),
               sampleIds: Array.isArray(record.sampleIds) ? record.sampleIds.map((sampleId) => safeToken(sampleId, '')).filter(Boolean) : [],
@@ -772,6 +844,7 @@ export function createStudyDesk(dataDir) {
           throw Object.assign(new Error('This round is no longer the active one.'), { status: 409 });
         }
         const trials = Array.isArray(body.trials) ? body.trials : [];
+        validateTrialCalibration(trials, participant);
         const usableCount = trials.filter((trial) => trial?.quality === 'usable').length;
         const savedByGesture = {};
         for (const trial of trials) {
@@ -792,6 +865,7 @@ export function createStudyDesk(dataDir) {
         fs.writeFileSync(path.join(sessionsDir, `${participant.id}-round-${round}.json`), `${JSON.stringify({
           participantId: participant.id,
           experimentId: experiment.id,
+          isTestParticipant: isTestParticipant(participant),
           condition: participant.condition,
           round,
           savedCount: trials.length,
@@ -948,6 +1022,10 @@ export function createStudyDesk(dataDir) {
 
       if (route === 'POST /participants/generate') {
         const experiment = findExperiment(state, String(body.experimentId ?? ''));
+        if (Object.hasOwn(body, 'isTestParticipant') && typeof body.isTestParticipant !== 'boolean') {
+          throw Object.assign(new Error('isTestParticipant must be a boolean.'), { status: 400 });
+        }
+        const testParticipant = body.isTestParticipant === true;
         const count = integerInRange(body.count, 1, 200, 'ID count');
         const assignment = body.assignment ?? 'balanced';
         if (!['balanced', 'button', 'threshold'].includes(assignment)) {
@@ -969,6 +1047,7 @@ export function createStudyDesk(dataDir) {
           const participant = {
             id,
             experiment_id: experiment.id,
+            is_test_participant: String(testParticipant),
             condition,
             status: 'assigned',
             current_round: '1',
@@ -1041,7 +1120,9 @@ export function createStudyDesk(dataDir) {
         const events = [];
         const training = [];
         const runs = [];
+        const practice = [];
         for (const participant of mine) {
+          const labelRecords = records => records.map(record => ({ ...record, participantId: participant.id, isTestParticipant: isTestParticipant(participant) }));
           const root = path.join(sessionsDir, participant.id, 'collection');
           if (fs.existsSync(root)) {
             for (const sessionName of fs.readdirSync(root)) {
@@ -1050,15 +1131,16 @@ export function createStudyDesk(dataDir) {
               const metaPath = path.join(dir, 'meta.json');
               if (fs.existsSync(metaPath)) {
                 try {
-                  sessions.push(JSON.parse(fs.readFileSync(metaPath, 'utf8')));
+                  sessions.push(...labelRecords([JSON.parse(fs.readFileSync(metaPath, 'utf8'))]));
                 } catch {
                   // Skip a session file that did not finish writing.
                 }
               }
-              samples.push(...readJsonFiles(path.join(dir, 'samples')));
-              events.push(...readJsonFiles(path.join(dir, 'events')));
-              training.push(...readJsonFiles(path.join(dir, 'training')));
-              runs.push(...readJsonFiles(path.join(dir, 'runs')));
+              samples.push(...labelRecords(readJsonFiles(path.join(dir, 'samples'))));
+              practice.push(...labelRecords(readJsonFiles(path.join(dir, 'practice'))));
+              events.push(...labelRecords(readJsonFiles(path.join(dir, 'events'))));
+              training.push(...labelRecords(readJsonFiles(path.join(dir, 'training'))));
+              runs.push(...labelRecords(readJsonFiles(path.join(dir, 'runs'))));
             }
           }
           if (!fs.existsSync(sessionsDir)) continue;
@@ -1076,6 +1158,7 @@ export function createStudyDesk(dataDir) {
                 sessionId: '',
                 participantId: participant.id,
                 experimentId: experiment.id,
+                isTestParticipant: isTestParticipant(participant),
                 condition: participant.condition,
                 round: finiteNumber(roundFile.round, 0),
                 phase: 'review',
@@ -1136,6 +1219,9 @@ export function createStudyDesk(dataDir) {
           recording_started_at: sample.recordingStartedAt,
           recording_ended_at: sample.recordingEndedAt,
           triggered_at: sample.triggeredAt,
+          first_crossing_at: sample.firstCrossingAt ?? '',
+          calibration_revision: sample.calibration?.revision ?? '',
+          calibration_json: sample.calibration ? JSON.stringify(sample.calibration) : '',
           pre_trigger_point_count: sample.preTriggerPointCount,
           point_count: sample.pointCount,
           signal_source: sample.signalSource,
@@ -1202,6 +1288,7 @@ export function createStudyDesk(dataDir) {
         }));
         const attemptRows = runs.flatMap((run) => (Array.isArray(run.outcomes) ? run.outcomes : []).map((outcome) => ({
           run_id: run.id,
+          participant_id: run.participantId,
           attempt_id: outcome.attemptId,
           expected_gesture_id: outcome.expectedGestureId,
           expected_gesture_name: outcome.expectedGestureName,
@@ -1209,15 +1296,21 @@ export function createStudyDesk(dataDir) {
           predicted_gesture_id: outcome.predictedGestureId ?? '',
           predicted_gesture_name: outcome.predictedGestureName ?? '',
         })));
+        const labeledCsv = (headers, rows) => toCsv([...headers, 'is_test_participant'], rows.map(row => ({
+          ...row,
+          is_test_participant: isTestParticipant(mine.find(participant => participant.id === row.participant_id)),
+        })));
         const archive = zipStore([
-          { name: 'sessions.csv', data: toCsv(['session_id', 'participant_id', 'experiment_id', 'condition', 'round', 'phase', 'signal_source', 'channel', 'sample_rate_hz', 'device_name', 'segment_duration_ms', 'pre_trigger_window_ms', 'countdown_ms', 'activity_threshold', 'cooldown_ms', 'captures_min', 'captures_max', 'feature_set_id', 'classifier', 'updated_at'], sessionRows) },
-          { name: 'samples.csv', data: toCsv(['sample_id', 'session_id', 'participant_id', 'condition', 'round', 'gesture_id', 'gesture_label', 'captured_at', 'recording_started_at', 'recording_ended_at', 'triggered_at', 'pre_trigger_point_count', 'point_count', 'signal_source', 'channel', 'kept', 'replaced_by', 'segment_duration_ms', 'pre_trigger_window_ms', 'countdown_ms', 'activity_threshold', 'cooldown_ms', 'feature_set_id', 'classifier'], sampleRows) },
-          { name: 'replacements.csv', data: toCsv(['round', 'session_id', 'participant_id', 'deleted_sample_id', 'replacement_sample_id', 'at'], replacementRows) },
-          { name: 'events.csv', data: toCsv(['event_id', 'session_id', 'participant_id', 'condition', 'round', 'phase', 'type', 'at', 'sample_id', 'replacement_sample_id', 'detail'], eventRows) },
-          { name: 'training.csv', data: toCsv(['revision_id', 'session_id', 'participant_id', 'condition', 'round', 'sample_ids', 'classifier', 'feature_set_id', 'segment_duration_ms', 'started_at', 'finished_at', 'status', 'error'], trainingRows) },
-          { name: 'runs.csv', data: toCsv(['run_id', 'session_id', 'participant_id', 'condition', 'round', 'difficulty', 'model_revision_id', 'game_score', 'obstacle_success', 'recorded_at'], runRows) },
-          { name: 'attempts.csv', data: toCsv(['run_id', 'attempt_id', 'expected_gesture_id', 'expected_gesture_name', 'result', 'predicted_gesture_id', 'predicted_gesture_name'], attemptRows) },
+          { name: 'participants.csv', data: toCsv(['participant_id', 'experiment_id', 'condition', 'is_test_participant'], mine.map(participant => ({ participant_id: participant.id, experiment_id: participant.experiment_id, condition: participant.condition, is_test_participant: isTestParticipant(participant) }))) },
+          { name: 'sessions.csv', data: labeledCsv(['session_id', 'participant_id', 'experiment_id', 'condition', 'round', 'phase', 'signal_source', 'channel', 'sample_rate_hz', 'device_name', 'segment_duration_ms', 'pre_trigger_window_ms', 'countdown_ms', 'activity_threshold', 'cooldown_ms', 'captures_min', 'captures_max', 'feature_set_id', 'classifier', 'updated_at'], sessionRows) },
+          { name: 'samples.csv', data: labeledCsv(['sample_id', 'session_id', 'participant_id', 'condition', 'round', 'gesture_id', 'gesture_label', 'captured_at', 'recording_started_at', 'recording_ended_at', 'triggered_at', 'first_crossing_at', 'calibration_revision', 'calibration_json', 'pre_trigger_point_count', 'point_count', 'signal_source', 'channel', 'kept', 'replaced_by', 'segment_duration_ms', 'pre_trigger_window_ms', 'countdown_ms', 'activity_threshold', 'cooldown_ms', 'feature_set_id', 'classifier'], sampleRows) },
+          { name: 'replacements.csv', data: labeledCsv(['round', 'session_id', 'participant_id', 'deleted_sample_id', 'replacement_sample_id', 'at'], replacementRows) },
+          { name: 'events.csv', data: labeledCsv(['event_id', 'session_id', 'participant_id', 'condition', 'round', 'phase', 'type', 'at', 'sample_id', 'replacement_sample_id', 'detail'], eventRows) },
+          { name: 'training.csv', data: labeledCsv(['revision_id', 'session_id', 'participant_id', 'condition', 'round', 'sample_ids', 'classifier', 'feature_set_id', 'segment_duration_ms', 'started_at', 'finished_at', 'status', 'error'], trainingRows) },
+          { name: 'runs.csv', data: labeledCsv(['run_id', 'session_id', 'participant_id', 'condition', 'round', 'difficulty', 'model_revision_id', 'game_score', 'obstacle_success', 'recorded_at'], runRows) },
+          { name: 'attempts.csv', data: labeledCsv(['run_id', 'participant_id', 'attempt_id', 'expected_gesture_id', 'expected_gesture_name', 'result', 'predicted_gesture_id', 'predicted_gesture_name'], attemptRows) },
           { name: 'waveforms.json', data: JSON.stringify({ sessions, samples }, null, 2) },
+          { name: 'practice.json', data: JSON.stringify({ schemaVersion: 1, archivalOnly: true, records: practice }, null, 2) },
         ]);
         return {
           status: 200,
@@ -1238,6 +1331,7 @@ export function createStudyDesk(dataDir) {
             const view = presentParticipant(participant, experiment.repetitions);
             return {
               id: view.id,
+              is_test_participant: view.isTestParticipant,
               condition: view.condition,
               status: view.status,
               current_round: view.currentRound,
@@ -1251,7 +1345,7 @@ export function createStudyDesk(dataDir) {
             'Content-Type': 'text/csv; charset=utf-8',
             'Content-Disposition': `attachment; filename="${experiment.id}-participants.csv"`,
           },
-          text: toCsv(['id', 'condition', 'status', 'current_round', 'rounds_completed', 'created_at'], rows),
+          text: toCsv(['id', 'condition', 'status', 'current_round', 'rounds_completed', 'created_at', 'is_test_participant'], rows),
         };
       }
 

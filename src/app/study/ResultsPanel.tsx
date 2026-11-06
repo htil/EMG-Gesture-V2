@@ -1,3 +1,4 @@
+import DismissibleNotice from './DismissibleNotice';
 import { ArrowRight } from 'lucide-react';
 import type { Gesture } from '../pipeline';
 import { DEFAULT_DIFFICULTY, type StoredGameRun } from './gameHandoff';
@@ -42,6 +43,12 @@ export default function ResultsPanel({
           The previous score is the last run at the same difficulty{difficulty === DEFAULT_DIFFICULTY ? '' : ` (${difficulty})`}.
         </p>
       </div>
+
+      <section aria-label="Results guidance" className="rounded-2xl border border-cyan-300/40 bg-cyan-300/10 p-4 text-sm leading-6 text-slate-200">
+        <h3 className="font-medium text-cyan-100">What these results mean</h3>
+        <p>Game score describes play, not recognition accuracy. Accuracy tells you how often the model named the requested movement. Unknown means the model did not recognise a gesture and counts as unsuccessful. Recording failures are separate: no usable test recording was available, so they are not scored predictions.</p>
+        <p className="mt-2">Replay game plays again with the same kept samples and trained model; it does not retrain or reset your examples. Review Samples / Retrain lets you inspect or replace examples and then retrain. {continueLabel} {continueLabel === 'Begin collection' ? 'leaves Practice and starts measured collection with a separate dataset and model.' : continueLabel === 'Finish session' ? 'saves this round and ends the session.' : 'saves this round and moves to the next step.'}</p>
+      </section>
 
       <div className="grid gap-3 sm:grid-cols-3">
         <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
@@ -108,7 +115,7 @@ export default function ResultsPanel({
           onClick={onTryAgain}
           className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-100 disabled:cursor-not-allowed disabled:opacity-35"
         >
-          Try Again
+          Replay game
         </button>
         <button type="button" onClick={onReview} className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-100">
           Review Samples / Retrain
@@ -124,13 +131,13 @@ export default function ResultsPanel({
         </button>
       </div>
       {!tryAgainEnabled && (
-        <p className="text-xs text-amber-100">Try Again stays closed until this condition’s model is ready.</p>
+        <p className="text-xs text-amber-100">Replay game stays closed until this condition’s model is ready.</p>
       )}
       {!continueEnabled && (
         <p className="text-xs text-amber-100">Continue stays closed until every gesture has at least the minimum number of examples again.</p>
       )}
       <p className="text-xs leading-5 text-slate-500">When retries and retraining are allowed during the measured study is still open.</p>
-      {saveError && <p className="text-sm text-rose-300">{saveError}</p>}
+      <DismissibleNotice message={saveError} summary="Round not saved" resetKey={saving} />
     </section>
   );
 }

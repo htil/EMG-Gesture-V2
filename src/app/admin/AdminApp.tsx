@@ -73,6 +73,7 @@ export default function AdminApp() {
   const [draftLives, setDraftLives] = useState(DEFAULT_STARTING_LIVES);
   const [newName, setNewName] = useState('');
   const [generateCount, setGenerateCount] = useState(8);
+  const [isTestParticipant, setIsTestParticipant] = useState(false);
   const [assignment, setAssignment] = useState<'balanced' | Assignment>('balanced');
   const [busy, setBusy] = useState(false);
 
@@ -420,16 +421,22 @@ export default function AdminApp() {
                   type="button"
                   disabled={busy}
                   onClick={() => void run(async () => {
-                    const created = await generateParticipants(pin, { experimentId: selected.id, count: generateCount, assignment });
+                    const created = await generateParticipants(pin, { experimentId: selected.id, count: generateCount, assignment, isTestParticipant });
                     await refreshExperiments(pin, selected.id);
                     await refreshParticipants(pin, selected.id);
-                    setNotice(`Created ${created.participants.length} IDs.`);
+                    setNotice(`Created ${created.participants.length} ${isTestParticipant ? 'test/demo' : 'study'} IDs.`);
                   })}
                   className="rounded-xl bg-white px-4 py-2.5 text-xs font-medium text-slate-950 disabled:opacity-40"
                 >
                   Generate IDs
                 </button>
               </div>
+
+              <label className="mt-4 flex items-center gap-3 text-sm text-slate-200">
+                <input type="checkbox" checked={isTestParticipant} disabled={busy} onChange={(event) => setIsTestParticipant(event.target.checked)} className="h-4 w-4 accent-amber-200" />
+                Test/demo participants (Mock and debug controls)
+              </label>
+              <p className="mt-2 text-xs leading-5 text-slate-500">Unchecked creates study participants using Ganglion. This choice applies only to newly generated IDs; existing IDs and resets keep their original type. Exports label test/demo data separately.</p>
 
               {saveAlerts.length > 0 && (
                 <div className="mt-4 space-y-2">
@@ -446,6 +453,7 @@ export default function AdminApp() {
                   <thead className="text-[10px] uppercase tracking-[0.16em] text-slate-500">
                     <tr>
                       <th className="pb-3 font-medium">ID</th>
+                      <th className="pb-3 font-medium">Participant type</th>
                       <th className="pb-3 font-medium">Assignment</th>
                       <th className="pb-3 font-medium">Status</th>
                       <th className="pb-3 font-medium">Round</th>
@@ -456,6 +464,7 @@ export default function AdminApp() {
                     {participants.map((participant) => (
                       <tr key={participant.id} className="border-t border-white/8">
                         <td className="py-3 font-mono tracking-wider text-white">{participant.id}</td>
+                        <td className="py-3"><span className={`inline-block rounded-lg border px-2 py-1 text-xs ${participant.isTestParticipant === true ? 'border-amber-200/30 bg-amber-200/10 text-amber-100' : 'border-cyan-200/20 bg-cyan-200/5 text-cyan-100'}`}>{participant.isTestParticipant === true ? 'Test / demo' : 'Study / Ganglion'}</span></td>
                         <td className="py-3">
                           <div className={`w-36 ${participant.status !== 'assigned' || busy ? 'pointer-events-none opacity-60' : ''}`}>
                             <DarkSelect

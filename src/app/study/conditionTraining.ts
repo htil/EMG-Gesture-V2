@@ -23,6 +23,7 @@ export interface ConditionModelState {
 }
 
 const engines = new Map<string, ReturnType<typeof createPredictionEngine>>();
+const practiceStates = new Map<string, ConditionModelState>();
 const trainTokens = new Map<string, number>();
 const trainingInFlight = new Map<string, number>();
 
@@ -46,6 +47,7 @@ function emptyState(condition: Assignment): ConditionModelState {
 }
 
 export function readModelState(scopeId: string, condition: Assignment): ConditionModelState {
+  if (scopeId.startsWith('practice:')) return practiceStates.get(storageKey(scopeId, condition)) ?? emptyState(condition);
   const raw = sessionStorage.getItem(storageKey(scopeId, condition));
   if (!raw) return emptyState(condition);
   try {
@@ -65,6 +67,10 @@ export function readModelState(scopeId: string, condition: Assignment): Conditio
 }
 
 function writeModelState(scopeId: string, condition: Assignment, state: ConditionModelState) {
+  if (scopeId.startsWith('practice:')) {
+    practiceStates.set(storageKey(scopeId, condition), { ...state, condition });
+    return { ...state, condition };
+  }
   sessionStorage.setItem(storageKey(scopeId, condition), JSON.stringify({ ...state, condition }));
   return { ...state, condition };
 }

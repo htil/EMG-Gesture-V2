@@ -19,6 +19,8 @@ export interface GameObstacleResult {
 export type TutorialBeat = 'intro' | 'wrist-up' | 'wrist-down' | 'farewell';
 
 export interface GameMountOptions {
+  /** Read on each keydown so a running game can toggle debug arrows. Defaults to enabled. */
+  isDebugKeyboardEnabled?: () => boolean;
   obstacleCount?: number;
   startingLives?: number;
   tutorial?: boolean;
