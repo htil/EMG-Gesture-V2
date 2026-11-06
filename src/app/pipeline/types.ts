@@ -1,0 +1,166 @@
+// Defines the data types for the pipeline
+
+export interface Gesture {
+  id: string;
+  name: string;
+}
+
+export interface EmgFeatures {
+  rms: number;
+  mav: number;
+  std: number;
+  peak: number;
+  waveformLength: number;
+  zeroCrossings: number;
+  slopeSignChanges: number;
+  willisonAmplitude: number;
+  hjorthMobility: number;
+  hjorthComplexity: number;
+}
+
+export type FeatureKey = keyof EmgFeatures;
+export type FeatureSetId = 'extended' | 'educational';
+
+export interface FeatureStats {
+  min: number;
+  mean: number;
+  max: number;
+}
+
+export interface ModelClassDebugSummary {
+  gestureId: string;
+  gestureName: string;
+  sampleCount: number;
+  featureStats: Record<string, FeatureStats>;
+}
+
+export interface NeighborDebug {
+  gestureId: string;
+  gestureName: string;
+  distance: number;
+  support: number;
+}
+
+export interface ClassSupportDebug {
+  gestureId: string;
+  gestureName: string;
+  support: number;
+}
+
+export interface PredictionDebug {
+  features: EmgFeatures;
+  normalizedVector: number[];
+  nearestNeighbors: NeighborDebug[];
+  classSupports: ClassSupportDebug[];
+  supportMargin: number;
+  nearestDistance: number;
+  status: 'accepted' | 'unknown';
+}
+
+export interface EmgSample {
+  id: string;
+  gestureId: string;
+  gestureName: string;
+  timestamp: number;
+  data: number[];
+  duration: number;
+  quality?: 'good' | 'weak' | 'noisy';
+  features?: EmgFeatures;
+}
+
+export interface TrainingGestureData {
+  gesture: Gesture;
+  samples: EmgSample[];
+  targetSampleCount: number;
+}
+
+export interface TrainingSessionData {
+  id: string;
+  createdAt: number;
+  gestures: Gesture[];
+  gestureData: TrainingGestureData[];
+  segmentDurationMs: number;
+  featureSetId: FeatureSetId;
+}
+
+export type PredictionMatchStatus = 'match' | 'mismatch';
+export type PredictionConfidenceStatus = 'high' | 'low';
+
+export interface PredictionRecord {
+  id: number;
+  index: number;
+  timestamp: string;
+  expectedGestureId: string;
+  expectedGestureName: string;
+  predictedGestureId: string;
+  predictedGestureName: string;
+  confidence: number;
+  matchStatus: PredictionMatchStatus;
+  confidenceStatus: PredictionConfidenceStatus;
+  emgSample?: EmgSample;
+  debug?: PredictionDebug;
+}
+
+export interface TestingSessionData {
+  id: string;
+  startedAt: number;
+  completedAt: number;
+  trainingSessionId: string;
+  gestures: Gesture[];
+  predictions: PredictionRecord[];
+  overallConfidence: number;
+  sessionDurationSeconds: number;
+}
+
+export interface ModelEvaluationGestureStats {
+  gestureId: string;
+  gestureName: string;
+  totalSamples: number;
+  evaluatedSamples: number;
+  correctPredictions: number;
+  unknownPredictions: number;
+  accuracy: number;
+  unknownRate: number;
+  averageConfidence: number;
+}
+
+export interface ModelEvaluationConfusionEntry {
+  expectedGestureId: string;
+  expectedGestureName: string;
+  predictedGestureId: string;
+  predictedGestureName: string;
+  count: number;
+}
+
+export interface ModelEvaluationSummary {
+  method: 'leave-one-out';
+  featureSetId: FeatureSetId;
+  totalSamples: number;
+  evaluatedSamples: number;
+  skippedSamples: number;
+  correctPredictions: number;
+  incorrectPredictions: number;
+  unknownPredictions: number;
+  accuracy: number;
+  unknownRate: number;
+  averageConfidence: number;
+  gestureStats: ModelEvaluationGestureStats[];
+  confusionMatrix: ModelEvaluationConfusionEntry[];
+}
+
+export interface GestureResultStats {
+  gesture: Gesture;
+  predictionCount: number;
+  averageConfidence: number;
+}
+
+export interface ResultStats {
+  totalPredictions: number;
+  overallConfidence: number;
+  mostPredictedGesture: string;
+  lowConfidenceCount: number;
+  gestureStats: GestureResultStats[];
+  predictionCountsByGesture: { gesture: string; gestureId: string; count: number }[];
+  lastTenPredictions: PredictionRecord[];
+  sessionLabel: string;
+}

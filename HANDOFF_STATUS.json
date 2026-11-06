@@ -1,0 +1,29 @@
+{
+  "status": "WIP \u2014 NOT PILOT READY",
+  "localCheckpoint": "8a94ac5209ae79f349bc24a89af9ff90ca5980ce",
+  "priorSoftwareValidatedLocalCommit": "448ea2af5b7efd3c2bd6bbd0477d722ddb7c6461",
+  "priorBaselineCaveat": "Earlier software acceptance; subsequent native Button cancellation defects reported. Not hardware acceptance.",
+  "repairTests": "Focused tests and typecheck passed; latest full suite 449 passed / 1 failed. Final production E2E/export/restart/package acceptance not run.",
+  "fullSuiteFailure": "Legacy core-p0 roundtrip invokes disabled Capture before new ACK gate settles; after test-only waiting change, stale expected context count 4 versus actual 3. Interrupted debugging is not presented as fixed or accepted.",
+  "transferOnlyChanges": [
+    "Removed hardcoded first-run admin PIN; requires locally supplied EMG_ADMIN_PIN.",
+    "Omitted tests, fixtures, review/demo launcher; removed their package scripts."
+  ],
+  "unchangedSpecification": "2-second training center; up to5 seconds before/after;20 official trials;existing Practice/game flow",
+  "noParticipantData": true,
+  "history": "Source-only orphan snapshot; participant-bearing local ancestors not pushed",
+  "excluded": [
+    "data",
+    "recordings",
+    "models fitted to participant data",
+    "logs",
+    "test datasets",
+    "tests/fixtures",
+    "node_modules",
+    "dist",
+    ".env",
+    "credentials",
+    "local SSH/environment files"
+  ],
+  "note": "game/models are original visual game assets, not fitted EMG models"
+}
