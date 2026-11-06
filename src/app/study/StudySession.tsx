@@ -1455,6 +1455,7 @@ export default function StudySession() {
             condition={condition}
             obstacleCount={session.obstacleCount}
             startingLives={session.startingLives}
+            tutorialKey={`${session.participantId}:${session.sessionId}`}
           />
         )}
 

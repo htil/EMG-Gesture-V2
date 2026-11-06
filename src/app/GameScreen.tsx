@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, ArrowLeft, CheckCircle2, Heart, XCircle, Zap } from 'lucide-react';
+import GameGuide from './GameGuide';
 import {
   DEFAULT_OBSTACLE_COUNT,
   DEFAULT_STARTING_LIVES,
@@ -41,6 +42,40 @@ interface GamePrediction {
   confidence: number;
 }
 
+const TUTORIAL_OBSTACLE_COUNT = 10;
+type TutorialGuide = 'intro' | 'lives' | 'wrist-up' | 'wrist-down' | 'farewell' | 'complete';
+
+const TUTORIAL_COPY: Record<TutorialGuide, string> = {
+  intro: "Now it's time to test our model! This timer will display your 'Rest' period and 'Recording' period. Stay ready, it moves fast!",
+  lives: 'Your lives will be tracked here. Each incorrect gesture will cause you to lose a life during the actual trial. Try to make it to the end without losing them all.',
+  'wrist-up': 'Now that the Rest period has passed, it\'s time to perform your first gesture. To jump over the hurdles, you will use the \'Wrist Up\' gesture. When you\'re ready, click "Next" and immediately perform the gesture!',
+  'wrist-down': 'It\'s time for your other gesture. Use \'Wrist Down\' to dodge the incoming player. When you\'re ready, click "Next" and immediately perform the gesture!',
+  farewell: 'Great job! The rest of this run will be a practice round. Remember that when the timer reads \'Recording\' it\'s time to perform your gesture. When you\'re ready, click "Next" to continue on your own!',
+  complete: "Your practice round is complete! Click 'Next' to continue on to the real deal. Good luck!",
+};
+
+function tutorialStorageKey(key: string) {
+  return `emg-game-tutorial:${key}`;
+}
+
+function tutorialStillPending(key?: string) {
+  if (!key) return false;
+  try {
+    return localStorage.getItem(tutorialStorageKey(key)) !== 'done';
+  } catch {
+    return false;
+  }
+}
+
+function markTutorialDone(key?: string) {
+  if (!key) return;
+  try {
+    localStorage.setItem(tutorialStorageKey(key), 'done');
+  } catch {
+    // The practice run can still hand off to the recorded game in this tab.
+  }
+}
+
 const QTE_COPY: Record<QteStatus, { label: string; hint: string; color: string }> = {
   rest: { label: 'Rest', hint: 'Relax and watch for the next cue', color: '#22d3ee' },
   ready: { label: 'Get Ready', hint: 'Prepare the target gesture', color: '#38bdf8' },
@@ -64,7 +99,7 @@ function QteRing({ state }: { state: GameQteViewState }) {
 
   return (
     <div className="flex flex-col items-center">
-      <div className="relative h-40 w-40">
+      <div data-game-guide-target="timer" className="relative h-40 w-40">
         <svg viewBox="0 0 160 160" className="h-full w-full -rotate-90" aria-hidden="true">
           <circle cx="80" cy="80" r={radius} fill="rgba(2, 6, 23, .74)" stroke="rgba(148, 163, 184, .2)" strokeWidth="8" />
           <circle
@@ -231,6 +266,7 @@ export default function GameScreen({
   condition,
   obstacleCount = DEFAULT_OBSTACLE_COUNT,
   startingLives = DEFAULT_STARTING_LIVES,
+  tutorialKey,
 }: {
   onExit: () => void;
   exitLabel?: string;
@@ -245,6 +281,7 @@ export default function GameScreen({
   condition?: 'button' | 'threshold';
   obstacleCount?: number;
   startingLives?: number;
+  tutorialKey?: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [runnerQteState, setRunnerQteState] = useState<GameQteViewState>({
@@ -274,6 +311,11 @@ export default function GameScreen({
   const scoreRef = useRef(0);
   const finishRunRef = useRef<(obstacleSuccess?: boolean) => void>(() => {});
   const gameOverStartedRef = useRef(false);
+  const [runKind, setRunKind] = useState<'tutorial' | 'live'>(() => tutorialStillPending(tutorialKey) ? 'tutorial' : 'live');
+  const [guideBeat, setGuideBeat] = useState<TutorialGuide | null>(runKind === 'tutorial' ? 'intro' : null);
+  const [holdReady, setHoldReady] = useState(false);
+  const runKindRef = useRef(runKind);
+  runKindRef.current = runKind;
 
   useEffect(() => {
     emgPointsRef.current = emgPoints;
@@ -305,6 +347,8 @@ export default function GameScreen({
     setCorrectAttempts(0);
     setTotalAttempts(0);
 
+    const tutorial = runKind === 'tutorial';
+
     const endRun = (obstacleSuccess: boolean) => {
       if (gameOverStartedRef.current) return;
       gameOverStartedRef.current = true;
@@ -314,9 +358,15 @@ export default function GameScreen({
     import('../../game/main.js').then((game) => {
       if (!cancelled) {
         gameModuleRef.current = game;
+        if (tutorial) {
+          setGuideBeat('intro');
+          setHoldReady(false);
+        }
         unmountGame = game.mountGame(container, {
-          obstacleCount,
+          obstacleCount: tutorial ? TUTORIAL_OBSTACLE_COUNT : obstacleCount,
           startingLives,
+          tutorial,
+          preserveLives: tutorial,
           onQteUpdate: (nextState) => {
             const gestures = actionGesturesRef.current;
             const expectedGesture = nextState.expectedAction === 'switch-lane'
@@ -391,7 +441,7 @@ export default function GameScreen({
               ? gestures?.switchLane
               : gestures?.jump;
             const prediction = predictionsRef.current.get(encounterId) ?? null;
-            if (expectedGesture) {
+            if (expectedGesture && !tutorial) {
               outcomesRef.current.push({
                 attemptId: encounterId,
                 expectedGestureId: expectedGesture.id,
@@ -412,8 +462,26 @@ export default function GameScreen({
             setLives(nextLives);
             setMaxLives(nextMaxLives);
           },
-          onGameOver: () => endRun(false),
-          onRunComplete: () => endRun(true),
+          onGameOver: () => {
+            if (tutorial) {
+              setGuideBeat('complete');
+              setHoldReady(true);
+              return;
+            }
+            endRun(false);
+          },
+          onRunComplete: () => {
+            if (tutorial) {
+              setGuideBeat('complete');
+              setHoldReady(true);
+              return;
+            }
+            endRun(true);
+          },
+          onTutorialHold: (beat) => {
+            setGuideBeat(beat);
+            setHoldReady(true);
+          },
         });
       }
     });
@@ -424,7 +492,7 @@ export default function GameScreen({
       gameModuleRef.current = null;
       if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
     };
-  }, [obstacleCount, startingLives]);
+  }, [obstacleCount, runKind, startingLives]);
 
   const visibleQteState = qteState ?? runnerQteState;
   const visibleScore = score ?? runnerScore;
@@ -435,7 +503,24 @@ export default function GameScreen({
     ? `${visibleQteState.trialIndex} / ${visibleQteState.trialCount}`
     : '—';
 
+  const advanceGuide = () => {
+    if (guideBeat === 'complete') {
+      markTutorialDone(tutorialKey);
+      setGuideBeat(null);
+      setRunKind('live');
+      return;
+    }
+    if (guideBeat === 'intro') {
+      setGuideBeat('lives');
+      return;
+    }
+    gameModuleRef.current?.releaseTutorialHold();
+    setGuideBeat(null);
+    setHoldReady(false);
+  };
+
   const finishRun = (obstacleSuccess?: boolean) => {
+    if (runKind !== 'live') return;
     if (condition) {
       const submitted = submitGameRun({
         condition,
@@ -461,7 +546,7 @@ export default function GameScreen({
 
       <header className="pointer-events-none fixed inset-x-0 top-0 z-[110] flex items-start justify-between gap-3 p-3 md:p-5">
         <div className="flex items-stretch gap-2">
-          <div className="rounded-2xl border border-rose-300/20 bg-slate-950/80 px-3 py-2.5 shadow-2xl backdrop-blur-md md:px-4" aria-live="polite">
+          <div data-game-guide-target="lives" className="rounded-2xl border border-rose-300/20 bg-slate-950/80 px-3 py-2.5 shadow-2xl backdrop-blur-md md:px-4" aria-live="polite">
             <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-rose-300">Lives</p>
             <div className="mt-1 flex max-w-36 flex-wrap items-center gap-1" role="img" aria-label={`${lives} of ${maxLives} lives remaining`}>
               {Array.from({ length: maxLives }, (_, index) => (
@@ -542,7 +627,7 @@ export default function GameScreen({
           </div>
         </section>
         <EmgTrace points={emgPoints} qteState={visibleQteState} />
-        {onSecondary && secondaryLabel && (
+        {runKind === 'live' && onSecondary && secondaryLabel && (
           <button type="button" onClick={() => finishRun()} className="pointer-events-auto self-end rounded-xl border border-white/10 bg-slate-950/80 px-4 py-2 text-xs font-medium text-slate-300 shadow-lg backdrop-blur-md transition hover:bg-white/10 hover:text-white">
             {secondaryLabel}
           </button>
@@ -562,6 +647,15 @@ export default function GameScreen({
       <div className="pointer-events-none fixed bottom-4 left-1/2 z-40 -translate-x-1/2 rounded-full border border-white/10 bg-slate-950/65 px-4 py-2 text-[10px] uppercase tracking-[0.16em] text-slate-300 backdrop-blur-md">
         Arrow keys to jump and switch lanes
       </div>
+      {guideBeat && (
+        <GameGuide
+          body={TUTORIAL_COPY[guideBeat]}
+          centered={guideBeat === 'complete'}
+          target={guideBeat === 'lives' ? '[data-game-guide-target="lives"]' : '[data-game-guide-target="timer"]'}
+          nextDisabled={guideBeat !== 'complete' && !holdReady}
+          onNext={advanceGuide}
+        />
+      )}
     </div>
   );
 }

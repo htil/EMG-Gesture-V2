@@ -16,17 +16,23 @@ export interface GameObstacleResult {
   expectedAction: 'jump' | 'switch-lane';
 }
 
+export type TutorialBeat = 'intro' | 'wrist-up' | 'wrist-down' | 'farewell';
+
 export interface GameMountOptions {
   obstacleCount?: number;
   startingLives?: number;
+  tutorial?: boolean;
+  preserveLives?: boolean;
   onQteUpdate?: (state: GameQteUpdate) => void;
   onObstacleResult?: (result: GameObstacleResult) => void;
   onLivesChange?: (lives: number, maxLives: number) => void;
   onGameOver?: () => void;
   onRunComplete?: () => void;
+  onTutorialHold?: (beat: TutorialBeat) => void;
 }
 
 export function mountGame(container: HTMLElement, options?: GameMountOptions): () => void;
+export function releaseTutorialHold(): void;
 export function startJump(): void;
 export function startLaneSwitch(direction: number): void;
 export function queueGestureAction(
