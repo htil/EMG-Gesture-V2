@@ -655,32 +655,57 @@ export default function StudySession() {
     setParentRecoveryError(message);
     setSaveError(message);
   }, []);
+  const recoveryRetryOperation = useRef<object | null>(null);
+  // Source/cue boundaries retire UI continuations, not the archive's immutable
+  // destination or its pending raw evidence. Authorization also fences Retry.
+  const recoveryRetryScope = JSON.stringify([calibrationScope, streamEpoch, isStreaming, practiceMode, practiceActive, stage, serverVerified, datasetLocked]);
+  const recoveryRetryScopeRef = useRef(recoveryRetryScope);
+  recoveryRetryScopeRef.current = recoveryRetryScope;
   const retryRawRecovery = async () => {
     const owner = recoveryCueOwner.current;
     const handoff = cueHandoff.current;
+    const operation = {};
+    recoveryRetryOperation.current = operation;
+    const isCurrent = () => recoveryRetryOperation.current === operation
+      && recoveryRetryScopeRef.current === recoveryRetryScope
+      && recoveryCueOwner.current.recorder === owner.recorder
+      && recoveryCueOwner.current.attemptId === owner.attemptId
+      && cueHandoff.current === handoff;
+    const finish = () => {
+      if (!isCurrent()) return;
+      recoveryRetryOperation.current = null;
+      setRetryingRecovery(false);
+    };
     setRetryingRecovery(true);
     // Retain the UI/producer fence even if retryRecovery clears its hook error
     // before the durable collection queue has actually acknowledged the bytes.
     setParentRecoveryError(recoveryError || 'Raw/context recovery is awaiting collection acknowledgement.');
     try {
       await captureContextArchive.retryRecovery();
+      if (!isCurrent()) return;
       await captureContextArchive.drain();
+      if (!isCurrent()) return;
       await whenCollectionSaved();
-      if (recoveryCueOwner.current.recorder !== owner.recorder || recoveryCueOwner.current.attemptId !== owner.attemptId || cueHandoff.current !== handoff) return;
-      // A rejected handoff cannot become fulfilled. Explicit recovery has now
-      // established its replacement ACK barrier for this exact current owner.
+      if (!isCurrent()) return;
+      // Finish under the captured handoff before replacing its ACK barrier.
+      finish();
       cueHandoff.current = null;
       setReadyCueId(owner.attemptId);
       setParentRecoveryError('');
       setSaveError('');
-    } catch (cause) { reportRecoveryFailure(cause); }
-    finally { setRetryingRecovery(false); }
+    } catch (cause) { if (isCurrent()) reportRecoveryFailure(cause); }
+    finally { finish(); }
   };
   const recorderAttempt = useMemo(() => ({ attemptId: collectionId('attempt'), gestureId, cueAt: Date.now(), ...(retryOfAttempt.current ? { retryOf: retryOfAttempt.current } : {}) }), [calibrationScope, streamEpoch, practiceMode, practiceActive, calibration?.revision, gestureId, trials.length, opportunityRetry]);
   const [readyCueId, setReadyCueId] = useState(recorderAttempt.attemptId);
   const cueHandoff = useRef<Promise<void> | null>(null);
   const recoveryCueOwner = useRef({ recorder: captureContextArchive.recorder, attemptId: recorderAttempt.attemptId });
   recoveryCueOwner.current = { recorder: captureContextArchive.recorder, attemptId: recorderAttempt.attemptId };
+  useEffect(() => {
+    recoveryRetryOperation.current = null;
+    setRetryingRecovery(false);
+    return () => { recoveryRetryOperation.current = null; };
+  }, [recoveryRetryScope, recorderAttempt, captureContextArchive.recorder]);
   const armed = readyCueId === recorderAttempt.attemptId && !recoveryError && !opportunityTimedOut && serverVerified && !datasetLocked && !practiceActive && !saving && !training && stage === 'capture' && isStreaming && !selectedFull && !countingDown && (session?.protocolVersion === 'between-subject-v2' ? calibration !== null && (inPractice || !practiceRequired) : manualTrigger || calibration !== null) && (!inPractice || captureIntroduced) && gameIntroduction === null;
   const latestSourceTime = useRef(0); latestSourceTime.current = recordingSignalData[recordingSignalData.length - 1]?.time ?? Date.now();
   useEffect(() => () => {
