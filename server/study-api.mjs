@@ -1126,6 +1126,42 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           }
           return {status:200,body:{ok:true,acceptedCount:items.length}};
         }
+        // A checkpoint may precede its sample in this request. Populate this view
+        // only after the complete pilot preflight has validated every sample.
+        const validatedSamples = new Map();
+        const validateCollectionTrials = (record) => {
+          if (!isPilot(participant)) return validateTrialCalibration(record.trials, participant);
+          if (record.trials !== undefined && !Array.isArray(record.trials)) conflict('Invalid checkpoint trials.');
+          const seen = new Map();
+          for (const trial of record.trials ?? []) {
+            if (!trial || typeof trial.id !== 'string' || !trial.id || safeToken(trial.id) !== trial.id) conflict('Invalid checkpoint trial identity.');
+            const canonical = canonicalPractice(sanitizeTrial(trial));
+            if (seen.has(trial.id) && seen.get(trial.id) !== canonical) conflict('Conflicting checkpoint trial identity.');
+            seen.set(trial.id, canonical);
+            const sample = validatedSamples.get(trial.id) ?? readJson(path.join(collectionDir(sessionsDir, participant.id, record.sessionId), 'samples', `${trial.id}.json`));
+            if (!sample || sample.sampleId !== trial.id || sample.participantId !== participant.id
+              || sample.experimentId !== participant.experiment_id || sample.sessionId !== record.sessionId
+              || Number(sample.generation) !== participantGeneration(participant) || Number(sample.round) !== Number(record.round)
+              || sample.condition !== record.condition) conflict('Checkpoint sample scope mismatch.');
+            if (canonicalPractice(sample.calibration) !== canonicalPractice(trial.calibration)
+              || (sample.firstCrossingAt ?? null) !== (trial.firstCrossingAt ?? null))
+              throw Object.assign(new Error('Trial calibration does not match its archived sample.'), {status:400});
+          }
+        };
+        // Match the persisted, sanitized sample fields, not request-only metadata.
+        const canonicalSample = (record, archived = false) => canonicalPractice({
+          sampleId: record.sampleId, centerDurationMs: record.centerDurationMs, attemptId: record.attemptId,
+          generation: Number(record.generation), sessionId: record.sessionId, participantId: record.participantId ?? participant.id,
+          experimentId: record.experimentId ?? participant.experiment_id, condition: record.condition, round: Number(record.round),
+          phase: String(record.phase || ''), gestureId: String(record.gestureId || ''), gestureLabel: String(record.gestureLabel || ''),
+          capturedAt: finiteNumber(record.capturedAt, null), recordingStartedAt: finiteNumber(record.recordingStartedAt, null),
+          recordingEndedAt: finiteNumber(record.recordingEndedAt, null), triggeredAt: finiteNumber(record.triggeredAt, null),
+          preTriggerPointCount: finiteNumber(record.preTriggerPointCount, 0), points: sanitizePoints(record.points),
+          signalSource: record.signalSource === 'live' ? 'live' : 'mock', channelIndex: finiteNumber(record.channelIndex, 0),
+          sampleRateHz: archived ? record.sampleRateHz : finiteNumber(record.sampleRateHz, null),
+          settings: archived ? record.settings : sanitizeSettings(record.settings),
+          ...(record.calibration !== undefined ? {calibration: record.calibration, firstCrossingAt: record.firstCrossingAt ?? null} : {}),
+        });
         // Never claim a complete acknowledgement for silently skipped legacy items.
         for (const item of items) {
           const record=item?.record;
@@ -1137,7 +1173,7 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           if(item.kind==='event' && !EVENT_TYPES.has(record.type)) conflict('Unsupported event type; nothing was acknowledged.');
           if(item.kind==='run' && !sanitizeStoredRun(record,participant)) conflict('Run condition scope mismatch; nothing was acknowledged.');
           if(item.kind==='sample') validateSampleCalibration(record,participant);
-          if(item.kind==='checkpoint') validateTrialCalibration(record.trials,participant);
+          if(item.kind==='checkpoint' && !isPilot(participant)) validateTrialCalibration(record.trials,participant);
         }
         // Validate run identity across the entire batch, not just persisted runs.
         // Do this before binding a visit or writing any family of collection item.
@@ -1172,11 +1208,12 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
               const sample=context.sampleId && readJson(path.join(dir,'samples',`${safeToken(context.sampleId)}.json`));
               if(sample) assertContextSample(context,sample);
             }
-            if (item.kind==='checkpoint') validateTrialCalibration(record.trials,participant);
+            if (item.kind==='checkpoint' && record.trials !== undefined && !Array.isArray(record.trials)) conflict('Invalid checkpoint trials.');
             const idKey={sample:'sampleId',event:'eventId',training:'revisionId',run:'id'}[item.kind];
             if(idKey && (!record[idKey] || safeToken(record[idKey])!==record[idKey])) conflict('Valid immutable record ID required; nothing was acknowledged.');
             if (item.kind==='sample') {
               validateSampleCalibration(record,participant);
+              if(record.calibration === undefined && record.firstCrossingAt != null) conflict('First crossing requires calibration; otherwise its anchor cannot be persisted.');
               // The legacy serializer caps arrays; pilot evidence must never be silently shortened.
               if(Array.isArray(record.points) && record.points.length>20000) conflict('Pilot center point limit exceeded; raw evidence was not saved.');
               for(const envelope of readJsonFiles(path.join(dir,'contexts'))) {
@@ -1184,8 +1221,9 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
               }
               if(record.centerDurationMs!==2000 || !record.attemptId || safeToken(record.attemptId)!==record.attemptId || record.recordingStartedAt!==record.triggeredAt || record.recordingEndedAt!==record.triggeredAt+2000) conflict('Pilot sample requires explicit center boundaries and attempt lineage.');
               const previous=readJson(path.join(dir,'samples',`${safeToken(record.sampleId)}.json`));
-              if(pendingSamples.has(record.sampleId) && canonicalPractice(pendingSamples.get(record.sampleId))!==canonicalPractice(record)) conflict('Sample identity conflicts within the batch; raw lineage is immutable.');
-              if(previous && ['points','gestureId','condition','round','triggeredAt','recordingEndedAt'].some(key=>canonicalPractice(previous[key])!==canonicalPractice(record[key]))) conflict('Sample ID and raw lineage are immutable.');
+              if(record.experimentId !== undefined && record.experimentId !== participant.experiment_id) conflict('Sample experiment scope mismatch.');
+              if(pendingSamples.has(record.sampleId) && canonicalSample(pendingSamples.get(record.sampleId))!==canonicalSample(record)) conflict('Sample identity conflicts within the batch; raw lineage is immutable.');
+              if(previous && canonicalSample(previous, true)!==canonicalSample({...record, capturedAt: record.capturedAt === undefined ? previous.capturedAt : record.capturedAt})) conflict('Sample ID and raw lineage are immutable.');
               if (!previous && !pendingSamples.has(record.sampleId)) {
                 const retained=[...retainedSamples(participant,record.sessionId),...pendingSamples.values()].filter(sample=>!pendingDeletions.has(sample.sampleId));
                 const quota=sampleBounds(JSON.parse(participant.frozen_settings)).max;
@@ -1198,6 +1236,8 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
               }
               if (!PILOT_GESTURES.includes(record.gestureId) || record.settings?.segmentDurationMs!==2000 || !Array.isArray(record.points) || record.points.length<2 || record.points.some(p=>!Number.isFinite(p.time)||!Number.isFinite(p.value)) || record.points.some((p,i)=>i>0 && p.time<record.points[i-1].time) || record.points[0].time!==record.triggeredAt || record.points.at(-1).time>=record.triggeredAt+2000 || record.points.at(-1).time-record.triggeredAt<1900 || Number(record.preTriggerPointCount||0)!==0) conflict('Pilot sample requires finite center-only 2000ms waveform; context must remain separate.');
               if (record.signalSource!=='live' && !isTestParticipant(participant)) conflict('Official participant samples require live EMG; Mock is test-only.');
+              if(validatedSamples.has(record.sampleId) && canonicalSample(validatedSamples.get(record.sampleId))!==canonicalSample(record)) conflict('Sample identity conflicts within the batch; raw lineage is immutable.');
+              validatedSamples.set(record.sampleId, {...record, participantId: participant.id, experimentId: participant.experiment_id});
             }
             if (lock && item.kind==='event' && ['sample_deleted','sample_replaced','sample_rejected','capture_started','capture_completed'].includes(record.type)) conflict('Official dataset is locked.');
             if (lock && item.kind==='checkpoint' && (record.trials?.length!==lock.sampleIds.length || record.trials?.some(t=>!lock.sampleIds.includes(t.id)))) conflict('Official dataset checkpoint is locked.');
@@ -1212,6 +1252,7 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
               if(ready?.status==='success' && !previousAttempt) conflict('Ready official model is frozen; restore it without a new training record.');
             }
           }
+          for (const item of items.filter(item => item.kind === 'checkpoint')) validateCollectionTrials(item.record);
           // Join pending families only after all items are validated, independent of batch order.
           for(const {context} of pendingContexts.values()) {
             const sample=context.sampleId && (pendingSamples.get(context.sampleId) ?? readJson(path.join(collectionDir(sessionsDir,participant.id,context.scope.sessionId),'samples',`${safeToken(context.sampleId)}.json`)));
@@ -1246,7 +1287,7 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           } else if (item?.kind === 'checkpoint') {
             const sessionId = safeToken(record.sessionId, '');
             if (!sessionId) continue;
-            validateTrialCalibration(record.trials, participant);
+            if (!isPilot(participant)) validateTrialCalibration(record.trials, participant); // Pilot batch was fully checked before any writes.
             const trials = (Array.isArray(record.trials) ? record.trials : []).slice(0, 200).map(sanitizeTrial).filter(Boolean);
             writeJsonAtomic(checkpointFile(participant.id), {
               sessionId,

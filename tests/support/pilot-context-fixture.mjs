@@ -1,0 +1,5 @@
+// Synthetic center-backed context. No invented pre/post coverage: both are explicitly incomplete.
+export function contextItemForSample(sample) {
+ const context={schemaVersion:1,contextId:sample.attemptId,scope:{participantId:sample.participantId,sessionId:sample.sessionId,condition:sample.condition,source:sample.signalSource,sourceEpoch:1,channel:sample.channelIndex??0},attempt:{attemptId:sample.attemptId,gestureId:sample.gestureId,cueAt:sample.triggeredAt},sampleId:sample.sampleId,status:'captured',disposition:'retained',center:{startAt:sample.triggeredAt,endAt:sample.triggeredAt+2000,startIndex:0,endIndexExclusive:sample.points.length,startConsumptionId:0},window:{startAt:sample.triggeredAt-5000,endAt:sample.triggeredAt+7000,preMs:5000,postMs:5000},points:sample.points.map((p,i)=>({time:p.time,raw:p.value,consumptionId:i})),complete:false,reasons:['incomplete_pre','incomplete_post']};
+ return {kind:'context',record:{sessionId:sample.sessionId,generation:sample.generation,round:sample.round,condition:sample.condition,context}};
+}
