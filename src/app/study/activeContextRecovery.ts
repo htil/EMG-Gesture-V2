@@ -112,24 +112,66 @@ export class ActiveContextRecovery {
     // A failed write never removes the previous storage value.
     this.error = ''; this.options.onError?.('');
   }
+
   checkpoint() {
     if (!this.started || !this.dirty) return;
+
     try {
       const previous = JSON.stringify(this.journal);
       const completed = this.options.recorder.peekCompleted();
+
       for (const record of completed) {
-        const existing = this.journal.sealed.find(r => r.contextId === record.contextId);
-        if (existing && !same(existing, record)) throw new Error('Conflicting immutable context checkpoint');
-        if (!existing) this.journal.sealed.push(record);
+        const existing = this.journal.sealed.find(
+          r => r.contextId === record.contextId
+        );
+
+        if (existing && !same(existing, record)) {
+          console.error('[CONTEXT CONFLICT DIAGNOSTIC]', {
+            contextId: record.contextId,
+            differingFields: Object.keys(record).filter(
+              key =>
+                JSON.stringify(
+                  existing[key as keyof typeof existing]
+                ) !==
+                JSON.stringify(
+                  record[key as keyof typeof record]
+                )
+            ),
+            existingStatus: existing.status,
+            incomingStatus: record.status,
+            existingPointCount: existing.points.length,
+            incomingPointCount: record.points.length,
+          });
+
+          throw new Error('Conflicting immutable context checkpoint');
+        }
+
+        if (!existing) {
+          this.journal.sealed.push(record);
+        }
       }
-      const sealed = new Set(this.journal.sealed.map(r => r.contextId));
-      this.journal.active = this.options.recorder.recoverySnapshot().filter(r => !sealed.has(r.contextId));
-      if (this.error || previous !== JSON.stringify(this.journal)) this.write();
-      // Staging may leave RAM only after an exact sealed copy exists in storage.
+
+      const sealed = new Set(
+        this.journal.sealed.map(r => r.contextId)
+      );
+
+      this.journal.active = this.options.recorder
+        .recoverySnapshot()
+        .filter(r => !sealed.has(r.contextId));
+
+      if (this.error || previous !== JSON.stringify(this.journal)) {
+        this.write();
+      }
+
+      // Staging may leave RAM only after an exact sealed copy
+      // exists in storage.
       this.options.recorder.drainCompleted();
       this.dirty = false;
-    } catch (error) { this.fail(error); }
+    } catch (error) {
+      this.fail(error);
+    }
   }
+
   stop() {
     this.started = false;
     this.options.recorder.onChange = undefined;

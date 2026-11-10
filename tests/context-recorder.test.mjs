@@ -1,9 +1,10 @@
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { Module, createRequire } from 'node:module';
 const require=createRequire(import.meta.url);
-const root=new URL('../',import.meta.url).pathname;
+const root=fileURLToPath(new URL('../',import.meta.url));
 async function load(){
  const b=await build({entryPoints:[root+'src/app/study/captureContext.ts'],bundle:true,platform:'node',format:'cjs',write:false});
  const m=new Module(root+'tests/context.cjs');m._compile(b.outputFiles[0].text,root+'tests/context.cjs');return m.exports;

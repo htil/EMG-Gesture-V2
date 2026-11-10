@@ -1,8 +1,9 @@
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
 import {Module} from 'node:module';
-const root=new URL('../',import.meta.url).pathname;
+const root=fileURLToPath(new URL('../',import.meta.url));
 async function load(entry='captureContext') { const b=await build({entryPoints:[root+`src/app/study/${entry}.ts`],bundle:true,platform:'node',format:'cjs',write:false});const m=new Module(root+'tests/recovery.cjs');m._compile(b.outputFiles[0].text,root+'tests/recovery.cjs');return m.exports; }
 const scope={participantId:'P1',sessionId:'S1',condition:'button',source:'live',sourceEpoch:3,channel:0};
 const attempt={attemptId:'A1',gestureId:'wrist-up',cueAt:5000};
