@@ -1,6 +1,7 @@
 import type { PracticeGuideStep } from './PracticeGuide';
 
 export interface GuidanceState {
+  brief?: boolean;
   stage: string; condition: 'button' | 'threshold'; streaming: boolean; calibrated: boolean;
   introduced: boolean; firstSampleExplained: boolean; sampleCount: number; selectedFull: boolean;
   roundComplete: boolean; gestureName: string; nextGesture: string; relax: boolean; manual: boolean;
@@ -31,6 +32,7 @@ export function practiceGuidance(s: GuidanceState): PracticeGuideStep | null {
     if (s.missing) return step('replace', 'Record a replacement', 'You deleted an example. Press Back to capture to record another one.', 'back-capture');
     if (s.training) return step('training', 'Learning from your examples', 'Please wait. The app is using your examples to learn your movements.');
     if (!s.reviewed) return step('inspect', 'Look at one example', 'Press Graph on an example you kept.', 'inspect-sample');
+    if (s.brief) return step('begin-collection', 'Ready for collection', 'You can delete and replace an example if needed. When the examples are ready, press Begin collection. Training and the game follow your measured collection.', 'begin-collection');
     if (!s.removed) return step('delete', 'Practise replacing an example', 'Delete one example. Then you’ll record another one in its place.', 'delete-sample');
     if (!s.modelReady) return step('train', 'Teach the app your movements', 'Press Train model. The app will use the examples you kept to try recognising your movements.', 'train');
     return step('game-handoff', 'Try your examples in the game', 'Press Play to read how the game works. The game will not start yet.', 'play');

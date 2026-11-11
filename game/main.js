@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinnedModel } from 'three/addons/utils/SkeletonUtils.js';
 import { createStadium, STADIUM_CONFIG } from './stadium/index.js';
+import { assertOfficialSequence } from '../src/app/study/evaluationProtocol.mjs';
 
 const TRACK_WIDTH = 10;
 const LANE_WIDTH = 2.2;
@@ -16,15 +17,19 @@ const HURDLE_HEIGHT = 0.6;
 const HURDLE_BOARD_HEIGHT = 0.16;
 const JUMP_LIFT = 0.25;
 const MAX_HURDLE_POOL = 6;
-const HURDLE_SPACING = 40;
+const HURDLE_SPACING = 50;
+// At speed 10, a 30-unit lead leaves 2.55s/2.65s to the action points:
+// unchanged 2s raw acquisition plus 0.55s/0.65s scheduling/inference margin.
+// Gameplay timing selection, not a change to the acquisition protocol.
+const RECORDING_START_DISTANCE = 30;
+const READY_START_DISTANCE = 38;
 const HURDLE_HIT_DEPTH = 0.35;
 const JUMP_ACTION_DISTANCE = 4.5;
 const LANE_SWITCH_ACTION_DISTANCE = 3.5;
 // Distances ahead of the runner. Recording is the stretch the timer paints rose.
-const READY_START_DISTANCE = 30;
-const RECORDING_START_DISTANCE = 22;
-const RECORDING_END_DISTANCE = 10;
-const RECORDING_ZONE_LENGTH = RECORDING_START_DISTANCE - RECORDING_END_DISTANCE;
+// Adapt the visual to this candidate's existing two-second acquisition timing.
+const RECORDING_ZONE_LENGTH = RUN_SPEED * 2;
+const RECORDING_END_DISTANCE = RECORDING_START_DISTANCE - RECORDING_ZONE_LENGTH;
 const RECORDING_ZONE_CENTER = (RECORDING_START_DISTANCE + RECORDING_END_DISTANCE) / 2;
 
 const scene = new THREE.Scene();
@@ -102,17 +107,12 @@ let lastObstacleIndex = 1;
 let lives = startingLives;
 let runOver = false;
 let runPaused = false;
-let preserveLives = false;
 let tutorialBeat = 'free';
 let tutorialSkipEncounter = '';
 let runPoseHeld = false;
 const previousHurdleZ = new WeakMap();
 
-const hemiLight = new THREE.HemisphereLight(
-  STADIUM_CONFIG.hemiSky,
-  STADIUM_CONFIG.hemiGround,
-  STADIUM_CONFIG.hemiIntensity,
-);
+const hemiLight = new THREE.HemisphereLight(STADIUM_CONFIG.hemiSky, STADIUM_CONFIG.hemiGround, STADIUM_CONFIG.hemiIntensity);
 hemiLight.position.set(0, 20, 0);
 scene.add(hemiLight);
 
@@ -219,7 +219,34 @@ loader.load(
   }
 );
 
+let sourceRecoveryHeld = false;
+
+export function holdForSourceRecovery() {
+  sourceRecoveryHeld = true;
+  pendingGestureAction = null;
+}
+
+export function resumeAfterSourceRecovery() {
+  if (!sourceRecoveryHeld || runOver) return;
+  const upcoming = nearestUpcomingHurdle();
+  if (upcoming && !upcoming.userData.resolved) {
+    const shift = Math.min(0, -READY_START_DISTANCE - 10 - upcoming.position.z);
+    for (const hurdle of hurdles) {
+      if (!hurdle.userData.active || hurdle.userData.resolved) continue;
+      hurdle.position.z += shift;
+      hurdle.userData.recordingComplete = false;
+      previousHurdleZ.set(hurdle, hurdle.position.z);
+    }
+  }
+  pendingGestureAction = null;
+  completeUntil = 0;
+  lastCueUpdate = 0;
+  clock.getDelta();
+  sourceRecoveryHeld = false;
+}
+
 export function mountGame(container, options = {}) {
+  sourceRecoveryHeld = false;
   const resizeRenderer = () => {
     const width = container.clientWidth || window.innerWidth;
     const height = container.clientHeight || window.innerHeight;
@@ -229,20 +256,21 @@ export function mountGame(container, options = {}) {
   };
 
   activeGameOptions = options;
-  obstacleLimit = wholeNumber(options.obstacleCount, DEFAULT_OBSTACLE_COUNT, 1, 200);
+  const fixed = options.runKind === 'official' || options.runKind === 'replay';
+  if (fixed) assertOfficialSequence(options.officialSequence);
+  obstacleLimit = fixed ? 20 : wholeNumber(options.obstacleCount, DEFAULT_OBSTACLE_COUNT, 1, 200);
   startingLives = wholeNumber(options.startingLives, DEFAULT_STARTING_LIVES, 1, 10);
-  preserveLives = !!options.preserveLives;
+  if (isTutorialRun()) obstacleLimit = wholeNumber(options.obstacleCount, 8, 1, 8);
   resetGame();
-  tutorialBeat = options.tutorial ? 'intro' : 'free';
+  tutorialBeat = isTutorialRun() ? 'intro' : 'free';
   tutorialSkipEncounter = '';
-  runPaused = !!options.tutorial;
-  if (runPaused) holdRunningPose();
-  activeGameOptions.onLivesChange?.(lives, startingLives);
+  runPaused = isTutorialRun();
   if (runPaused) {
-    lastCueUpdate = 0;
+    holdRunningPose();
     updateObstacleCue();
     activeGameOptions.onTutorialHold?.('intro');
   }
+  activeGameOptions.onLivesChange?.(lives, startingLives);
 
   const renderer = new THREE.WebGLRenderer();
   renderer.domElement.style.display = 'block';
@@ -254,7 +282,7 @@ export function mountGame(container, options = {}) {
 
   const onKeyDown = (event) => {
     // Gate only debug keyboard input; gesture/QTE control entry points stay active.
-    if (event.repeat || runPaused || runOver || options.isDebugKeyboardEnabled?.() === false) return;
+    if (fixed || runPaused || runOver || event.repeat || options.isDebugKeyboardEnabled?.() === false) return;
     if (event.code == 'ArrowUp') startJump();
     if (event.code == 'ArrowLeft') startLaneSwitch(-1);
     if (event.code == 'ArrowRight') startLaneSwitch(1);
@@ -270,10 +298,12 @@ export function mountGame(container, options = {}) {
     resizeObserver.disconnect();
     renderer.domElement.remove();
     renderer.dispose();
-    runPaused = false;
-    tutorialBeat = 'free';
     if (activeRenderer === renderer) activeRenderer = null;
-    if (activeGameOptions === options) activeGameOptions = {};
+    if (activeGameOptions === options) {
+      activeGameOptions = {};
+      runPaused = false;
+      tutorialBeat = 'free';
+    }
   };
 }
 
@@ -342,17 +372,6 @@ export function closestRecordingZoneScreenPoints() {
     });
   }
   return points;
-}
-
-export function releaseTutorialHold() {
-  if (tutorialBeat === 'intro') tutorialBeat = 'to-wrist-up';
-  else if (tutorialBeat === 'wrist-up') tutorialBeat = 'to-wrist-down';
-  else if (tutorialBeat === 'wrist-down') tutorialBeat = 'to-farewell';
-  else if (tutorialBeat === 'farewell') {
-    completeUntil = performance.now();
-    tutorialBeat = 'free';
-  } else return;
-  runPaused = false;
 }
 
 function createHurdleBoardTexture() {
@@ -562,7 +581,9 @@ function addRecordingZone(group) {
 }
 
 function createObstacle(index) {
-  const isLaneGate = index % 2 === 1;
+  const isLaneGate = activeGameOptions.officialSequence
+    ? activeGameOptions.officialSequence[index] !== activeGameOptions.jumpGestureId
+    : index % 2 === 1;
   const openLane = Math.floor(index / 2) % 2 === 0 ? 1 : 0;
   const hurdle = isLaneGate ? createLaneGate(openLane) : createHurdle();
   addRecordingZone(hurdle);
@@ -613,7 +634,7 @@ function resolveObstacle(hurdle, correct) {
   lastExpectedAction = isLaneGate ? 'switch-lane' : 'jump';
   lastEncounterId = `${hurdle.userData.obstacleId}:${hurdle.userData.encounter}`;
   if (!correct) {
-    if (!preserveLives) {
+    if (!(isTutorialRun() && activeGameOptions.preserveLives)) {
       lives = Math.max(0, lives - 1);
       activeGameOptions.onLivesChange?.(lives, startingLives);
     }
@@ -623,8 +644,9 @@ function resolveObstacle(hurdle, correct) {
     correct,
     encounterId: lastEncounterId,
     expectedAction: lastExpectedAction,
+    trialIndex: lastObstacleIndex,
   });
-  if (!preserveLives && lives === 0) {
+  if (!(isTutorialRun() && activeGameOptions.preserveLives) && lives === 0 && activeGameOptions.runKind !== 'official' && activeGameOptions.runKind !== 'replay') {
     runOver = true;
     activeGameOptions.onGameOver?.();
     return true;
@@ -657,13 +679,17 @@ function continueGateSequence(hurdle) {
 }
 
 function resetGame() {
+  completeUntil = 0;
+  lastCueUpdate = 0;
+  runPaused = false;
+  tutorialBeat = 'free';
+  tutorialSkipEncounter = '';
+  runPoseHeld = false;
+  lastObstacleResult = null;
+  lastEncounterId = '';
   pendingGestureAction = null;
   lives = startingLives;
   runOver = false;
-  completeUntil = 0;
-  lastCueUpdate = 0;
-  lastObstacleResult = null;
-  lastEncounterId = '';
   obstaclesResolved = 0;
   lastObstacleIndex = 1;
   laneIndex = 0;
@@ -679,7 +705,6 @@ function resetGame() {
     jumpAction.stop();
     jumpAction.reset();
   }
-  runPoseHeld = false;
   if (runAction) {
     runAction.reset().fadeIn(0.1).play();
   }
@@ -687,7 +712,6 @@ function resetGame() {
   for (let i = 0; i < groundSegments.length; i++) {
     groundSegments[i].position.z = -i * SEGMENT_LENGTH;
   }
-  stadium.reset();
 
   const poolSize = Math.min(obstacleLimit, MAX_HURDLE_POOL);
   obstaclesSpawned = poolSize;
@@ -696,46 +720,37 @@ function resetGame() {
       if (hurdles[i]) retireHurdle(hurdles[i]);
       continue;
     }
+    if (hurdles[i]) {
+      scene.remove(hurdles[i]);
+      hurdles[i] = null;
+    }
     const hurdle = ensureObstacle(i);
     hurdle.visible = true;
     hurdle.userData.active = true;
     hurdle.userData.resolved = false;
     hurdle.userData.spawnIndex = i;
     hurdle.userData.encounter = 0;
+    hurdle.userData.recordingComplete = false;
     hurdle.position.z = -(i + 1) * HURDLE_SPACING;
     previousHurdleZ.set(hurdle, hurdle.position.z);
   }
   retargetUpcomingGates(laneIndex);
-}
-
-// Mixamo run clips start on the bind pose. Sample a stride so a frozen
-// opening frame looks like a runner who was already moving.
-function sampleClipPose(targetMixer, action, poseTime) {
-  if (!targetMixer || !action) return;
-  action.enabled = true;
-  action.paused = false;
-  action.stopFading();
-  action.weight = 1;
-  action.play();
-  targetMixer.setTime(Math.max(poseTime, 0.05));
-}
-
-function holdRunningPose() {
-  if (!mixer || !runAction || runPoseHeld || isJumping) return;
-  const duration = runAction.getClip().duration || 1;
-  const time = ((runAction.time % duration) + duration) % duration;
-  if (time <= 0.08) sampleClipPose(mixer, runAction, duration * 0.38);
-  runPoseHeld = true;
+  stadium.reset();
 }
 
 function animate() {
   const delta = clock.getDelta();
-  if (runOver || runPaused) {
-    if (runPaused) holdRunningPose();
-    if (!runOver) updateObstacleCue();
+  if (runOver || runPaused || sourceRecoveryHeld || activeGameOptions.isStreamReady?.() === false) {
+    if (runPaused) {
+      holdRunningPose();
+      updateObstacleCue();
+    }
     activeRenderer?.render(scene, camera);
     return;
   }
+  if (!isTutorialRun()) updateObstacleCue();
+  // Capture validation can synchronously hold this very animation tick.
+  if (sourceRecoveryHeld || activeGameOptions.isStreamReady?.() === false) return;
   if (mixer) mixer.update(delta);
   for (const defenderMixer of defenderMixers) defenderMixer.update(delta);
 
@@ -768,13 +783,12 @@ function animate() {
     characterRoot.position.y = 0;
   }
 
-  // Recycle ground segments. The stadium uses the same distance so the
-  // stands stay locked to the field without a second clock.
-  const tutorialRunning = tutorialBeat === 'to-wrist-up' || tutorialBeat === 'to-wrist-down' || tutorialBeat === 'to-farewell';
-  const stepDelta = tutorialRunning ? Math.min(delta, 0.05) : delta;
-  let travel = RUN_SPEED * stepDelta;
-  const recordingHold = nextRecordingHold(travel);
-  if (recordingHold) travel = recordingHold.step;
+  // Tutorial-only stops clamp world, obstacles and stadium to the same travel.
+  const stepDelta = isTutorialRun() ? Math.min(delta, 0.05) : delta;
+  const recordingHold = nextRecordingHold(RUN_SPEED * stepDelta);
+  const travel = recordingHold ? recordingHold.step : RUN_SPEED * stepDelta;
+
+  // Recycle ground segments
   for (const segment of groundSegments) {
     segment.position.z += travel;
 
@@ -782,10 +796,12 @@ function animate() {
       segment.position.z -= SEGMENT_COUNT * SEGMENT_LENGTH;
     }
   }
+
   stadium.advance(travel);
 
   // Move the set number of obstacles. Once that many have spawned, passed ones are retired.
-  for (const hurdle of hurdles) {
+  for (let poolIndex = 0; poolIndex < hurdles.length; poolIndex++) {
+    let hurdle = hurdles[poolIndex];
     if (!hurdle.userData.active) continue;
 
     const previousZ = previousHurdleZ.get(hurdle) ?? hurdle.position.z;
@@ -828,10 +844,17 @@ function animate() {
       }
       const nextIndex = obstaclesSpawned;
       obstaclesSpawned += 1;
+      if (activeGameOptions.officialSequence) {
+        scene.remove(hurdle);
+        hurdle = createObstacle(nextIndex);
+        hurdles[poolIndex] = hurdle;
+        hurdle.userData.active = true;
+      }
       hurdle.position.z = farthestActiveZ(hurdle) - HURDLE_SPACING;
       hurdle.userData.resolved = false;
       hurdle.userData.spawnIndex = nextIndex;
       hurdle.userData.encounter += 1;
+      hurdle.userData.recordingComplete = false;
       if (hurdle.userData.obstacleType === 'switch') continueGateSequence(hurdle);
     }
 
@@ -840,10 +863,47 @@ function animate() {
 
   if (recordingHold) enterTutorialHold(recordingHold.beat, recordingHold.encounterId);
   holdBeforeNextRest();
-
   updateObstacleCue();
 
   activeRenderer?.render(scene, camera);
+}
+
+
+
+function isTutorialRun() {
+  return activeGameOptions.runKind === 'practice' && activeGameOptions.tutorial === true && !activeGameOptions.officialSequence;
+}
+
+export function releaseTutorialHold() {
+  if (!isTutorialRun() || !runPaused) return;
+  if (tutorialBeat === 'intro') tutorialBeat = 'to-wrist-up';
+  else if (tutorialBeat === 'wrist-up') tutorialBeat = 'to-wrist-down';
+  else if (tutorialBeat === 'wrist-down') tutorialBeat = 'to-farewell';
+  else if (tutorialBeat === 'farewell') {
+    completeUntil = performance.now();
+    tutorialBeat = 'free';
+  } else return;
+  runPaused = false;
+  runPoseHeld = false;
+  lastCueUpdate = 0;
+}
+
+function sampleClipPose(targetMixer, action, poseTime) {
+  if (!targetMixer || !action) return;
+  action.enabled = true;
+  action.paused = false;
+  action.stopFading();
+  action.weight = 1;
+  action.play();
+  targetMixer.setTime(Math.max(poseTime, 0.05));
+}
+
+function holdRunningPose() {
+  if (!mixer || !runAction || runPoseHeld || isJumping) return;
+  const duration = runAction.getClip().duration || 1;
+  const time = ((runAction.time % duration) + duration) % duration;
+  if (time <= 0.08) sampleClipPose(mixer, runAction, duration * 0.38);
+  runPoseHeld = true;
 }
 
 function nearestUpcomingHurdle() {
@@ -864,20 +924,21 @@ function cueContextFor(hurdle) {
     targetGestureName,
     encounterId: hurdle ? `${hurdle.userData.obstacleId}:${hurdle.userData.encounter}` : '',
     expectedAction,
-    switchDirection: hurdle?.userData.obstacleType === 'switch' ? hurdle.userData.openLane - laneIndex : 0,
+    switchDirection: hurdle?.userData.obstacleType === 'switch' ? hurdle.userData.openLane - laneIndex : (laneIndex === 0 ? 1 : -1),
     trialIndex: hurdle ? (hurdle.userData.spawnIndex ?? 0) + 1 : lastObstacleIndex,
     trialCount: obstacleLimit,
   };
 }
 
 function nextRecordingHold(step) {
+  if (!isTutorialRun()) return null;
   if (tutorialBeat !== 'to-wrist-up' && tutorialBeat !== 'to-wrist-down') return null;
   const upcoming = nearestUpcomingHurdle();
   if (!upcoming) return null;
   const encounterId = `${upcoming.userData.obstacleId}:${upcoming.userData.encounter}`;
   if (encounterId === tutorialSkipEncounter) return null;
   const distance = -upcoming.position.z;
-  if (distance > RECORDING_START_DISTANCE && distance - step <= RECORDING_START_DISTANCE) {
+  if (distance >= RECORDING_START_DISTANCE && distance - step <= RECORDING_START_DISTANCE) {
     return {
       step: distance - RECORDING_START_DISTANCE,
       beat: tutorialBeat === 'to-wrist-up' ? 'wrist-up' : 'wrist-down',
@@ -888,6 +949,7 @@ function nextRecordingHold(step) {
 }
 
 function enterTutorialHold(beat, encounterId) {
+  if (!isTutorialRun()) return;
   tutorialBeat = beat;
   if (encounterId) tutorialSkipEncounter = encounterId;
   runPaused = true;
@@ -898,6 +960,7 @@ function enterTutorialHold(beat, encounterId) {
 }
 
 function holdBeforeNextRest() {
+  if (!isTutorialRun()) return;
   if (runOver || tutorialBeat !== 'to-farewell') return;
   if (obstaclesResolved < 2 || !(completeUntil > 0) || completeUntil === Number.POSITIVE_INFINITY) return;
   if (performance.now() < completeUntil - 40) return;
@@ -909,13 +972,10 @@ function updateObstacleCue() {
   if (now - lastCueUpdate < 80) return;
   lastCueUpdate = now;
 
-  const upcoming = nearestUpcomingHurdle();
-  if (runPaused && tutorialBeat === 'intro') {
-    activeGameOptions.onQteUpdate?.({ status: 'rest', progress: 0, ...cueContextFor(upcoming) });
-    return;
-  }
-  if (runPaused && (tutorialBeat === 'wrist-up' || tutorialBeat === 'wrist-down')) {
-    activeGameOptions.onQteUpdate?.({ status: 'recording', progress: 0, ...cueContextFor(upcoming) });
+  // Held guidance must never start the caller's two-second acquisition.
+  if (isTutorialRun() && runPaused && tutorialBeat !== 'farewell') {
+    activeGameOptions.onQteUpdate?.({status: tutorialBeat === 'intro' ? 'rest' : 'ready',
+      progress: tutorialBeat === 'intro' ? 0 : 1, tutorialHeld: true, ...cueContextFor(nearestUpcomingHurdle())});
     return;
   }
 
@@ -929,7 +989,7 @@ function updateObstacleCue() {
       status: 'complete',
       progress: 1,
       targetGestureName: lastObstacleTarget,
-      resultLabel: lastObstacleResult ? 'Correct — obstacle cleared' : (preserveLives ? 'Missed' : 'Missed — life lost'),
+      resultLabel: lastObstacleResult ? 'Correct — obstacle cleared' : (isTutorialRun() && activeGameOptions.preserveLives ? 'Missed' : 'Missed — life lost'),
       encounterId: lastEncounterId,
       expectedAction: lastExpectedAction,
       ...progressFields,
@@ -937,8 +997,39 @@ function updateObstacleCue() {
     return;
   }
 
+  const upcoming = hurdles
+    .filter((hurdle) => hurdle.userData.active && hurdle.position.z <= 0)
+    .sort((left, right) => right.position.z - left.position.z)[0];
   const distance = upcoming ? -upcoming.position.z : HURDLE_SPACING;
-  const { targetGestureName, ...cueContext } = cueContextFor(upcoming);
+  const targetGestureName = upcoming?.userData.obstacleType === 'switch'
+    ? (laneIndex === upcoming.userData.openLane ? 'Hold Lane' : 'Switch Lane')
+    : 'Jump';
+  const expectedAction = upcoming?.userData.obstacleType === 'switch' ? 'switch-lane' : 'jump';
+  const encounterId = upcoming
+    ? `${upcoming.userData.obstacleId}:${upcoming.userData.encounter}`
+    : '';
+  const switchDirection = upcoming?.userData.obstacleType === 'switch'
+    ? upcoming.userData.openLane - laneIndex
+    : (laneIndex === 0 ? 1 : -1);
+  const cueContext = {
+    encounterId,
+    expectedAction,
+    switchDirection,
+    trialIndex: upcoming ? (upcoming.userData.spawnIndex ?? 0) + 1 : lastObstacleIndex,
+    trialCount: obstacleLimit,
+  };
+
+  if (upcoming && distance <= RECORDING_START_DISTANCE && activeGameOptions.getRecordingProgress) {
+    if (!upcoming.userData.recordingComplete) {
+      const progress = activeGameOptions.getRecordingProgress(encounterId, cueContext.trialIndex);
+      upcoming.userData.recordingComplete = progress >= 1;
+      activeGameOptions.onQteUpdate?.({status: progress >= 1 ? 'processing' : 'recording',
+        progress, targetGestureName, ...cueContext});
+      return;
+    }
+    activeGameOptions.onQteUpdate?.({status:'processing',progress:1,targetGestureName,...cueContext});
+    return;
+  }
 
   if (distance > READY_START_DISTANCE) {
     activeGameOptions.onQteUpdate?.({ status: 'rest', progress: 0, targetGestureName, ...cueContext });
@@ -952,7 +1043,7 @@ function updateObstacleCue() {
   } else if (distance > RECORDING_END_DISTANCE) {
     activeGameOptions.onQteUpdate?.({
       status: 'recording',
-      progress: Math.min(1, Math.max(0, (RECORDING_START_DISTANCE - distance) / RECORDING_ZONE_LENGTH)),
+      progress: Math.min(1, Math.max(0, (RECORDING_START_DISTANCE - distance) / (RUN_SPEED * 2))),
       targetGestureName,
       ...cueContext,
     });

@@ -1,6 +1,11 @@
 import DismissibleNotice from './DismissibleNotice';
+import ParticipantDialog from './ParticipantDialog';
+import { advanceCompletedRound, pendingRoundIntent, persistRoundSession, repeatRoundAvailable } from './roundTransition';
+import { useCoreCaptureContextArchive } from './useCoreCaptureContextArchive';
+import { pickSession } from './ParticipantGate';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
+import { isPilotProtocol, requiresCollectionSurvey, practiceDisposition, skipGesturePractice } from './api';
 import {
   Activity,
   ArrowRight,
@@ -48,6 +53,7 @@ import {
 } from './collection';
 import { DEFAULT_DIFFICULTY, registerGameRunListener, type StoredGameRun } from './gameHandoff';
 import SampleGraphPanel from './SampleGraphPanel';
+import { INFERENCE_WINDOW_MS } from './evaluationProtocol.mjs';
 import ResultsPanel from './ResultsPanel';
 import GuidedPractice from './GuidedPractice';
 import PracticeGuide from './PracticeGuide';
@@ -58,6 +64,9 @@ import { gestureQuotas, keptForGesture, sampleNumber, samplesComplete } from './
 import { alignWaveform, displayEnvelopeWaveform, sharedWaveDomain, type WaveDomain } from './waveScale';
 import {
   clearClientSession,
+  confirmCollectionSurvey,
+  lockOfficialDataset,
+  joinStudy,
   loadClientSession,
   saveClientSession,
   saveRound,
@@ -69,8 +78,8 @@ import {
 } from './api';
 
 const DISPLAY_WINDOW_MS = 4000;
-const DEFAULT_SEGMENT_DURATION_MS = 1200;
-const DEFAULT_PRE_TRIGGER_WINDOW_MS = 175;
+const DEFAULT_SEGMENT_DURATION_MS = 2000;
+const DEFAULT_PRE_TRIGGER_WINDOW_MS = 0; // Surrounding raw context is archived separately, never labelled.
 const DEFAULT_ACTIVITY_THRESHOLD = 0.6;
 const DEFAULT_COUNTDOWN_MS = 3000;
 const RECORDER_COOLDOWN_MS = 450;
@@ -112,7 +121,7 @@ function StepMap({
 }: {
   stage: StudyStage;
   round: number;
-  repetitions: number;
+  repetitions?: number;
   reachedIndex: number;
   canVisit: (stage: FlowStage) => boolean;
   onSelect: (stage: FlowStage) => void;
@@ -122,7 +131,7 @@ function StepMap({
     <section className="rounded-[28px] border border-white/25 bg-slate-900/80 p-4 md:p-6" aria-label="Session steps">
       <div className="mb-4 flex items-end justify-between gap-3">
         <div>
-          <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-cyan-300/80">Round {round} of {repetitions}</p>
+          <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-cyan-300/80">Round {round}{repetitions === undefined ? '' : ` of ${repetitions}`}</p>
           <h1 className="mt-1 text-2xl font-light text-white">Capture, review, play, then see results</h1>
         </div>
       </div>
@@ -186,7 +195,7 @@ function CaptureCounter({
 
   return (
     <div role="status" aria-label="Capture status" data-capture-state={status.label} className="flex items-center gap-3">
-      <p className="max-w-32 text-right text-xs leading-5 text-slate-300">{status.detail}</p>
+      <p className="h-20 max-w-32 overflow-y-auto text-right text-xs leading-5 text-slate-300">{status.detail}</p>
     <div className={`relative flex h-20 w-20 shrink-0 items-center justify-center rounded-full border bg-slate-950/80 ${status.label === 'Error' ? 'border-rose-300/60 text-rose-200' : status.label === 'Ready' ? 'border-emerald-300/60 text-emerald-200' : isRecording ? 'border-cyan-300/60 text-cyan-200' : 'border-amber-200/40 text-amber-100'}`}>
       <svg className="absolute inset-0 -rotate-90" viewBox="0 0 64 64" aria-hidden="true">
         <circle cx="32" cy="32" r={radius} fill="none" stroke="rgba(255,255,255,0.12)" strokeWidth="4" />
@@ -263,11 +272,6 @@ function LivePanel({
           </div>
         </div>
         <div className="flex items-center gap-3">
-          {isRecording && (
-            <span className="flex items-center gap-2 rounded-full bg-cyan-300/10 px-3 py-1.5 text-xs text-cyan-200">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300" /> Capturing
-            </span>
-          )}
           <CaptureCounter isRecording={isRecording} recordingProgress={recordingProgress} segmentDurationMs={segmentDurationMs} status={captureStatus} />
         </div>
       </div>
@@ -449,8 +453,29 @@ function ModelStatusNote({ state }: { state: ConditionModelState }) {
 }
 
 export default function StudySession() {
+  const [scopeEpoch, setScopeEpoch] = useState(0);
+  return <ScopedStudySession key={scopeEpoch} onNextScope={() => setScopeEpoch(n => n + 1)} />;
+}
+
+function ScopedStudySession({ onNextScope }: { onNextScope: () => void }) {
   const navigate = useNavigate();
-  const [measuredSession, setMeasuredSession] = useState<ClientSession | null>(() => loadClientSession());
+  const nextRoundOperation = useRef(false);
+  const [pauseConfirmation, setPauseConfirmation] = useState(false);
+  const [confirmingPause, setConfirmingPause] = useState(false);
+  const pauseOperation = useRef(false);
+  const [dismissedRecoveryKey, setDismissedRecoveryKey] = useState('');
+  const [advancingRound, setAdvancingRound] = useState(false);
+  const [measuredSession, setMeasuredSession] = useState<ClientSession | null>(() => pendingRoundIntent()?.snapshot ?? loadClientSession());
+  const [serverVerified, setServerVerified] = useState(() => !isPilotProtocol(loadClientSession()?.protocolVersion));
+  const serverVerifiedRef = useRef(serverVerified); serverVerifiedRef.current = serverVerified;
+  const [researcherPin, setResearcherPin] = useState('');
+  const gameStreamRef = useRef({ ready: false, source: 'live' as SignalSourceMode });
+  const activeGameRef = useRef<{
+    participantId: string; sessionId: string; generation: number; round: number;
+    condition: Assignment; modelRevisionId: string | null; source: SignalSourceMode;
+    evidenceKind: 'practice' | 'synthetic-test' | 'measured-live';
+  } | null>(null);
+  const lockOperation = useRef(false);
   const [rehearsal, setRehearsal] = useState<ClientSession | null>(null);
   const [captureIntroduced, setCaptureIntroduced] = useState(false);
   const [firstSampleExplained, setFirstSampleExplained] = useState(false);
@@ -458,22 +483,52 @@ export default function StudySession() {
   const [introducedGameRevision, setIntroducedGameRevision] = useState<string | null>(null);
   const [practiceMode, setPracticeMode] = useState<'setup' | 'rehearsal' | 'measured'>(() => {
     const saved = loadClientSession();
-    return saved?.stage === 'capture' && !saved.trials.length ? 'setup' : 'measured';
+    return saved?.stage === 'capture' && !saved.trials.length && !practiceDisposition(saved) ? 'setup' : 'measured';
   });
   const [, refreshArchive] = useState(0);
   const practiceArchive = useRef<PracticeArchive | null>(null);
+  const practiceExitOperation = useRef(false);
   const modeRef = useRef(practiceMode);
   modeRef.current = practiceMode;
   const session = rehearsal ?? measuredSession;
+  // Synchronous ownership survives disabled-control render gaps and lost HTTP
+  // responses. Never reconstruct a retry from mutable UI state.
+  const submissionOperation = useRef<{
+    snapshot: ClientSession;
+    inFlight: boolean;
+    rawSealed: boolean;
+    phase: 'draining' | 'posting' | 'uncertain' | 'complete';
+  } | null>(null);
   const setSession: typeof setMeasuredSession = useCallback((update) => {
+    if (submissionOperation.current) return;
     if (modeRef.current === 'rehearsal') setRehearsal(update);
     else setMeasuredSession(update);
   }, []);
-  const modelScope = (current: ClientSession) => practiceArchive.current?.scope ?? current.participantId;
+  const modelScope = (current: ClientSession) => practiceArchive.current?.scope ?? `${current.participantId}:${current.generation}:${current.sessionId}:${current.round}`;
   const recordCollection = useCallback((participantId: string, items: Parameters<typeof recordMeasuredCollection>[1]) => {
     if (modeRef.current !== 'measured') return modeRef.current === 'rehearsal' && practiceArchive.current
       ? practiceArchive.current.collect(items) : Promise.resolve();
+    if (!serverVerifiedRef.current || (!isPilotProtocol(sessionRef.current?.protocolVersion) && sessionRef.current?.isTestParticipant !== true)) return Promise.resolve();
+    // Only housekeeping producers are suppressed; already-produced evidence
+    // still enters the ACK barrier while raw windows are being sealed.
+    if (submissionOperation.current || sessionRef.current?.stage === 'done') {
+      items = items.filter(item => item.kind !== 'meta' && item.kind !== 'checkpoint');
+    }
     return recordMeasuredCollection(participantId, items);
+  }, []);
+  useEffect(() => {
+    if (!measuredSession || !isPilotProtocol(measuredSession.protocolVersion)) return;
+    let cancelled = false;
+    whenCollectionSaved().then(() => joinStudy(measuredSession.participantId)).then(joined => {
+      if (cancelled) return;
+      if (pendingRoundIntent()) { setServerVerified(true); return; }
+      if (joined.status === 'completed' && joined.repeatRoundsVersion !== 1) { clearClientSession(); navigate('/'); return; }
+      const restored = pickSession(joined, measuredSession);
+      setMeasuredSession(restored);
+      setPracticeMode(restored.stage === 'capture' && !restored.trials.length && !practiceDisposition(restored) ? 'setup' : 'measured');
+      setServerVerified(true);
+    }).catch(cause => { if (!cancelled) setSaveError(cause instanceof Error ? cause.message : 'Rejoin required before continuing.'); });
+    return () => { cancelled = true; };
   }, []);
   const [calibrationState, setCalibrationState] = useState<{ scope: string; epoch: number; value: FrozenCalibration } | null>(null);
   const [recalibrating, setRecalibrating] = useState(false);
@@ -489,6 +544,9 @@ export default function StudySession() {
   const [inspectedTrialId, setInspectedTrialId] = useState<string | null>(null);
   const [gestureId, setGestureId] = useState(DEFAULT_GESTURES[0].id);
   const [manualTriggerToken, setManualTriggerToken] = useState(0);
+  const [opportunityTimedOut, setOpportunityTimedOut] = useState(false);
+  const [opportunityRetry, setOpportunityRetry] = useState(0);
+  const retryOfAttempt = useRef<string | undefined>(undefined);
   const [notice, setNotice] = useState('Start the stream, then perform the gesture.');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
@@ -513,7 +571,7 @@ export default function StudySession() {
 
   useEffect(() => {
     if (!measuredSession || measuredSession.stage === 'done') {
-      if (measuredSession?.stage === 'done') clearClientSession();
+      if (measuredSession?.stage === 'done' && measuredSession.repeatRoundsVersion !== 1) clearClientSession();
       return;
     }
     saveClientSession(measuredSession);
@@ -532,6 +590,9 @@ export default function StudySession() {
     recordingSignalData,
     isStreaming,
     streamEpoch,
+    streamInterruptionReason,
+    subscribeRawPoints,
+    subscribeSourceInterruptions,
     selectSignalSourceMode,
     startStreamForMode,
     stopStream,
@@ -570,15 +631,121 @@ export default function StudySession() {
   const countingDown = countdownEndsAt !== null;
   const practiceSetup = practiceMode === 'setup';
   const inPractice = practiceMode === 'rehearsal';
+  const briefPractice = inPractice && (session?.protocolVersion === 'between-subject-v1' || session?.protocolVersion === 'between-subject-v2');
+  const currentPractice = practiceDisposition(measuredSession);
+  const practiceRequired = session?.protocolVersion === 'between-subject-v2' && !currentPractice;
   const practiceActive = practiceSetup || recalibrating;
-  const armed = !practiceActive && !saving && !training && stage === 'capture' && isStreaming && !selectedFull && !countingDown && (manualTrigger || calibration !== null) && (!inPractice || captureIntroduced) && gameIntroduction === null;
+  const recoveryDialogKey = JSON.stringify([calibrationScope, streamEpoch, isStreaming]);
+  const showRecoveryDialog = signalMode === 'live' && !!streamInterruptionReason && stage !== 'done'
+    && !submissionOperation.current && (!isStreaming || !calibration) && (!isStreaming || !practiceActive)
+    && dismissedRecoveryKey !== recoveryDialogKey;
+  useEffect(() => { if (!isStreaming) setPauseConfirmation(false); }, [isStreaming]);
+  const datasetLocked = !inPractice && !!session?.protocolState?.lock;
+  const streamReady = isStreaming && (inPractice || session?.isTestParticipant === true || (signalMode === 'live' && liveConnectionStatus === 'streaming'));
+  gameStreamRef.current = { ready: streamReady, source: signalMode };
+
   const waveDomain = useMemo(() => sharedWaveDomain(
     trials.map((trial) => displayEnvelopeWaveform(
       alignWaveform(trial.points, trial.preTriggerPointCount, trial.triggeredAt),
     )),
   ), [trials]);
 
+  const subscribeSubmissionRaw = useCallback((listener: (point: (typeof recordingSignalData)[number]) => void, includePending = false) =>
+    subscribeRawPoints?.(point => {
+      if (!submissionOperation.current?.rawSealed && sessionRef.current?.stage !== 'done') listener(point);
+    }, includePending) ?? (() => {}), [subscribeRawPoints]);
+  const subscribeSubmissionInterruptions = useCallback((listener: (reason: string) => void) =>
+    subscribeSourceInterruptions?.(reason => {
+      if (!submissionOperation.current?.rawSealed && sessionRef.current?.stage !== 'done') listener(reason);
+    }) ?? (() => {}), [subscribeSourceInterruptions]);
+  const captureContextArchive = useCoreCaptureContextArchive(session, (stage !== 'done' || session?.repeatRoundsVersion === 1) && !inPractice && !practiceActive && serverVerified && isPilotProtocol(session?.protocolVersion), signalMode, streamEpoch, channelIndex, recordingSignalData, subscribeSubmissionRaw, subscribeSubmissionInterruptions);
+  const [parentRecoveryError, setParentRecoveryError] = useState('');
+  const [retryingRecovery, setRetryingRecovery] = useState(false);
+  const recoveryError = captureContextArchive.recoveryError || parentRecoveryError;
+  const recoveryBlocked = useRef('');
+  recoveryBlocked.current = recoveryError;
+  const reportRecoveryFailure = useCallback((cause: unknown) => {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    recoveryBlocked.current = message;
+    setParentRecoveryError(message);
+    setSaveError(message);
+  }, []);
+  const recoveryRetryOperation = useRef<object | null>(null);
+  // Source/cue boundaries retire UI continuations, not the archive's immutable
+  // destination or its pending raw evidence. Authorization also fences Retry.
+  const recoveryRetryScope = JSON.stringify([calibrationScope, streamEpoch, isStreaming, practiceMode, practiceActive, stage, serverVerified, datasetLocked]);
+  const recoveryRetryScopeRef = useRef(recoveryRetryScope);
+  recoveryRetryScopeRef.current = recoveryRetryScope;
+  const retryRawRecovery = async () => {
+    const owner = recoveryCueOwner.current;
+    const handoff = cueHandoff.current;
+    const operation = {};
+    recoveryRetryOperation.current = operation;
+    const isCurrent = () => recoveryRetryOperation.current === operation
+      && recoveryRetryScopeRef.current === recoveryRetryScope
+      && recoveryCueOwner.current.recorder === owner.recorder
+      && recoveryCueOwner.current.attemptId === owner.attemptId
+      && cueHandoff.current === handoff;
+    const finish = () => {
+      if (!isCurrent()) return;
+      recoveryRetryOperation.current = null;
+      setRetryingRecovery(false);
+    };
+    setRetryingRecovery(true);
+    // Retain the UI/producer fence even if retryRecovery clears its hook error
+    // before the durable collection queue has actually acknowledged the bytes.
+    setParentRecoveryError(recoveryError || 'Raw/context recovery is awaiting collection acknowledgement.');
+    try {
+      await captureContextArchive.retryRecovery();
+      if (!isCurrent()) return;
+      await captureContextArchive.drain();
+      if (!isCurrent()) return;
+      await whenCollectionSaved();
+      if (!isCurrent()) return;
+      // Finish under the captured handoff before replacing its ACK barrier.
+      finish();
+      cueHandoff.current = null;
+      setReadyCueId(owner.attemptId);
+      setParentRecoveryError('');
+      setSaveError('');
+    } catch (cause) { if (isCurrent()) reportRecoveryFailure(cause); }
+    finally { finish(); }
+  };
+  const recorderAttempt = useMemo(() => ({ attemptId: collectionId('attempt'), gestureId, cueAt: Date.now(), ...(retryOfAttempt.current ? { retryOf: retryOfAttempt.current } : {}) }), [calibrationScope, streamEpoch, practiceMode, practiceActive, calibration?.revision, gestureId, trials.length, opportunityRetry]);
+  const [readyCueId, setReadyCueId] = useState(recorderAttempt.attemptId);
+  const cueHandoff = useRef<Promise<void> | null>(null);
+  const recoveryCueOwner = useRef({ recorder: captureContextArchive.recorder, attemptId: recorderAttempt.attemptId });
+  recoveryCueOwner.current = { recorder: captureContextArchive.recorder, attemptId: recorderAttempt.attemptId };
+  useEffect(() => {
+    recoveryRetryOperation.current = null;
+    setRetryingRecovery(false);
+    return () => { recoveryRetryOperation.current = null; };
+  }, [recoveryRetryScope, recorderAttempt, captureContextArchive.recorder]);
+  const armed = readyCueId === recorderAttempt.attemptId && !recoveryError && !opportunityTimedOut && serverVerified && !datasetLocked && !practiceActive && !saving && !training && stage === 'capture' && isStreaming && !(signalMode === 'live' && streamInterruptionReason && !calibration) && !selectedFull && !countingDown && (session?.protocolVersion === 'between-subject-v2' ? calibration !== null && (inPractice || !practiceRequired) : manualTrigger || calibration !== null) && (!inPractice || captureIntroduced) && gameIntroduction === null;
+  const latestSourceTime = useRef(0); latestSourceTime.current = recordingSignalData[recordingSignalData.length - 1]?.time ?? Date.now();
+  useEffect(() => () => {
+    // Changing the displayed cue cancels an uncaptured opportunity, not the
+    // independent post-context of an already completed center.
+    const cancelled = captureContextArchive.recorder.cancelUncaptured(recorderAttempt.attemptId);
+    const drained = captureContextArchive.drain();
+    if (cancelled) cueHandoff.current = drained.then(() => whenCollectionSaved());
+    void (cueHandoff.current ?? drained).catch(reportRecoveryFailure);
+  }, [recorderAttempt, captureContextArchive.recorder, captureContextArchive.drain, reportRecoveryFailure]);
+  useEffect(() => {
+    let current = true;
+    const handoff = cueHandoff.current;
+    if (!handoff) setReadyCueId(recorderAttempt.attemptId);
+    else void handoff.then(() => {
+      if (current && !recoveryBlocked.current) {
+        cueHandoff.current = null;
+        setReadyCueId(recorderAttempt.attemptId);
+      }
+    }).catch(reportRecoveryFailure);
+    return () => { current = false; };
+  }, [recorderAttempt, reportRecoveryFailure]);
+
   const {
+    cancelledOpportunityId,
     recorderState,
     thresholdReadiness,
     isRecording,
@@ -588,6 +755,8 @@ export default function StudySession() {
     acknowledgeCompletedSegment,
   } = useGestureRecorder({
     signalPoints: recordingSignalData,
+    contextRecorder: captureContextArchive.recorder,
+    attemptMetadata: recorderAttempt,
     threshold: activityThreshold,
     frozenCalibration: calibration,
     segmentDurationMs,
@@ -599,6 +768,29 @@ export default function StudySession() {
     isArmed: armed,
     cooldownMs: RECORDER_COOLDOWN_MS,
   });
+
+  useEffect(() => {
+    setOpportunityTimedOut(false); retryOfAttempt.current = undefined;
+  }, [calibrationScope, gestureId]);
+
+  // A software opportunity is a displayed cue, not evidence that a person moved.
+  // 15 seconds is an engineering timeout, never a physiological miss detector.
+  useEffect(() => {
+    if (inPractice || practiceActive || !armed || recorderState !== 'idle' || !isPilotProtocol(session?.protocolVersion)) return;
+    try {
+      if (captureContextArchive.recorder.hasUsedAttempt(recorderAttempt.attemptId) && !captureContextArchive.recorder.hasAttempt(recorderAttempt.attemptId)) return;
+      if (!captureContextArchive.recorder.hasAttempt(recorderAttempt.attemptId)) captureContextArchive.recorder.beginAttempt(recorderAttempt);
+    } catch (cause) { reportRecoveryFailure(cause); return; }
+    if (manualTrigger) return;
+    const timer = window.setTimeout(() => {
+      if (!captureContextArchive.recorder.hasAttempt(recorderAttempt.attemptId)) return;
+      captureContextArchive.recorder.endAttempt(recorderAttempt.attemptId, 'timeout', Math.max(recorderAttempt.cueAt, latestSourceTime.current));
+      retryOfAttempt.current = recorderAttempt.attemptId;
+      setOpportunityTimedOut(true);
+      setNotice('This movement opportunity timed out without a recording. Rest, then choose Retry opportunity. This does not prove whether a movement was performed.');
+    }, 15000);
+    return () => window.clearTimeout(timer);
+  }, [armed, recorderState, recorderAttempt, captureContextArchive.recorder, inPractice, practiceActive, manualTrigger, session?.protocolVersion, reportRecoveryFailure]);
 
   useEffect(() => {
     if (signalMode === 'live' && isRecording && !isDisplayScaleFrozen) {
@@ -636,9 +828,17 @@ export default function StudySession() {
     setSession((current) => (current ? { ...current, openCapture: null } : current));
   }, []);
 
+  useEffect(() => {
+    if (!cancelledOpportunityId) return;
+    retryOfAttempt.current = cancelledOpportunityId;
+    setOpportunityTimedOut(true);
+    cancelOpenCapture('Opportunity interrupted; no sample was saved.');
+    setNotice('Opportunity ended without a recording. Rest, then choose Retry opportunity for a new cue.');
+  }, [cancelledOpportunityId, cancelOpenCapture]);
+
   const pressCapture = useCallback(() => {
     const current = sessionRef.current;
-    if (trainingOperation.current || !current || !manualTrigger || !armed || countdownEndsAt !== null || isRecording) return;
+    if (submissionOperation.current || recoveryBlocked.current || trainingOperation.current || lockOperation.current || current?.protocolState?.lock && modeRef.current !== 'rehearsal' || !current || !manualTrigger || !armed || countdownEndsAt !== null || isRecording) return;
     const sampleId = collectionId('sample');
     const next = {
       sampleId,
@@ -719,7 +919,7 @@ export default function StudySession() {
     const context = logRef.current;
     if (!context || context.phase === 'done') return;
     void recordCollection(context.participantId, [{ kind: 'meta', record: context }]);
-  }, [session?.sessionId, session?.round, session?.stage, session?.condition, session?.generation, signalMode, channelIndex, segmentDurationMs, preTriggerWindowMs, countdownMs, activityThreshold, liveSampleRateHz, liveDeviceName, capturesMin, capturesMax]);
+  }, [serverVerified, session?.sessionId, session?.round, session?.stage, session?.condition, session?.generation, signalMode, channelIndex, segmentDurationMs, preTriggerWindowMs, countdownMs, activityThreshold, liveSampleRateHz, liveDeviceName, capturesMin, capturesMax]);
 
   useEffect(() => {
     const context = logRef.current;
@@ -728,11 +928,22 @@ export default function StudySession() {
 
     if (completedSegment && handledSegment.current !== completedSegment) {
       handledSegment.current = completedSegment;
+      if (!inPractice && isPilotProtocol(current.protocolVersion) && !captureContextArchive.recorder.hasAttempt(completedSegment.attemptId)) {
+        acknowledgeCompletedSegment();
+        cancelOpenCapture('Delayed center has no bindable raw context; no sample was saved.');
+        retryOfAttempt.current = completedSegment.attemptId;
+        setOpportunityTimedOut(true);
+        setNotice('The delayed center could not be associated with raw context. Retry with a new opportunity.');
+        return;
+      }
       const open = openCapture.current;
+      // Retry lineage belongs to the accepted opportunity, not subsequent cues.
+      retryOfAttempt.current = undefined;
       openCapture.current = null;
       sawRecording.current = false;
       setCaptureTimerOn(false);
       const sampleId = open?.sampleId ?? collectionId('sample');
+      if (completedSegment.attemptId && captureContextArchive.recorder.hasAttempt(completedSegment.attemptId)) captureContextArchive.recorder.bindSample(completedSegment.attemptId, sampleId);
       const gestureIdForSample = open?.gestureId ?? gesture.id;
       const gestureName = open?.gestureName ?? gesture.name;
       const metrics = calculateMetrics(completedSegment.points);
@@ -744,6 +955,8 @@ export default function StudySession() {
       const savedForGesture = keptForGesture(current.trials, gestureIdForSample) + 1;
       const sample = {
         sampleId,
+        centerDurationMs: completedSegment.centerDurationMs,
+        attemptId: completedSegment.attemptId,
         sessionId: context.sessionId,
         participantId: context.participantId,
         experimentId: context.experimentId,
@@ -777,6 +990,9 @@ export default function StudySession() {
         if (!previous) return previous;
         const trial: StoredTrial = {
           id: sampleId,
+          centerDurationMs: completedSegment.centerDurationMs,
+          attemptId: completedSegment.attemptId,
+          condition: context.condition,
           gestureId: gestureIdForSample,
           gestureName,
           pairIndex: keptForGesture(previous.trials, gestureIdForSample) + 1,
@@ -790,7 +1006,7 @@ export default function StudySession() {
           quality: points.length >= 12 && metrics.durationMs >= segmentDurationMs * 0.85 ? 'usable' : 'review',
           metrics,
         };
-        return { ...previous, trials: [...previous.trials, trial], pendingReplacements: nextPending, openCapture: null };
+        return { ...previous, protocolState: previous.protocolState ? { ...previous.protocolState, survey: null } : previous.protocolState, trials: [...previous.trials, trial], pendingReplacements: nextPending, openCapture: null };
       });
       if (savedForGesture >= capturesMax) setNotice(`${gestureName} has ${savedForGesture} examples, the maximum.`);
       else if (savedForGesture >= capturesMin) setNotice(`${gestureName} sample ${savedForGesture} kept. The minimum is in, and you can keep up to ${capturesMax}.`);
@@ -877,10 +1093,32 @@ export default function StudySession() {
 
   useEffect(() => registerGameRunListener((handoff) => {
     const current = sessionRef.current;
-    if (!current || handoff.condition !== current.condition) return;
-    if (!isModelReady(modelScope(current), current.condition, current.trials.map((trial) => trial.id))) return;
+    if (submissionOperation.current || current?.stage === 'done' || !current || handoff.condition !== current.condition || (current.stage !== 'game' && handoff.completionStatus !== 'incomplete') || (!gameStreamRef.current.ready && handoff.completionStatus !== 'incomplete')) return;
+    const interrupted = handoff.completionStatus === 'incomplete';
+    if (recoveryBlocked.current && !interrupted) return;
+    const launched = activeGameRef.current;
+    if (!isModelReady(modelScope(current), current.condition, current.trials.map((trial) => trial.id)) && !interrupted) return;
+    if (interrupted && (!launched || launched.participantId !== current.participantId || launched.sessionId !== current.sessionId
+      || launched.generation !== current.generation || launched.round !== current.round || launched.condition !== current.condition)) return;
+    if (handoff.runId && current.runs.some(run=>run.id===handoff.runId)) return;
+    if (modeRef.current !== 'rehearsal' && isPilotProtocol(current.protocolVersion)) {
+      if (!handoff.runKind || !handoff.completionStatus || (handoff.completionStatus === 'complete' && (handoff.outcomes.length!==20 || JSON.stringify(handoff.officialSequence)!==JSON.stringify(current.officialSequence)))) {
+        setNotice('The game did not return a complete protocol result. No official result was recorded.'); return;
+      }
+    }
     const run: StoredGameRun = {
-      id: `${current.participantId}-${Date.now()}`,
+      runKind: handoff.runKind ?? (modeRef.current === 'rehearsal' ? 'practice' : current.runs.some(r=>r.condition===current.condition && r.round===current.round && r.runKind==='official' && r.completionStatus==='complete') ? 'replay' : 'official'),
+      completionStatus: handoff.completionStatus ?? 'complete',
+      runId: handoff.runId,
+      startedAt: handoff.startedAt,
+      endedAt: handoff.endedAt,
+      ...(handoff.activeDurationMs !== undefined ? { activeDurationMs: handoff.activeDurationMs, sourceRecoveryPauses: handoff.sourceRecoveryPauses } : {}),
+      invalidationReason: handoff.invalidationReason,
+      officialSequence: current.officialSequence,
+      signalSource: launched?.source ?? gameStreamRef.current.source,
+      streamReady: gameStreamRef.current.ready,
+      evidenceKind: launched?.evidenceKind ?? (modeRef.current === 'rehearsal' ? 'practice' : current.isTestParticipant ? 'synthetic-test' : 'measured-live'),
+      id: handoff.runId ?? `${current.participantId}-${Date.now()}`,
       sessionId: current.sessionId,
       round: current.round,
       recordedAt: Date.now(),
@@ -888,7 +1126,7 @@ export default function StudySession() {
       difficulty: handoff.difficulty || DEFAULT_DIFFICULTY,
       gameScore: handoff.gameScore,
       outcomes: handoff.outcomes,
-      modelRevisionId: current.modelRevisionId ?? revisionRef.current,
+      modelRevisionId: launched?.modelRevisionId ?? current.modelRevisionId ?? revisionRef.current,
       obstacleSuccess: typeof handoff.obstacleSuccess === 'boolean' ? handoff.obstacleSuccess : null,
     };
     setSession((previous) => {
@@ -896,8 +1134,8 @@ export default function StudySession() {
       return {
         ...previous,
         runs: [...previous.runs, run],
-        stage: 'results',
-        unlockedThrough: 'results',
+        stage: handoff.completionStatus === 'incomplete' ? previous.stage : 'results',
+        unlockedThrough: handoff.completionStatus === 'incomplete' ? previous.unlockedThrough : 'results',
       };
     });
     void recordCollection(current.participantId, [{ kind: 'run', record: { ...run, generation: current.generation } }]);
@@ -927,7 +1165,7 @@ export default function StudySession() {
       setSession((previous) => (previous?.openCapture ? { ...previous, openCapture: null } : previous));
     }
     const training = current.trainingRun;
-    if (training?.revisionId && training.round === current.round && !isTrainingInFlight(modelScope(current), current.condition)) {
+    if (training?.revisionId && training.round === current.round && current.protocolState?.trainingStatus !== 'success' && !isTrainingInFlight(modelScope(current), current.condition)) {
       const key = `train:${current.generation}:${current.sessionId}:${training.revisionId}`;
       if (!recoveredInterruptions.has(key)) {
         recoveredInterruptions.add(key);
@@ -960,11 +1198,12 @@ export default function StudySession() {
     const timer = window.setTimeout(() => {
       const current = sessionRef.current;
       const context = logRef.current;
-      if (!current || !context || current.stage === 'done') return;
+      if (submissionOperation.current || !current || !context || current.stage === 'done') return;
       void recordCollection(current.participantId, [{
         kind: 'checkpoint',
         record: {
           sessionId: current.sessionId,
+          condition: current.condition,
           generation: current.generation,
           round: current.round,
           stage: current.stage,
@@ -984,13 +1223,14 @@ export default function StudySession() {
   useEffect(() => {
     const send = () => {
       const current = sessionRef.current;
-      if (!current || current.stage === 'done' || modeRef.current !== 'measured') return;
+      if (submissionOperation.current || !serverVerifiedRef.current || !current || current.stage === 'done' || modeRef.current !== 'measured') return;
       const body = JSON.stringify({
         id: current.participantId,
         items: [{
           kind: 'checkpoint',
           record: {
             sessionId: current.sessionId,
+            condition: current.condition,
             generation: current.generation,
             round: current.round,
             stage: current.stage,
@@ -1038,6 +1278,9 @@ export default function StudySession() {
   }
 
   if (!session) return null;
+  if (!isPilotProtocol(session.protocolVersion) && !session.isTestParticipant) {
+    return <main className="mx-auto max-w-2xl p-8 text-white"><h1 className="text-xl">Historical fixed-condition protocol</h1><p className="mt-4">These records have not been converted to a two-visit pilot or reinterpreted as 2-second examples. Ask the researcher to archive/export this historical session. New pilot assignments must be created explicitly; do not rename old condition IDs or merge their data.</p><button type="button" onClick={()=>navigate('/')}>Return to sign-in</button></main>;
+  }
   // Do not reinterpret or migrate a saved movement to a different physical class.
   if (session.trials.some(trial => !DEFAULT_GESTURES.some(gesture => gesture.id === trial.gestureId))
     || session.runs.some(run => run.outcomes.some(outcome => !DEFAULT_GESTURES.some(gesture => gesture.id === outcome.expectedGestureId)))) {
@@ -1045,7 +1288,9 @@ export default function StudySession() {
   }
 
   const signalValue = calibratedSignalData[calibratedSignalData.length - 1]?.value ?? 0;
-  const captureStatus: CaptureStatus = liveConnectionStatus === 'error'
+  const captureStatus: CaptureStatus = recoveryError
+    ? { label: 'Error', detail: 'Raw context backup must recover before continuing.' }
+    : liveConnectionStatus === 'error'
     ? { label: 'Error', detail: 'Check the connection message.' }
     : !isStreaming ? { label: 'Rest', detail: 'Connect your device to begin.' }
       : isRecording ? { label: 'Recording', detail: isRelax ? 'Keep your hand resting.' : `Keep doing ${gesture.name}.` }
@@ -1060,7 +1305,14 @@ export default function StudySession() {
                         : { label: 'Rest', detail: 'Rest your hand until Ready appears.' };
   const condition: Assignment = session.condition;
   const trialIds = trials.map((trial) => trial.id);
-  const modelReady = !training && isModelReady(modelScope(session), condition, trialIds);
+  const modelReady = !recoveryError && !training && isModelReady(modelScope(session), condition, trialIds);
+  if (stage === 'game' && modelReady && streamReady) {
+    activeGameRef.current = {
+      participantId: session.participantId, sessionId: session.sessionId, generation: session.generation,
+      round: session.round, condition, modelRevisionId: session.modelRevisionId ?? revisionRef.current,
+      source: signalMode, evidenceKind: inPractice ? 'practice' : session.isTestParticipant ? 'synthetic-test' : 'measured-live',
+    };
+  }
   const gamePredictionEngine = getConditionPredictionEngine(
     modelScope(session),
     condition,
@@ -1068,8 +1320,7 @@ export default function StudySession() {
   );
   const predictGameWindow = (points: Array<{ time: number; raw: number }>) => {
     if (!gamePredictionEngine || points.length === 0) return null;
-    const durationMs = Math.max(0, points[points.length - 1].time - points[0].time);
-    const sample = buildInferenceSample(points, durationMs);
+    const sample = buildInferenceSample(points, INFERENCE_WINDOW_MS);
     return sample ? gamePredictionEngine.predict(sample) : null;
   };
   const quotas = gestureQuotas(DEFAULT_GESTURES, trials, capturesMin, capturesMax);
@@ -1090,29 +1341,30 @@ export default function StudySession() {
         domain={waveDomain}
         onInspect={() => { setInspectedTrialId(trial.id); if (practiceArchive.current) void practiceArchive.current.enqueue(practiceArchive.current.record('reviewed', { referenceId: trial.id })); }}
         onDelete={() => deleteKeptTrial(trial.id)}
-        deletingDisabled={training}
+        deletingDisabled={training || datasetLocked}
       />
     );
   };
 
   const hasRunThisRound = session.runs.some((run) => run.round === session.round && run.condition === condition);
   const canVisit = (next: FlowStage) => {
-    if (trainingOperation.current) return false;
+    if (submissionOperation.current || recoveryBlocked.current || trainingOperation.current) return false;
     if (stage === 'done') return false;
-    if (next === 'capture') return true;
+    if (next === 'capture') return !datasetLocked;
     if (next === 'review') return trials.length > 0 || stage === 'review' || stage === 'game' || stage === 'results';
-    if (next === 'game') return roundComplete && modelReady;
+    if (next === 'game') return !briefPractice && serverVerified && roundComplete && modelReady && gameStreamRef.current.ready;
     return hasRunThisRound || (roundComplete && modelReady && reachedIndex >= flowIndex('game'));
   };
 
   const deleteKeptTrial = (trialId: string) => {
-    if (trainingOperation.current) return;
+    if (submissionOperation.current || trainingOperation.current || lockOperation.current || sessionRef.current?.protocolState?.lock && modeRef.current !== 'rehearsal') return;
     const trial = session.trials.find((item) => item.id === trialId);
     if (!trial) return;
     setSession((current) => {
       if (!current) return current;
       return {
         ...current,
+        protocolState: current.protocolState ? { ...current.protocolState, survey: null } : current.protocolState,
         trials: current.trials.filter((item) => item.id !== trialId),
         pendingReplacements: [
           ...(current.pendingReplacements ?? []),
@@ -1131,13 +1383,31 @@ export default function StudySession() {
     setNotice('Example removed. Return to Capture if that gesture is below the minimum.');
   };
 
+  const confirmSurvey = async () => {
+    if (submissionOperation.current || recoveryBlocked.current || trainingOperation.current || lockOperation.current || !roundComplete || !researcherPin || captureContextArchive.recorder.pendingWindowCount > 0) return;
+    const origin = session;
+    lockOperation.current = true; setSaving(true); setSaveError('');
+    try {
+      await captureContextArchive.drain();
+      await whenCollectionSaved();
+      if (recoveryBlocked.current) throw new Error(recoveryBlocked.current);
+      if (sessionRef.current !== origin) throw new Error('Collection changed. Review the retained examples before confirmation.');
+      const protocolState = await confirmCollectionSurvey(origin, researcherPin);
+      setResearcherPin('');
+      setMeasuredSession(current => current?.sessionId === origin.sessionId ? { ...current, protocolState } : current);
+    } catch (cause) { setSaveError(cause instanceof Error ? cause.message : 'Survey confirmation failed.'); }
+    finally { lockOperation.current = false; setSaving(false); }
+  };
+
   const trainModel = async () => {
-    if (!roundComplete || trainingOperation.current || isRecording || countingDown || openCapture.current) return;
+    if (submissionOperation.current || recoveryBlocked.current || sessionRef.current !== session || briefPractice) return;
+    if (!serverVerified || !roundComplete || trainingOperation.current || lockOperation.current || isRecording || countingDown || openCapture.current || (!inPractice && isPilotProtocol(session.protocolVersion) && captureContextArchive.recorder.pendingWindowCount > 0)) return;
+    if (!inPractice && isPilotProtocol(session.protocolVersion) && ((requiresCollectionSurvey(session.protocolVersion) && !session.protocolState?.survey) || practiceRequired || (datasetLocked && modelReady))) return;
     const origin = session;
     const archive = practiceArchive.current;
     const context = logRef.current;
     if (!context || (modeRef.current !== 'measured' && !archive)) return;
-    const operation = { scope: archive?.scope ?? origin.participantId, condition };
+    const operation = { scope: archive?.scope ?? modelScope(origin), condition };
     trainingOperation.current = operation;
     const active = () => trainingOperation.current === operation;
     // Never choose a destination, dataset or model scope after an await.
@@ -1149,18 +1419,28 @@ export default function StudySession() {
     setTraining(true);
     setModelState((current) => (current ? { ...current, status: 'training', error: '' } : current));
     const startedAt = Date.now();
-    const revisionId = collectionId('rev');
+    const revisionId = (!archive && origin.protocolState?.lock?.revisionId) || collectionId('rev');
+    const trainingAttemptId = collectionId('train-attempt');
+    const restoringLockedModel = !archive && origin.protocolState?.trainingStatus === 'success';
     const sampleIds = trials.map((trial) => trial.id);
-    updateOrigin((current) => (current ? { ...current, trainingRun: { revisionId, startedAt, round: origin.round, sampleIds } } : current));
+    updateOrigin((current) => (current ? { ...current, trainingRun: restoringLockedModel ? null : { revisionId, startedAt, round: origin.round, sampleIds } } : current));
     try {
+      if (!archive) await captureContextArchive.drain();
       await barrier();
       if (!active()) return;
+      if (recoveryBlocked.current) throw new Error(recoveryBlocked.current);
+      if (!archive && isPilotProtocol(origin.protocolVersion)) {
+        const protocolState = await lockOfficialDataset(origin, revisionId);
+        if (!active()) return;
+        updateOrigin(current => current ? { ...current, protocolState } : current);
+      }
       const next = await trainConditionModel(operation.scope, condition, origin.trials, DEFAULT_GESTURES, segmentDurationMs);
       if (!active()) return;
       const success = next.status === 'ready';
-      await collect([{
+      if (!restoringLockedModel) await collect([{
           kind: 'training',
           record: {
+            trainingAttemptId,
             revisionId,
             sessionId: context.sessionId,
             participantId: context.participantId,
@@ -1178,6 +1458,7 @@ export default function StudySession() {
       }]);
       await barrier();
       if (!active()) return;
+      if (recoveryBlocked.current) throw new Error(recoveryBlocked.current);
       if (success) revisionRef.current = revisionId;
       updateOrigin((current) => (current ? {
         ...current,
@@ -1203,7 +1484,7 @@ export default function StudySession() {
   };
 
   const practiceGuide = inPractice && !practiceActive ? practiceGuidance({
-    stage: gameIntroduction ? 'game-introduction' : stage, condition: session.condition, streaming: isStreaming, calibrated: calibration !== null,
+    brief: briefPractice, stage: gameIntroduction ? 'game-introduction' : stage, condition: session.condition, streaming: isStreaming, calibrated: calibration !== null,
     introduced: captureIntroduced, firstSampleExplained, sampleCount: trials.length, selectedFull, roundComplete,
     gestureName: gesture.name, nextGesture: missingQuotas[0]?.gesture.name ?? 'the next gesture', relax: isRelax, manual: manualTrigger,
     recording: isRecording, countdown: countingDown, inspecting: inspectedTrialId !== null, training,
@@ -1236,55 +1517,162 @@ export default function StudySession() {
   };
 
   const toggleStream = async () => {
+    if (submissionOperation.current) return;
     if (isStreaming) {
+      if (signalMode === 'live') { setPauseConfirmation(true); return; }
       await stopStream();
       setNotice('Stream paused. Captures from this round are still here.');
       return;
     }
+    if (recoveryBlocked.current) return;
     await startStreamForMode(signalMode);
     setNotice(manualTrigger ? 'Press Capture when the gesture begins.' : 'Perform the gesture when you are ready.');
   };
 
+  const confirmStreamPause = async () => {
+    if (pauseOperation.current || submissionOperation.current || !isStreaming) return;
+    pauseOperation.current = true;
+    setConfirmingPause(true);
+    try {
+      await stopStream();
+      setNotice('Stream paused. Captures from this round are still here.');
+      setPauseConfirmation(false);
+    } finally {
+      pauseOperation.current = false;
+      setConfirmingPause(false);
+    }
+  };
+
+  const redoRestSetup = () => {
+    if (submissionOperation.current || recoveryBlocked.current || trainingOperation.current || isRecording || countingDown || saving) return;
+    cancelOpenCapture('Recalibrating rest only.');
+    setCalibrationState(null);
+    setRecalibrating(true);
+  };
+
+  const skipPractice = async () => {
+    const origin = measuredSession;
+    const snapshot = sessionRef.current;
+    const archive = practiceArchive.current;
+    if (!origin || origin.protocolVersion !== 'between-subject-v2' || origin.trials.length || origin.protocolState?.lock
+      || !inPractice || !calibration || !serverVerified || !researcherPin.trim() || saving || trainingOperation.current
+      || lockOperation.current || practiceExitOperation.current || isRecording || countingDown || openCapture.current || recoveryBlocked.current) return;
+    practiceExitOperation.current = true;
+    const token = ++finishToken.current;
+    setSaving(true); setSaveError('');
+    try {
+      await archive?.barrier();
+      if (finishToken.current !== token) return;
+      if (sessionRef.current !== snapshot) throw new Error('Practice changed while saving. Retry the researcher action.');
+      const response = await skipGesturePractice(origin, researcherPin);
+      if (finishToken.current !== token) return;
+      // Verify the persisted disposition, not just a successful POST response.
+      const joined = await joinStudy(origin.participantId);
+      if (finishToken.current !== token) return;
+      const verified = { ...origin, protocolState: joined.protocolState };
+      if (sessionRef.current !== snapshot) throw new Error('Session changed while skipping practice. Rejoin to recover its saved status.');
+      if (practiceDisposition({ ...origin, protocolState: response })?.status !== 'skipped'
+        || practiceDisposition(verified)?.status !== 'skipped') throw new Error('Practice skip was not confirmed. Retry or rejoin.');
+      practiceArchive.current = null;
+      setMeasuredSession(verified); setRehearsal(null); setPracticeMode('measured');
+      revisionRef.current = origin.modelRevisionId; openCapture.current = null;
+      setInspectedTrialId(null); setGameIntroduction(null); setResearcherPin('');
+      setNotice('Gesture practice skipped by researcher. Calibration is retained for this live source; measured examples are still required.');
+    } catch (cause) { if (finishToken.current === token) setSaveError(cause instanceof Error ? cause.message : 'Practice skip could not save.'); }
+    finally { practiceExitOperation.current = false; if (finishToken.current === token) setSaving(false); }
+  };
+
   const finishRound = async () => {
-    if (!roundComplete || trainingOperation.current) return;
+    if (submissionOperation.current?.inFlight || submissionOperation.current?.phase === 'complete' || recoveryBlocked.current || !roundComplete || trainingOperation.current || practiceExitOperation.current) return;
     if (practiceArchive.current) {
       const archive = practiceArchive.current;
       const snapshot = session;
+      practiceExitOperation.current = true;
+      const token = ++finishToken.current;
       setSaving(true); setSaveError('');
       try {
         await archive.barrier();
+        if (finishToken.current !== token) return;
         const latest = sessionRef.current;
         if (latest !== snapshot) throw new Error('Practice changed while saving. Review the current examples, then retry.');
         const reviewed = [...archive.saved].reverse().find(record => record.kind === 'reviewed' && snapshot.trials.some(trial => trial.id === record.referenceId));
         const removed = archive.saved.find(record => record.kind === 'removed');
         const game = [...snapshot.runs].reverse().find(run => run.modelRevisionId === snapshot.modelRevisionId && run.outcomes.some(item => item.result !== 'recording_failure'));
-        if (!reviewed || !removed || !game || !isModelReady(archive.scope, snapshot.condition, snapshot.trials.map(trial => trial.id))) throw new Error('Inspect a retained sample, remove and replace an example, train, and finish an actual game before collection.');
+        const brief = archive.rest.flowVersion === 4;
+        if (!reviewed || (!brief && (!removed || !game || !isModelReady(archive.scope, snapshot.condition, snapshot.trials.map(trial => trial.id))))) throw new Error(brief ? 'Inspect a retained example before measured collection.' : 'Inspect a retained sample, remove and replace an example, train, and finish an actual game before collection.');
         await archive.enqueue(archive.record('completed', { restId: archive.rest.id, sampleIds: snapshot.trials.map(trial => trial.id),
-          reviewedId: reviewed.referenceId, removedId: removed.id, trainingId: snapshot.modelRevisionId, gameId: game.id }));
+          reviewedId: reviewed.referenceId, ...(removed ? { removedId: removed.id } : {}),
+          ...(!brief ? { trainingId: snapshot.modelRevisionId, gameId: game!.id } : {}) }));
+        if (finishToken.current !== token) return;
         if (archive.pending.length || archive.error) throw new Error(archive.error || 'Practice completion is still waiting to save.');
         if (sessionRef.current !== snapshot) throw new Error('Practice changed while saving. Retry from Results.');
+        if (snapshot.protocolVersion === 'between-subject-v2') {
+          const joined = await joinStudy(snapshot.participantId);
+          if (finishToken.current !== token) return;
+          if (sessionRef.current !== snapshot) throw new Error('Practice changed while confirming completion. Retry from Results.');
+          if (!measuredSession || practiceDisposition({ ...measuredSession, protocolState: joined.protocolState })?.status !== 'completed') throw new Error('Practice completion was not confirmed. Retry saving practice.');
+          setMeasuredSession({ ...measuredSession, protocolState: joined.protocolState });
+        }
         practiceArchive.current = null;
         setRehearsal(null); setPracticeMode('measured');
         revisionRef.current = measuredSession?.modelRevisionId ?? null;
         openCapture.current = null; setInspectedTrialId(null);
         setNotice('Practice saved. Now collect the measured examples using the same controls.');
-      } catch (cause) { setSaveError(cause instanceof Error ? cause.message : 'Practice could not finish.'); }
-      finally { setSaving(false); }
+      } catch (cause) { if (finishToken.current === token) setSaveError(cause instanceof Error ? cause.message : 'Practice could not finish.'); }
+      finally { practiceExitOperation.current = false; if (finishToken.current === token) setSaving(false); }
       return;
     }
+    if (!serverVerifiedRef.current || isRecording || countingDown || openCapture.current || stage !== 'results') return;
     const token = ++finishToken.current;
-    const snapshot = session;
+    let operation = submissionOperation.current;
+    if (!operation) {
+      const snapshot = structuredClone(session);
+      const freeze = (value: unknown): void => {
+        if (!value || typeof value !== 'object' || Object.isFrozen(value)) return;
+        Object.values(value).forEach(freeze);
+        Object.freeze(value);
+      };
+      freeze(snapshot);
+      operation = { snapshot, inFlight: false, rawSealed: false, phase: 'draining' };
+      submissionOperation.current = operation;
+    }
+    operation.inFlight = true;
+    const { snapshot } = operation;
     setSaving(true);
     setSaveError('');
     try {
-      while (finishToken.current === token) {
-        try {
-          await whenCollectionSaved();
-          if (finishToken.current !== token) return;
-          const result = await saveRound(snapshot.participantId, snapshot.round, snapshot.trials);
-          if (finishToken.current !== token) return;
+      if (operation.phase === 'draining') {
+        // Drain any send already in flight, then seal synchronously. Points
+        // arriving during that drain are included in the final flush, not lost
+        // by replacing/disabling the raw recovery owner.
+        await captureContextArchive.drain();
+        operation.rawSealed = true;
+        await captureContextArchive.flush('interrupted');
+        await captureContextArchive.drain();
+      }
+      await whenCollectionSaved();
+      if (finishToken.current !== token) return;
+      if (recoveryBlocked.current) throw new Error(recoveryBlocked.current);
+      operation.phase = 'posting';
+      const result = await saveRound(snapshot.participantId, snapshot.round, snapshot.trials, snapshot);
+      if (finishToken.current !== token) return;
+      if (result.status === 'completed' && snapshot.repeatRoundsVersion === 1) {
+        await stopStream();
+        const joined = await joinStudy(snapshot.participantId);
+        if (finishToken.current !== token) return;
+        if (joined.status !== 'completed' || joined.participantId !== snapshot.participantId
+          || joined.experimentId !== snapshot.experimentId || joined.generation !== snapshot.generation
+          || joined.condition !== snapshot.condition || joined.round !== snapshot.round
+          || joined.sessionId !== snapshot.sessionId) throw new Error('Submitted round could not be confirmed by rejoin.');
+        const completed = pickSession(joined, snapshot);
+        persistRoundSession(completed);
+        operation.phase = 'complete';
+        setMeasuredSession(completed);
+        return;
+      }
+      operation.phase = 'complete';
           if (result.status === 'completed') {
-            setSession({
+            setMeasuredSession({
               ...snapshot,
               status: 'completed',
               stage: 'done',
@@ -1294,33 +1682,80 @@ export default function StudySession() {
               trainingRun: null,
             });
           } else {
-            setSession({
+            // This visit is ACKed; only the new visit may start producers.
+            submissionOperation.current = null;
+            setMeasuredSession({
               ...snapshot,
               status: 'in_progress',
               stage: 'capture',
               unlockedThrough: 'capture',
               round: result.round,
+              visit: result.round,
+              condition: result.condition ?? snapshot.condition,
+              manualTrigger: (result.condition ?? snapshot.condition) === 'button',
+              sessionId: collectionId('sess'),
+              protocolState: null,
+              modelRevisionId: null,
               trials: [],
               pendingReplacements: [],
               openCapture: null,
               trainingRun: null,
             });
-            setNotice('Next round is ready. Start the stream if it is paused.');
+            if (snapshot.protocolVersion === 'within-subject-v1') {
+              setPracticeMode('setup');
+              setCalibrationState(null);
+              await stopStream();
+            }
+            setNotice('Visit saved. Use this same participant ID for the next visit; new calibration and Practice are required.');
           }
-          return;
-        } catch {
-          await new Promise((resolve) => window.setTimeout(resolve, 2000));
-        }
+
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : 'Visit could not save.';
+      if (operation.phase === 'posting' || operation.phase === 'uncertain') {
+        operation.phase = 'uncertain';
+        setSaveError(`Submission may already be saved. Retry submission to send the exact same snapshot, or rejoin to confirm. ${detail}`);
+      } else {
+        setSaveError(`Submission is waiting for raw data acknowledgement. Retry saving before submitting. ${detail}`);
+        reportRecoveryFailure(cause);
       }
+      // An uncertain POST must never reopen mutable Results or producers.
     } finally {
+      operation.inFlight = false;
       if (finishToken.current === token) setSaving(false);
     }
   };
 
+  const startAnotherRound = async () => {
+    if (nextRoundOperation.current || !repeatRoundAvailable(session) || recoveryBlocked.current) return;
+    nextRoundOperation.current = true;
+    setAdvancingRound(true);
+    const token = ++finishToken.current;
+    try {
+      cancelTraining();
+      await stopStream();
+      await captureContextArchive.flush('interrupted');
+      await captureContextArchive.drain();
+      if (recoveryBlocked.current) throw new Error(recoveryBlocked.current);
+      await advanceCompletedRound(session);
+      if (finishToken.current !== token) return;
+      onNextScope(); // Unmount every old hook, timer, model, calibration and continuation.
+    } catch (cause) {
+      if (finishToken.current === token) setSaveError(`Next round is not confirmed. Retry the saved source; do not clear browser storage. ${cause instanceof Error ? cause.message : String(cause)}`);
+    } finally {
+      nextRoundOperation.current = false;
+      if (finishToken.current === token) setAdvancingRound(false);
+    }
+  };
+
   const leave = async () => {
+    if (submissionOperation.current && submissionOperation.current.phase !== 'complete') return;
     cancelTraining();
-    if (isStreaming) await stopStream();
-    navigate('/');
+    try {
+      await captureContextArchive.flush('interrupted');
+      if (recoveryBlocked.current) return;
+      if (isStreaming) await stopStream();
+      navigate('/');
+    } catch (cause) { reportRecoveryFailure(cause); }
   };
 
   return (
@@ -1343,7 +1778,7 @@ export default function StudySession() {
           </div>
           <div className="flex items-center gap-2">
             <span className="rounded-full border border-cyan-300/15 bg-cyan-300/[0.06] px-3 py-2 text-[10px] font-medium uppercase tracking-[0.16em] text-cyan-100">
-              {session.condition === 'button' ? 'Button' : 'Threshold'} · Round {session.round}/{session.repetitions}
+              {session.condition === 'button' ? 'Button' : 'Threshold'} · Round {session.round}{session.repeatRoundsVersion === 1 ? '' : `/${session.repetitions}`}
             </span>
             <span className="hidden items-center gap-2 rounded-full border border-white/20 px-3 py-2 text-xs text-slate-400 sm:flex">
               <span className={`h-2 w-2 rounded-full ${isStreaming ? 'bg-emerald-300' : 'bg-slate-600'}`} />
@@ -1356,9 +1791,40 @@ export default function StudySession() {
         </div>
       </header>
 
+      {pauseConfirmation && <ParticipantDialog role="alertdialog" label="Confirm stream pause" title="Pause stream?"
+        cancelLabel="Cancel" cancelDisabled={confirmingPause} onCancel={() => setPauseConfirmation(false)}
+        action={{ label: 'Confirm', disabled: confirmingPause, onClick: () => void confirmStreamPause() }}>
+        <p>This disconnects the Ganglion stream. Your saved captures and game progress will stay here.</p>
+        <p>After reconnecting, redo resting setup before recording or resuming.</p>
+      </ParticipantDialog>}
+      {!pauseConfirmation && showRecoveryDialog && <ParticipantDialog label="Signal reconnection guidance"
+        title={isStreaming ? 'Redo resting setup' : streamInterruptionReason === 'stopped' ? 'Stream paused' : 'Reconnect Ganglion'}
+        onCancel={() => setDismissedRecoveryKey(recoveryDialogKey)}
+        action={isStreaming ? { label: 'Redo resting setup', disabled: !!recoveryError || isRecording || countingDown || saving || training, onClick: () => {
+          setDismissedRecoveryKey(recoveryDialogKey);
+          if (stage === 'game') { setCalibrationState(null); setRecalibrating(true); }
+          else redoRestSetup();
+        } } : { label: streamInterruptionReason === 'stopped' ? 'Restart stream' : 'Reconnect Ganglion', disabled: !!recoveryError || saving || liveConnectionStatus === 'connecting', onClick: () => void toggleStream() }}>
+        <p>{isStreaming ? 'Ganglion reconnected. Redo resting calibration before recording or resuming.' : streamInterruptionReason === 'stopped' ? 'Stream paused by you.' : 'Bluetooth connection lost.'}</p>
+        <p>{isStreaming ? 'Rest your hand and complete the resting setup. No full restart is needed.' : 'Reconnect the Ganglion, then redo resting calibration. Your saved captures and game progress stay here.'}</p>
+        {liveConnectionStatus === 'error' && <p>{liveConnectionMessage}</p>}
+      </ParticipantDialog>}
       <main className="relative mx-auto max-w-6xl space-y-5 px-4 py-6 md:px-6">
+        {!!recoveryError && <section role="alert" aria-label="Raw/context recovery blocked" className="rounded-2xl border border-rose-300/50 bg-rose-950/40 p-5">
+          <h2 className="font-medium">Raw/context recovery blocked</h2>
+          <p className="mt-2 text-sm">{recoveryError}</p>
+          <p className="mt-2 text-sm">Collection and progression are paused. Keep this page open; do not reload or clear browser storage. Use only one active study tab.</p>
+          <button type="button" disabled={retryingRecovery} onClick={() => void retryRawRecovery()} className="mt-3 rounded-xl border border-white/30 px-4 py-2 disabled:opacity-40">Retry raw/context recovery</button>
+        </section>}
         {signalMode === 'mock' && <p role="status" aria-label="Simulated signal" className="rounded-xl border border-amber-300/40 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">Simulated signal — test mode. This signal is generated by the computer and does not respond to your movements.</p>}
-        {practiceActive && <GuidedPractice
+        {session.protocolVersion === 'between-subject-v2' && inPractice && !currentPractice && measuredSession?.trials.length === 0 && <details open aria-label="Researcher practice controls" className="mt-3"><summary>Researcher: skip gesture practice</summary>
+            <p className="mt-2">Skip rehearsal captures, model and game only. Rest calibration and all measured collection, training and official activity requirements remain.</p>
+            <input aria-label="Researcher PIN" type="password" autoComplete="off" value={researcherPin} onChange={event=>setResearcherPin(event.target.value)} className="m-2 rounded bg-slate-800 p-2" />
+            <button type="button" disabled={!!recoveryError || !serverVerified || !calibration || !researcherPin.trim() || saving || training || isRecording || countingDown || datasetLocked} onClick={()=>void skipPractice()} className="rounded-xl border border-white/30 px-4 py-2 disabled:opacity-40">Skip gesture practice</button>
+            <DismissibleNotice message={saveError} summary="Practice skip not saved" resetKey={saving} />
+        </details>}
+
+        {practiceActive && stage !== 'game' && <GuidedPractice
           key={`${session.participantId}:${session.experimentId}:${session.sessionId}:${session.generation}:${session.round}:${session.condition}:${recalibrating}`} streamEpoch={streamEpoch} recalibration={recalibrating}
           onCancel={recalibrating ? () => { setRecalibrating(false); setPracticeCue('auto'); } : undefined}
           session={session} points={recordingSignalData} streaming={isStreaming} source={signalMode} channel={channelIndex}
@@ -1397,19 +1863,19 @@ export default function StudySession() {
           </div>
         </section>}
         {inPractice && !gameIntroduction && <section aria-label="Practice objective" className="rounded-3xl border-2 border-cyan-300/50 bg-slate-900 p-5">
-          <p className="text-sm font-semibold uppercase tracking-wider text-cyan-200">Practice — separate model and records</p>
+          <p className="text-sm font-semibold uppercase tracking-wider text-cyan-200">{briefPractice ? 'Practice — examples stay separate' : 'Practice — separate model and records'}</p>
           <p className="mt-2 text-sm text-slate-200">Keep your palm down. Wrist up means bend your wrist upward (extension); Wrist down means bend it downward (flexion). Practise three examples of each. Rest between movements; resting is setup, not a gesture class.</p>
           {practiceArchive.current && <p className="mt-2 text-xs text-slate-300">{practiceArchive.current.pending.length ? `${practiceArchive.current.pending.length} practice records waiting to save` : 'Practice records saved and read back'}</p>}
           <DismissibleNotice message={practiceArchive.current?.error ?? ''} summary="Practice save issue" />
           {!!practiceArchive.current?.pending.length && <button data-practice-target="practice-save-retry" type="button" className="mt-3 rounded-xl border border-white/30 px-4 py-2" onClick={() => void practiceArchive.current?.flush()}>Retry saving practice</button>}
         </section>}
-        {!practiceActive && <StepMap stage={stage} round={session.round} repetitions={session.repetitions} reachedIndex={reachedIndex} canVisit={canVisit} onSelect={goTo} />}
-        {!practiceSetup && stage === 'capture' && !inPractice && <button type="button" data-practice-entry disabled={isRecording || countingDown || saving || training}
-          onClick={() => { if (trainingOperation.current) return; cancelOpenCapture('Entering practice.'); setPracticeMode('setup'); }} className="rounded-xl border border-white/30 px-4 py-2.5 text-xs text-slate-200 disabled:opacity-40">Reopen guided practice</button>}
+        {!practiceActive && <StepMap stage={stage} round={session.round} repetitions={session.repeatRoundsVersion === 1 ? undefined : session.repetitions} reachedIndex={reachedIndex} canVisit={canVisit} onSelect={goTo} />}
+        {!practiceSetup && stage === 'capture' && !inPractice && !(session.protocolVersion === 'between-subject-v2' && currentPractice) && <button type="button" data-practice-entry disabled={!!recoveryError || isRecording || countingDown || saving || training}
+          onClick={() => { if (submissionOperation.current || recoveryBlocked.current || trainingOperation.current) return; cancelOpenCapture('Entering practice.'); setPracticeMode('setup'); }} className="rounded-xl border border-white/30 px-4 py-2.5 text-xs text-slate-200 disabled:opacity-40">Reopen guided practice</button>}
 
         {!practiceActive && stage === 'capture' && <section aria-label="Fixed rest calibration" className="rounded-xl border border-white/30 p-4 text-sm">
           <p role="status">{calibration ? 'Resting setup saved.' : 'Redo your resting setup before recording.'}</p>
-          <button data-practice-target="recalibrate" type="button" disabled={isRecording || countingDown || saving || training} onClick={() => { if (trainingOperation.current) return; cancelOpenCapture('Recalibrating rest only.'); setCalibrationState(null); setRecalibrating(true); }} className="mt-3 rounded-xl border border-white/30 px-4 py-2 disabled:opacity-40">Redo resting setup</button>
+          <button data-practice-target="recalibrate" type="button" disabled={!!recoveryError || isRecording || countingDown || saving || training} onClick={redoRestSetup} className="mt-3 rounded-xl border border-white/30 px-4 py-2 disabled:opacity-40">Redo resting setup</button>
           {session.isTestParticipant === true && <details className="mt-3 text-xs text-slate-400"><summary className="cursor-pointer">Rest setup details</summary>
           <p role="status">{calibration ? `Fixed rest boundary ${calibration.threshold.toPrecision(4)} envelope units · revision ${calibration.revision}. 300ms rest / 100ms activity holds. Graph: 0 to ${calibration.displayMax.toPrecision(4)}, clipped at the top; guide = fixed boundary.` : 'No live rest calibration. Threshold active captures are blocked. Reconnect if needed and explicitly recalibrate; saved samples, models and results are kept.'}</p>
           <p className="mt-2">Check fresh resting activity against the guide, then use comfortable movements in the existing Practice flow. These are detector checks, not physiological onset validation. If checks fail, ask the researcher and repeat rest; the boundary is never tuned from gestures.</p>
@@ -1421,14 +1887,18 @@ export default function StudySession() {
             <Check className="mx-auto h-8 w-8 text-emerald-200" />
             <h2 className="mt-4 text-2xl font-light text-white">Session complete</h2>
             <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-emerald-100/80">
-              All {session.repetitions} rounds are saved. You can close this page.
+              {session.protocolVersion === 'between-subject-v2' ? 'Your submitted activity is saved. Let the researcher know you have finished.' : session.protocolVersion === 'between-subject-v1' ? 'Your recording session is saved. Let the researcher know you have finished.' : <>All {session.repetitions} rounds are saved. You can close this page.</>}
             </p>
+            <button type="button" onClick={() => void leave()} className="mt-5 rounded-xl border border-white/25 px-4 py-3">Next participant</button>
+            {repeatRoundAvailable(session) && <button type="button" disabled={advancingRound || !!recoveryError || !serverVerified} onClick={() => void startAnotherRound()} className="mt-5 rounded-xl border border-white/25 px-4 py-3">{advancingRound ? 'Waiting for saved round acknowledgement' : 'Start next round'}</button>}
+            <DismissibleNotice message={saveError} summary="Round transition not confirmed" resetKey={advancingRound} />
           </section>
         )}
 
         {!practiceActive && !gameIntroduction && stage === 'capture' && (
           <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
             <div className="space-y-5">
+              {opportunityTimedOut && <section role="status" className="rounded-2xl border border-amber-200/30 p-4 text-sm"><p>This opportunity ended without a saved recording (timeout, interruption, or delayed context). Rest before trying again. This does not establish whether a movement was performed.</p><button type="button" disabled={!!recoveryError || retryingRecovery} className="mt-3 rounded-xl bg-amber-100 px-4 py-2 text-slate-950" onClick={async () => { if (recoveryBlocked.current || retryingRecovery) return; const origin = sessionRef.current; setRetryingRecovery(true); try { captureContextArchive.recorder.cancelUncaptured(recorderAttempt.attemptId); await captureContextArchive.drain(); await whenCollectionSaved(); if (recoveryBlocked.current || sessionRef.current !== origin) return; setOpportunityRetry(value=>value+1); setOpportunityTimedOut(false); } catch (cause) { reportRecoveryFailure(cause); } finally { setRetryingRecovery(false); } }}>Retry opportunity</button></section>}
               <LivePanel
                 signalData={calibratedSignalData}
                 recordingSignalData={recordingSignalData}
@@ -1445,7 +1915,7 @@ export default function StudySession() {
                     ? { label: 'Recording', text: `${Math.max(0, (segmentDurationMs - recordingProgress * segmentDurationMs) / 1000).toFixed(1)}s` }
                     : null}
               />
-              <section className="rounded-[24px] border border-white/20 bg-white/[0.025] p-4">
+              <section aria-label="This round recordings" className="h-80 overflow-y-auto rounded-[24px] border border-white/20 bg-white/[0.025] p-4">
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="text-sm font-medium text-white">This round</h2>
                   <span className="text-xs tabular-nums text-slate-500">{trials.length} saved · {cappedKept}/{totalRequired} minimum</span>
@@ -1485,11 +1955,11 @@ export default function StudySession() {
                     label="Gesture"
                     value={gestureId}
                     options={DEFAULT_GESTURES.map((item) => ({ value: item.id, label: item.name }))}
-                    onChange={setGestureId}
+                    onChange={(value) => { if (!recoveryBlocked.current) setGestureId(value); }}
                   />
                 </div>
 
-                {session.isTestParticipant === true && <details className="mt-4 rounded-xl border border-white/20 p-3"><summary className="cursor-pointer text-sm text-slate-300">Researcher controls</summary><fieldset disabled={inPractice || saving || isRecording || countingDown} className="disabled:opacity-60"><div className="mt-4 grid grid-cols-2 gap-2">
+                {session.isTestParticipant === true && <details className="mt-4 rounded-xl border border-white/20 p-3"><summary className="cursor-pointer text-sm text-slate-300">Researcher controls</summary><fieldset disabled={!!recoveryError || inPractice || saving || isRecording || countingDown} className="disabled:opacity-60"><div className="mt-4 grid grid-cols-2 gap-2">
                   <label className="block text-[10px] uppercase tracking-[0.14em] text-slate-500">
                     Window ms
                     <input
@@ -1580,7 +2050,7 @@ export default function StudySession() {
                 </div>
 
                 </fieldset></details>}
-                <div data-practice-target="capture-method" className="mt-4 rounded-2xl border border-white/25 bg-white/[0.03] p-4">
+                <div data-practice-target="capture-method" className="mt-4 h-36 overflow-y-auto rounded-2xl border border-white/25 bg-white/[0.03] p-4">
                   <p className="text-xs font-medium text-cyan-100">
                     {captureStatus.label}
                   </p>
@@ -1603,7 +2073,7 @@ export default function StudySession() {
                 <button
                   type="button"
                   data-practice-target="stream" onClick={() => void toggleStream()}
-                  disabled={liveConnectionStatus === 'connecting'}
+                  disabled={liveConnectionStatus === 'connecting' || (!!recoveryError && !isStreaming)}
                   className={`mt-3 flex w-full items-center justify-center gap-2 rounded-2xl px-5 py-3.5 text-sm font-medium ${isStreaming ? 'border border-white/25 text-slate-300' : 'bg-cyan-300 text-slate-950'} disabled:opacity-50`}
                 >
                   {isStreaming ? <><Pause className="h-4 w-4" /> Pause stream</> : <><Play className="h-4 w-4" /> {signalMode === 'live' ? 'Connect device' : 'Start mock stream'}</>}
@@ -1611,7 +2081,7 @@ export default function StudySession() {
                 <DismissibleNotice summary="Connection problem" message={liveConnectionStatus === 'error' ? liveConnectionMessage : ''} className="mt-3" />
                 <button
                   type="button"
-                  disabled={trials.length === 0}
+                  disabled={!!recoveryError || trials.length === 0}
                   data-practice-target="review" onClick={() => goTo('review')}
                   className="mt-3 flex w-full items-center justify-center gap-2 rounded-2xl border border-white/25 px-5 py-3 text-sm text-slate-200 disabled:cursor-not-allowed disabled:opacity-35"
                 >
@@ -1641,13 +2111,26 @@ export default function StudySession() {
                 <h2 className="mt-1 text-2xl font-light text-white">Captures from this round</h2>
               </div>
               <div className="flex flex-wrap gap-2">
-                <button data-practice-target="back-capture" type="button" disabled={training} onClick={() => goTo('capture')} className="rounded-xl border border-white/25 px-4 py-2.5 text-xs text-slate-300">Back to capture</button>
-                <button data-practice-target="train" type="button" disabled={!roundComplete || training} onClick={() => void trainModel()} className="rounded-xl border border-white/25 px-4 py-2.5 text-xs text-slate-100 disabled:cursor-not-allowed disabled:opacity-35">
-                  {modelState?.status === 'training' || training ? 'Training' : modelState?.status === 'ready' ? 'Retrain' : 'Train model'}
+                <button data-practice-target="back-capture" type="button" disabled={!!recoveryError || training || datasetLocked} onClick={() => goTo('capture')} className="rounded-xl border border-white/25 px-4 py-2.5 text-xs text-slate-300">Back to capture</button>
+                {briefPractice && <button data-practice-target="begin-collection" type="button" disabled={!!recoveryError || !roundComplete || saving || training} onClick={() => void finishRound()} className="rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950 disabled:opacity-35">Begin collection</button>}
+                {!briefPractice && <><button data-practice-target="train" type="button" disabled={!!recoveryError || !serverVerified || !roundComplete || training || (!inPractice && isPilotProtocol(session.protocolVersion) && captureContextArchive.recorder.pendingWindowCount > 0) || (!inPractice && isPilotProtocol(session.protocolVersion) && ((requiresCollectionSurvey(session.protocolVersion) && !session.protocolState?.survey) || practiceRequired || (datasetLocked && modelReady)))} onClick={() => void trainModel()} className="rounded-xl border border-white/25 px-4 py-2.5 text-xs text-slate-100 disabled:cursor-not-allowed disabled:opacity-35">
+                  {modelState?.status === 'training' || training ? 'Training' : datasetLocked ? modelReady ? 'Official model locked' : 'Restore locked model' : modelState?.status === 'ready' ? 'Retrain' : 'Train model'}
                 </button>
-                <button data-practice-target="play" type="button" disabled={!roundComplete || !modelReady} onClick={() => goTo('game')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950 disabled:cursor-not-allowed disabled:opacity-35">Play <ArrowRight className="h-3.5 w-3.5" /></button>
+                <button data-practice-target="play" type="button" disabled={!roundComplete || !modelReady || !streamReady || !serverVerified} onClick={() => goTo('game')} className="flex items-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-xs font-medium text-slate-950 disabled:cursor-not-allowed disabled:opacity-35">Play <ArrowRight className="h-3.5 w-3.5" /></button></>}
               </div>
             </div>
+            {!inPractice && requiresCollectionSurvey(session.protocolVersion) && !datasetLocked && (
+              <section aria-label="Collection survey checkpoint" className="rounded-2xl border border-amber-200/30 p-4 text-sm">
+                <p>Complete the collection questionnaire now, before Train, game, or Results.</p>
+                <p className="mt-2 text-xs">{session.protocolState?.survey ? 'External collection survey confirmed. Train will permanently lock these retained examples.' : 'Ask the researcher to confirm the external form is complete. This app does not submit or verify Qualtrics responses.'}</p>
+                {!session.protocolState?.survey && <details className="mt-3"><summary>Researcher confirmation</summary>
+                  <input aria-label="Researcher PIN" type="password" autoComplete="off" value={researcherPin} onChange={event=>setResearcherPin(event.target.value)} className="m-2 rounded bg-slate-800 p-2" />
+                  <button type="button" disabled={!!recoveryError || saving || !roundComplete || !researcherPin || captureContextArchive.recorder.pendingWindowCount > 0} onClick={()=>void confirmSurvey()}>Confirm external collection survey completed</button>
+                </details>}
+                <DismissibleNotice message={saveError} summary="Checkpoint not saved" resetKey={saving} />
+              </section>
+            )}
+            {datasetLocked && <p className="text-sm text-amber-100">Official dataset locked. Review is read-only; replay cannot add examples or retrain the official model.</p>}
             {modelState && <ModelStatusNote state={modelState} />}
             <div className="flex flex-wrap gap-2">
               {quotas.map((row) => (
@@ -1677,8 +2160,34 @@ export default function StudySession() {
           </section>
         )}
 
-        {!practiceActive && stage === 'game' && modelReady && (
+        {stage === 'game' && modelReady && (
           <GameScreen
+            tutorialPractice={!inPractice && currentPractice ? {
+              status: currentPractice.status,
+              scopeKey: `${session.participantId}:${session.sessionId}:${session.generation}:${session.round}:${condition}:tutorial-v8`,
+            } : undefined}
+            officialSequence={inPractice ? undefined : session.officialSequence}
+            runKind={inPractice ? 'practice' : session.runs.some(r=>r.condition===condition && r.round===session.round && r.runKind==='official' && r.completionStatus==='complete') ? 'replay' : 'official'}
+            streamReady={streamReady && !recoveryError}
+            sourceEpoch={streamEpoch}
+            subscribeSourceInterruptions={subscribeSourceInterruptions}
+            recoveryReady={calibration !== null && !recoveryError}
+            recoveryToken={calibration?.revision}
+            recoveryControls={<div className="my-6 space-y-4">
+              {!streamReady && <button type="button" disabled={!!recoveryError || liveConnectionStatus === 'connecting'} onClick={() => void toggleStream()}>Reconnect device</button>}
+              {streamReady && !recalibrating && <button type="button" disabled={!!recoveryError} onClick={() => { setCalibrationState(null); setRecalibrating(true); }}>Redo resting setup</button>}
+              {recalibrating && <GuidedPractice key={`game-rest:${calibrationScope}:${streamEpoch}`} recalibration streamEpoch={streamEpoch}
+                session={session} points={recordingSignalData} streaming={isStreaming} source={signalMode} channel={channelIndex}
+                settings={{ segmentDurationMs, preTriggerWindowMs, countdownMs, activityThreshold }}
+                bluetoothAvailable={isBluetoothAvailable} connectionMessage={liveConnectionMessage}
+                onSource={() => {}} onStream={() => void toggleStream()} onCue={setPracticeCue}
+                renderSignal={() => null}
+                onComplete={rest => {
+                  if (!isStreaming || !rest.calibration || recoveryBlocked.current) return;
+                  setCalibrationState({ scope: calibrationScope, epoch: streamEpoch, value: rest.calibration as FrozenCalibration });
+                  setRecalibrating(false);
+                }} />}
+            </div>}
             testControls={session.isTestParticipant === true}
             practice={inPractice}
             onExit={() => goTo('review')}
@@ -1694,7 +2203,6 @@ export default function StudySession() {
             condition={condition}
             obstacleCount={session.obstacleCount}
             startingLives={session.startingLives}
-            tutorialKey={`${session.participantId}:${session.sessionId}`}
           />
         )}
 
@@ -1704,7 +2212,7 @@ export default function StudySession() {
               <div>
                 <p className="text-xs uppercase tracking-[0.18em] text-emerald-300/80">Play</p>
                 <h2 className="mt-1 text-2xl font-light text-white">Review game</h2>
-                <p className="mt-2 max-w-xl text-sm leading-6 text-slate-500">Testing stays closed until this condition’s model is ready.</p>
+                <p className="mt-2 max-w-xl text-sm leading-6 text-slate-500">Testing requires a ready model and an active live stream. Reconnect before starting a new run.</p>
               </div>
               <div className="flex gap-2">
                 <button type="button" onClick={() => goTo('review')} className="rounded-xl border border-white/25 px-4 py-2.5 text-xs text-slate-300">Back to review</button>
@@ -1713,7 +2221,7 @@ export default function StudySession() {
             </div>
             <div className="space-y-4 p-4 md:p-6">
               {modelState && <ModelStatusNote state={modelState} />}
-              <p className="text-sm text-amber-100">Testing is closed until this condition’s model is ready and matches the kept examples.</p>
+              <p className="text-sm text-amber-100">Testing requires a ready model matching the kept examples and an active live stream. A disconnected run is not an official result.</p>
             </div>
           </section>
         )}
@@ -1725,12 +2233,13 @@ export default function StudySession() {
               .filter((run) => run.round === session.round && run.condition === condition)
               .sort((left, right) => right.recordedAt - left.recordedAt)[0] ?? null}
             gestures={DEFAULT_GESTURES}
-            tryAgainEnabled={roundComplete && modelReady}
+            tryAgainEnabled={roundComplete && modelReady && streamReady}
             onTryAgain={() => goTo('game')}
             onReview={() => goTo('review')}
             onContinue={() => void finishRound()}
-            continueEnabled={roundComplete && (!inPractice || (modelReady && session.runs.some(run => run.modelRevisionId === session.modelRevisionId && run.outcomes.some(item => item.result !== 'recording_failure'))))}
-            continueLabel={inPractice ? 'Begin collection' : session.round >= session.repetitions ? 'Finish session' : 'Continue'}
+            datasetLocked={datasetLocked}
+            continueEnabled={!recoveryError && roundComplete && (inPractice || !isPilotProtocol(session.protocolVersion) || session.runs.some(run => run.runKind === 'official' && run.completionStatus === 'complete' && run.round === session.round && run.condition === condition)) && (!inPractice || (modelReady && session.runs.some(run => run.modelRevisionId === session.modelRevisionId && run.outcomes.some(item => item.result !== 'recording_failure'))))}
+            continueLabel={submissionOperation.current?.phase === 'uncertain' ? 'Retry submission' : inPractice ? 'Begin collection' : session.protocolVersion === 'between-subject-v2' || session.protocolVersion === 'between-subject-v1' ? 'Submit session' : session.round >= session.repetitions ? 'Finish session' : 'Continue'}
             saving={saving}
             saveError={saveError}
           /></div>

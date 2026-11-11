@@ -4,6 +4,7 @@ import path from 'path'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { studyApiPlugin } from './server/study-api.mjs'
+import { openBciProductionCompatibility } from './build/openbci-production-compatibility.mjs'
 
 function serveGameModels() {
   const modelsDir = path.resolve(__dirname, 'game/models')
@@ -72,6 +73,7 @@ export default defineConfig({
     // Tailwind is not being actively used – do not remove them
     react(),
     tailwindcss(),
+    openBciProductionCompatibility(),
   ],
   resolve: {
     alias: {

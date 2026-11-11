@@ -5,6 +5,9 @@ import type { Assignment } from './api';
 export type ModelStatus = 'incomplete' | 'training' | 'ready' | 'error' | 'outdated';
 
 export interface TrainableTrial {
+  condition?: Assignment;
+  centerDurationMs?: number;
+  triggeredAt?: number;
   id: string;
   gestureId: string;
   gestureName: string;
@@ -163,6 +166,12 @@ export function getConditionPredictionEngine(
   return engines.get(storageKey(scopeId, condition)) ?? null;
 }
 
+export function centerTrainingPoints(trial: Pick<TrainableTrial, 'points' | 'triggeredAt' | 'centerDurationMs'>) {
+  if (trial.centerDurationMs === undefined) return trial.points; // Historical archives retain their original contract.
+  if (trial.centerDurationMs !== 2000 || !Number.isFinite(trial.triggeredAt)) throw new Error('Explicit finite 2000ms center required.');
+  return trial.points.filter(point => point.time >= trial.triggeredAt! && point.time < trial.triggeredAt! + trial.centerDurationMs!);
+}
+
 function toTrainingSession(trials: TrainableTrial[], gestures: Gesture[], segmentDurationMs: number) {
   return {
     id: `condition-${Date.now()}`,
@@ -180,7 +189,7 @@ function toTrainingSession(trials: TrainableTrial[], gestures: Gesture[], segmen
           gestureId: trial.gestureId,
           gestureName: trial.gestureName,
           timestamp: trial.capturedAt,
-          data: trial.points.map((point) => point.value),
+          data: centerTrainingPoints(trial).map((point) => point.value),
           duration: trial.metrics.durationMs,
         })),
     })),
@@ -192,7 +201,7 @@ export async function trainConditionModel(
   condition: Assignment,
   trials: TrainableTrial[],
   gestures: Gesture[],
-  segmentDurationMs = 1200,
+  segmentDurationMs = 2000,
 ): Promise<ConditionModelState> {
   const key = storageKey(scopeId, condition);
   const token = (trainTokens.get(key) ?? 0) + 1;
@@ -209,6 +218,7 @@ export async function trainConditionModel(
   });
 
   try {
+    if (trials.some(trial => trial.condition !== undefined && trial.condition !== condition)) throw new Error('Dataset contains another condition.');
     await new Promise((resolve) => {
       window.setTimeout(resolve, 250);
     });

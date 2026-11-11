@@ -1,42 +1,23 @@
-# Dependencies
-node_modules
-
-# Build output
+node_modules/
 dist/
-.vite/
-
-# Logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# Environment files
+data/
+records/
+recordings/
+exports/
+logs/
+tests/
 .env
 .env.*
-!.env.example
-
-# Editor and OS files
+*.log
+*.zip
+*.csv
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.sqlite
+*.sqlite3
+*.db
 .DS_Store
-Thumbs.db
-.vscode/*
-!.vscode/extensions.json
-!.vscode/settings.json
-!.vscode/tasks.json
-
-# TypeScript cache
-*.tsbuildinfo
-
-# Python
-__pycache__/
-*.pyc
-.venv/
-venv/
-
-# Local study records and settings are never published
-/data/
-
-# Study records written while a session runs
-data/rounds.csv
-data/sessions/*
-!data/sessions/.gitkeep

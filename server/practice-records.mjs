@@ -3,6 +3,9 @@ import { PRACTICE_REST_MS, validatePracticePoints, withPracticeTiming } from '..
 
 const token = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(value);
 const finite = value => typeof value === 'number' && Number.isFinite(value);
+// Explicit game-producer metadata only; absent fields stay absent for old archives.
+const outcomeTimingFields = ['cueAt', 'latestSampleAt', 'recordingStartedAt', 'recordingEndedAt', 'startedAt', 'endedAt', 'inferenceStartedAt', 'inferenceEndedAt'];
+const outcomeMetadataFields = ['trialIndex', 'sampleCount', ...outcomeTimingFields];
 const reject = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
 
 export function sanitizePracticeRecord(input, participant, records = []) {
@@ -23,9 +26,12 @@ export function sanitizePracticeRecord(input, participant, records = []) {
     createdAt: input.createdAt, settings: { segmentDurationMs: settings.segmentDurationMs, preTriggerWindowMs: settings.preTriggerWindowMs, countdownMs: settings.countdownMs, activityThreshold: settings.activityThreshold }, archivalOnly: true,
     points: [],
   };
-  if (input.flowVersion !== undefined && ![2, 3].includes(input.flowVersion)) reject('Unsupported practice flow version.');
-  const sharedFlow = [2, 3].includes(input.flowVersion);
-  const gestures = input.flowVersion === 3 ? ['wrist-up', 'wrist-down'] : ['pinch', 'squeeze', 'relax'];
+  if (input.flowVersion !== undefined && ![2, 3, 4].includes(input.flowVersion)) reject('Unsupported practice flow version.');
+  const briefFlow = input.flowVersion === 4;
+  if (briefFlow && !['between-subject-v1','between-subject-v2'].includes(participant.protocol_version)) reject('Brief Practice requires a between-subject session.');
+  const wristFlow = input.flowVersion === 3 || briefFlow;
+  const sharedFlow = [2, 3, 4].includes(input.flowVersion);
+  const gestures = wristFlow ? ['wrist-up', 'wrist-down'] : ['pinch', 'squeeze', 'relax'];
   if (sharedFlow) output.flowVersion = input.flowVersion;
   const related = records.filter(record => record.attemptId === input.attemptId && record.sessionId === input.sessionId
     && record.participantId === input.participantId && record.generation === input.generation && record.round === input.round
@@ -47,12 +53,17 @@ export function sanitizePracticeRecord(input, participant, records = []) {
         || canonicalPractice(rest.settings) !== canonicalPractice(settings)))) reject('Practice capture needs this attempt’s saved resting reference.');
     const cuedRest = input.flowVersion === 2 && input.gestureId === 'relax';
     if (sharedFlow && input.captureProcedure !== (cuedRest ? 'cued_rest' : input.condition)) reject('Incorrect capture procedure.');
-    if (!gestures.includes(input.gestureId) || input.triggerMode !== (cuedRest ? 'button' : input.condition)
-      || !finite(input.triggeredAt) || !finite(input.completedAt) || input.completedAt - input.triggeredAt < settings.segmentDurationMs
-      || !Number.isInteger(input.preTriggerPointCount) || input.preTriggerPointCount < 0
-      || !validatePracticePoints(input.points, settings.segmentDurationMs)
-      || input.preTriggerPointCount >= input.points.length || input.points[input.preTriggerPointCount].time !== input.triggeredAt
-      || input.points.at(-1).time !== input.completedAt) reject('Practice capture needs a complete recorder window and matching trigger metadata.');
+    const halfOpenCenter = input.centerDurationMs !== undefined;
+    const centerValid = halfOpenCenter
+      ? validHalfOpenCenter(input)
+      : finite(input.triggeredAt) && finite(input.completedAt) && input.completedAt - input.triggeredAt >= settings.segmentDurationMs
+        && Number.isInteger(input.preTriggerPointCount) && input.preTriggerPointCount >= 0
+        && validatePracticePoints(input.points, settings.segmentDurationMs)
+        && input.preTriggerPointCount < input.points.length && input.points[input.preTriggerPointCount].time === input.triggeredAt
+        && input.points.at(-1).time === input.completedAt;
+    if (!gestures.includes(input.gestureId) || input.triggerMode !== (cuedRest ? 'button' : input.condition) || !centerValid
+      || (wristFlow && !halfOpenCenter)) reject('Practice capture needs a complete recorder window and matching trigger metadata.');
+    if (halfOpenCenter) Object.assign(output, { centerDurationMs: 2000, captureAttemptId: input.captureAttemptId });
     Object.assign(output, { restId: input.restId, gestureId: input.gestureId,
       gestureName: { 'wrist-up': 'Wrist up', 'wrist-down': 'Wrist down', pinch: 'Pinch', squeeze: 'Squeeze', relax: 'Relax' }[input.gestureId],
       triggerMode: input.triggerMode, triggeredAt: input.triggeredAt, completedAt: input.completedAt, preTriggerPointCount: input.preTriggerPointCount,
@@ -69,8 +80,9 @@ export function sanitizePracticeRecord(input, participant, records = []) {
         replacementSampleId: token(input.replacementSampleId) ? input.replacementSampleId : null,
         detail: typeof input.detail === 'string' ? input.detail.slice(0, 1000) : '' });
     } else {
-      if (!sameIds(input.sampleIds, retained.map(record => record.id)) || retained.length !== (input.flowVersion === 3 ? 6 : 3)
-        || !gestures.every(id => retained.filter(record => record.gestureId === id).length === (input.flowVersion === 3 ? 3 : 1))) reject('Training/game needs all retained practice samples.');
+      if (wristFlow && !retained.every(validHalfOpenCenter)) reject('Training/game requires explicit two-second centers; historical windows cannot be reinterpreted.');
+      if (!sameIds(input.sampleIds, retained.map(record => record.id)) || retained.length !== (wristFlow ? 6 : 3)
+        || !gestures.every(id => retained.filter(record => record.gestureId === id).length === (wristFlow ? 3 : 1))) reject('Training/game needs all retained practice samples.');
       output.sampleIds = [...input.sampleIds];
       if (input.kind === 'training') {
         if (!['success', 'failure'].includes(input.status) || input.classifier !== 'knn'
@@ -81,14 +93,15 @@ export function sanitizePracticeRecord(input, participant, records = []) {
         const training = related.find(record => record.id === input.trainingId && record.kind === 'training' && record.status === 'success');
         if (!training || !sameIds(training.sampleIds, input.sampleIds) || !finite(input.gameScore) || input.gameScore < 0
           || typeof input.difficulty !== 'string' || !Array.isArray(input.outcomes) || input.outcomes.length > 1000
-          || !input.outcomes.every(item => validOutcome(item, gestures) && (input.flowVersion !== 3
+          || !input.outcomes.every(item => validOutcome(item, gestures) && (!wristFlow
             || (item.expectedGestureName === { 'wrist-up': 'Wrist up', 'wrist-down': 'Wrist down' }[item.expectedGestureId]
               && item.predictedGestureName === (item.predictedGestureId === null ? null : { 'wrist-up': 'Wrist up', 'wrist-down': 'Wrist down', unknown: 'Unknown' }[item.predictedGestureId]))))
           || new Set(input.outcomes.map(item => item.attemptId)).size !== input.outcomes.length) reject('Invalid practice game lineage or outcomes.');
         Object.assign(output, { trainingId: input.trainingId, gameScore: input.gameScore, difficulty: input.difficulty.slice(0, 80),
           outcomes: input.outcomes.map(item => ({ attemptId: item.attemptId, expectedGestureId: item.expectedGestureId,
             expectedGestureName: item.expectedGestureName, result: item.result,
-            predictedGestureId: item.predictedGestureId, predictedGestureName: item.predictedGestureName })),
+            predictedGestureId: item.predictedGestureId, predictedGestureName: item.predictedGestureName,
+            ...Object.fromEntries(outcomeMetadataFields.filter(key => item[key] !== undefined).map(key => [key, item[key]])) })),
           obstacleSuccess: typeof input.obstacleSuccess === 'boolean' ? input.obstacleSuccess : null });
       }
     }
@@ -100,11 +113,13 @@ export function sanitizePracticeRecord(input, participant, records = []) {
     const removed = related.filter(record => record.kind === 'removed');
     const retained = related.filter(record => record.kind === 'capture' && !removed.some(item => item.referenceId === record.id));
     if (!Array.isArray(input.points) || input.points.length || !related.some(record => record.id === input.restId && record.kind === 'rest')
-      || (sharedFlow ? !removed.some(record => record.id === input.removedId) : removed.length !== 1 || removed[0].id !== input.removedId) || retained.length !== (input.flowVersion === 3 ? 6 : 3)
-      || !gestures.every(id => retained.filter(record => record.gestureId === id).length === (input.flowVersion === 3 ? 3 : 1))
+      || (!briefFlow && (sharedFlow ? !removed.some(record => record.id === input.removedId) : removed.length !== 1 || removed[0].id !== input.removedId)) || retained.length !== (wristFlow ? 6 : 3)
+      || !gestures.every(id => retained.filter(record => record.gestureId === id).length === (wristFlow ? 3 : 1))
       || !Array.isArray(input.sampleIds) || input.sampleIds.length !== retained.length || new Set(input.sampleIds).size !== retained.length
       || !retained.every(record => input.sampleIds.includes(record.id)) || !input.sampleIds.includes(input.reviewedId)) reject('Complete rest, all gesture examples, and guided review/removal/replacement before beginning collection.');
-    if (sharedFlow) {
+    if (briefFlow) {
+      if (!retained.every(validHalfOpenCenter) || !related.some(record => record.kind === 'reviewed' && record.referenceId === input.reviewedId)) reject('Inspect the saved wrist examples before collection.');
+    } else if (sharedFlow) {
       const training = related.find(record => record.id === input.trainingId && record.kind === 'training' && record.status === 'success');
       const game = related.find(record => record.id === input.gameId && record.kind === 'game');
       if (!training || !sameIds(training.sampleIds, input.sampleIds) || !game || game.trainingId !== training.id
@@ -112,7 +127,8 @@ export function sanitizePracticeRecord(input, participant, records = []) {
         || !related.some(record => record.kind === 'reviewed' && record.referenceId === input.reviewedId)) reject('Finish saved review, training and an actual scored game before collection.');
       Object.assign(output, { trainingId: training.id, gameId: game.id });
     }
-    Object.assign(output, { restId: input.restId, sampleIds: [...input.sampleIds], reviewedId: input.reviewedId, removedId: input.removedId });
+    Object.assign(output, { restId: input.restId, sampleIds: [...input.sampleIds], reviewedId: input.reviewedId,
+      ...(input.removedId === undefined ? {} : { removedId: input.removedId }) });
   } else reject('Invalid practice record type.');
   if (input.kind === 'rest' || input.kind === 'capture') output.points = input.points.map(point => ({ time: point.time, value: point.value, ...(point.activityEnvelope === undefined ? {} : { activityEnvelope: point.activityEnvelope }) }));
   if (input.kind === 'capture' && input.calibration !== undefined) {
@@ -128,6 +144,14 @@ export function sanitizePracticeRecord(input, participant, records = []) {
   return withPracticeTiming(output);
 }
 
+function validHalfOpenCenter(input) {
+  return input.centerDurationMs === 2000 && input.settings?.segmentDurationMs === 2000
+    && finite(input.triggeredAt) && finite(input.completedAt) && input.completedAt === input.triggeredAt + 2000
+    && input.preTriggerPointCount === 0 && token(input.captureAttemptId)
+    && Array.isArray(input.points) && validatePracticePoints(input.points, 0)
+    && input.points[0].time === input.triggeredAt && input.points.every(point => point.time >= input.triggeredAt && point.time < input.completedAt)
+    && input.completedAt - input.points.at(-1).time <= 250;
+}
 function sameIds(left, right) {
   return Array.isArray(left) && left.length === right.length && new Set(left).size === left.length && right.every(id => left.includes(id));
 }
@@ -140,6 +164,9 @@ function validOutcome(item, gestures) {
     && ['correct', 'wrong', 'unknown', 'recording_failure'].includes(item.result)
     && (item.predictedGestureId === null || item.predictedGestureId === 'unknown' || gestures.includes(item.predictedGestureId))
     && (item.predictedGestureName === null || (typeof item.predictedGestureName === 'string' && item.predictedGestureName.length < 80))
+    && (item.trialIndex === undefined || (Number.isSafeInteger(item.trialIndex) && item.trialIndex >= 1))
+    && (item.sampleCount === undefined || (Number.isSafeInteger(item.sampleCount) && item.sampleCount >= 0))
+    && outcomeTimingFields.every(key => item[key] === undefined || finite(item[key]) || (key !== 'cueAt' && item[key] === null))
     && (item.result === 'correct' ? item.predictedGestureId === item.expectedGestureId
       : item.result === 'wrong' ? gestures.includes(item.predictedGestureId) && item.predictedGestureId !== item.expectedGestureId
       : item.result === 'unknown' ? item.predictedGestureId === null || item.predictedGestureId === 'unknown'

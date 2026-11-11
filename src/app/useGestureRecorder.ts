@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FrozenCalibration } from './study/frozenCalibration.mjs';
 import type { SignalPoint } from './useSignalSource';
+import { CaptureContextRecorder, type AttemptMetadata } from './study/captureContext';
 
 export type RecorderState = 'idle' | 'recording' | 'cooldown';
 export type CaptureTriggerMode = 'threshold' | 'button';
@@ -17,6 +18,8 @@ export interface CompletedGestureSegment {
   completedAt: number;
   preTriggerPointCount: number;
   triggerMode: CaptureTriggerMode;
+  centerDurationMs: number;
+  attemptId: string;
   firstCrossingAt?: number | null;
   calibration?: FrozenCalibration | null;
 }
@@ -35,6 +38,8 @@ interface UseGestureRecorderOptions {
   triggerMode?: CaptureTriggerMode;
   manualTriggerToken?: number;
   isArmed?: boolean;
+  contextRecorder?: CaptureContextRecorder;
+  attemptMetadata?: AttemptMetadata;
 }
 
 interface GestureRecorderDiagnostics {
@@ -47,6 +52,8 @@ interface GestureRecorderDiagnostics {
 }
 
 interface UseGestureRecorderResult {
+  cancelledOpportunityId: string | null;
+  contextRecorder: CaptureContextRecorder;
   recorderState: RecorderState;
   thresholdReadiness: ThresholdReadiness;
   isRecording: boolean;
@@ -58,7 +65,8 @@ interface UseGestureRecorderResult {
   diagnostics: GestureRecorderDiagnostics;
 }
 
-const DEFAULT_PRE_TRIGGER_WINDOW_MS = 175;
+// Surrounding points are context only, never labeled training input.
+const DEFAULT_PRE_TRIGGER_WINDOW_MS = 0;
 const DEFAULT_COOLDOWN_MS = 350;
 const DEFAULT_HYSTERESIS_RATIO = 0.7;
 
@@ -76,6 +84,8 @@ export function useGestureRecorder({
   triggerMode = 'threshold',
   manualTriggerToken = 0,
   isArmed = true,
+  contextRecorder: suppliedContextRecorder,
+  attemptMetadata,
 }: UseGestureRecorderOptions): UseGestureRecorderResult {
   const [recorderState, setRecorderState] = useState<RecorderState>('idle');
   const [thresholdReadiness, setThresholdReadiness] = useState<ThresholdReadiness>('unavailable');
@@ -88,7 +98,14 @@ export function useGestureRecorder({
   const [elapsedCaptureDurationMs, setElapsedCaptureDurationMs] = useState(0);
   const [preTriggerPointCount, setPreTriggerPointCount] = useState(0);
 
+  const localContextRef = useRef<CaptureContextRecorder | null>(null);
+  if (!localContextRef.current) localContextRef.current = new CaptureContextRecorder({ participantId: 'unscoped', sessionId: resetKey, condition: triggerMode, source: 'mock', sourceEpoch: 0, channel: 0 });
+  const contextRecorder = suppliedContextRecorder ?? localContextRef.current;
+  const cancelledHandledRef = useRef<string | null>(null);
+  const activeAttemptRef = useRef<string | null>(null);
+  const contextBoundaryRef = useRef({ resetKey, isStreaming });
   const seenRef = useRef(new WeakSet<SignalPoint>());
+  const consumedIdsRef = useRef(new Set<number>());
   const holdRef = useRef<{ rest: number | null; onset: number | null; ready: boolean }>({ rest: null, onset: null, ready: false });
   const firstCrossingRef = useRef<number | null>(null);
   const endpointRef = useRef<number | null>(null);
@@ -114,6 +131,8 @@ export function useGestureRecorder({
   }, [isArmed, manualTriggerToken, triggerMode]);
 
   const resetRecorder = useCallback(() => {
+    if (activeAttemptRef.current) contextRecorder.interruptAttempt(activeAttemptRef.current, 'capture_cancelled');
+    activeAttemptRef.current = null;
     seenRef.current = new WeakSet();
     holdRef.current = { rest: null, onset: null, ready: false };
     setThresholdReadiness('unavailable');
@@ -136,18 +155,41 @@ export function useGestureRecorder({
     recorderStateRef.current = 'idle';
     preTriggerPointCountRef.current = 0;
     manualTriggerPendingRef.current = false;
-  }, []);
+  }, [contextRecorder]);
+
+  const cueIdentityRef = useRef(attemptMetadata?.attemptId);
+  useEffect(() => {
+    if (cueIdentityRef.current === attemptMetadata?.attemptId) return;
+    cueIdentityRef.current = attemptMetadata?.attemptId;
+    resetRecorder();
+    seenRef.current = new WeakSet(signalPoints);
+    signalPoints.forEach(point => { if (point.consumptionId !== undefined) consumedIdsRef.current.add(point.consumptionId); });
+    lastProcessedTimeRef.current = signalPoints[signalPoints.length - 1]?.time ?? null;
+  }, [attemptMetadata?.attemptId, contextRecorder, resetRecorder]);
 
   const resetThreshold = frozenCalibration === undefined ? threshold : null;
   useEffect(() => {
+    // A supplied recorder owns participant/session/source boundaries itself.
+    // A gesture/settings reset only cancels the active detector, not an already
+    // completed center's independent five-second post-context.
+    if ((contextBoundaryRef.current.resetKey !== resetKey && !suppliedContextRecorder) || (contextBoundaryRef.current.isStreaming && !isStreaming)) contextRecorder.flush(!isStreaming ? 'disconnected' : 'recorder_scope_changed');
+    contextBoundaryRef.current = { resetKey, isStreaming };
     resetRecorder();
     // A method switch must not replay the previous method's buffered points.
     lastProcessedTimeRef.current = signalPoints[signalPoints.length - 1]?.time ?? null;
     seenRef.current = new WeakSet(signalPoints);
+    consumedIdsRef.current = new Set(signalPoints.flatMap(point => point.consumptionId === undefined ? [] : [point.consumptionId]));
     setNormalizedActivity(0);
   }, [isStreaming, resetKey, frozenCalibration?.revision, isArmed, triggerMode, segmentDurationMs, preTriggerWindowMs, resetThreshold]);
 
   useEffect(() => {
+    if (attemptMetadata && contextRecorder.isAttemptCancelled(attemptMetadata.attemptId)) {
+      if (cancelledHandledRef.current !== attemptMetadata.attemptId) {
+        cancelledHandledRef.current = attemptMetadata.attemptId;
+        resetRecorder();
+      }
+      return;
+    }
     if (signalPoints.length === 0) {
       return;
     }
@@ -162,14 +204,25 @@ export function useGestureRecorder({
     const lowerThreshold = Math.max(0, threshold * hysteresisRatio);
 
     for (const point of newPoints) {
+      // Deduplicate acquisition identity BEFORE clocks, holds or capture state.
+      // Normalized/display clones and tied packet splits are not new history.
+      if (point.consumptionId !== undefined) {
+        if (consumedIdsRef.current.has(point.consumptionId)) continue;
+        consumedIdsRef.current.add(point.consumptionId);
+      }
       seenRef.current.add(point);
+      contextRecorder.push(point);
+      // Raw subscribers may already have interrupted this attempt before the
+      // corresponding React batch arrives. Never publish its cancelled center.
+      if (activeAttemptRef.current && !contextRecorder.hasAttempt(activeAttemptRef.current)) resetRecorder();
       const previousTime = lastProcessedTimeRef.current;
       if (![point.time, point.raw, point.activityEnvelope].every(Number.isFinite) || point.activityEnvelope < 0
         || (previousTime !== null && (point.time < previousTime || point.time - previousTime > (frozenCalibration?.maxGapMs ?? 500)))) {
+        contextRecorder.flush('invalid_or_discontinuous_source');
         resetRecorder();
-        seenRef.current = new WeakSet(signalPoints);
+        seenRef.current.add(point);
         lastProcessedTimeRef.current = Number.isFinite(point.time) ? point.time : null;
-        break;
+        continue;
       }
       lastProcessedTimeRef.current = point.time;
       setNormalizedActivity(point.normalizedActivity);
@@ -210,21 +263,26 @@ export function useGestureRecorder({
 
       if (currentRecorderState === 'idle') {
         if (shouldTrigger) {
+          if (!contextRecorder.canCapture(point)) { resetRecorder(); continue; }
           manualTriggerPendingRef.current = false;
-          const preTriggerPoints = preTriggerBufferRef.current.filter(p => p.time >= point.time - preTriggerWindowMs);
-          const seededSegment = [...preTriggerPoints, { time: point.time, value: point.raw }];
+          const attempt = attemptMetadata ?? { attemptId: crypto.randomUUID(), gestureId: 'unspecified', cueAt: point.time };
+          if (!contextRecorder.canTriggerAttempt(attempt.attemptId)) continue;
+          if (!contextRecorder.hasAttempt(attempt.attemptId)) contextRecorder.beginAttempt(attempt);
+          contextRecorder.capture(attempt.attemptId, point, segmentDurationMs);
+          activeAttemptRef.current = attempt.attemptId;
+          const seededSegment = [{ time: point.time, value: point.raw }];
 
           recordedSegmentRef.current = seededSegment;
           recordingTriggerTimeRef.current = point.time;
           recorderStateRef.current = 'recording';
-          preTriggerPointCountRef.current = preTriggerPoints.length;
+          preTriggerPointCountRef.current = 0;
           setRecorderState('recording');
           setRecordingStartTime(point.time);
           setRecordingProgress(0);
           setCurrentCapturedSegment(seededSegment);
           setThresholdCrossingDetected(true);
           setElapsedCaptureDurationMs(0);
-          setPreTriggerPointCount(preTriggerPoints.length);
+          setPreTriggerPointCount(0);
           continue;
         }
 
@@ -237,7 +295,7 @@ export function useGestureRecorder({
 
       if (currentRecorderState === 'recording') {
         const triggerTime = recordingTriggerTimeRef.current ?? point.time;
-        const closing = endpointRef.current !== null && point.time > endpointRef.current;
+        const closing = point.time >= triggerTime + segmentDurationMs;
         const nextSegment = closing ? recordedSegmentRef.current : [...recordedSegmentRef.current, { time: point.time, value: point.raw }];
         recordedSegmentRef.current = nextSegment;
         setCurrentCapturedSegment(nextSegment);
@@ -249,8 +307,8 @@ export function useGestureRecorder({
         );
 
         if (elapsedMs < segmentDurationMs) continue;
-        if (!closing) { endpointRef.current ??= point.time; continue; }
-        const completedAt = endpointRef.current!;
+        if (!closing) continue;
+        const completedAt = triggerTime + segmentDurationMs;
         endpointRef.current = null;
 
         recorderStateRef.current = 'cooldown';
@@ -267,13 +325,19 @@ export function useGestureRecorder({
         if (nextSegment.length >= minSegmentPoints) {
           setCompletedSegment({
             points: nextSegment,
+            centerDurationMs: segmentDurationMs,
+            attemptId: activeAttemptRef.current!,
             triggeredAt: triggerTime,
             completedAt,
             ...(frozenCalibration !== undefined ? { calibration: frozenCalibration, firstCrossingAt: triggerMode === 'threshold' ? firstCrossingRef.current : null } : {}),
             preTriggerPointCount: preTriggerPointCountRef.current,
             triggerMode,
           });
+          contextRecorder.finishCapture(activeAttemptRef.current!);
+        } else if (activeAttemptRef.current) {
+          contextRecorder.endAttempt(activeAttemptRef.current, 'failed', completedAt);
         }
+        activeAttemptRef.current = null;
 
         continue;
       }
@@ -301,6 +365,8 @@ export function useGestureRecorder({
       : recorderStateRef.current !== 'idle' || !hold.ready ? 'rest'
         : hold.onset !== null ? 'movement' : 'ready');
   }, [
+    contextRecorder,
+    attemptMetadata,
     hysteresisRatio,
     frozenCalibration,
     isStreaming,
@@ -334,7 +400,10 @@ export function useGestureRecorder({
     thresholdCrossingDetected,
   ]);
 
+  const cancelledOpportunityId = attemptMetadata && contextRecorder.isAttemptCancelled(attemptMetadata.attemptId) ? attemptMetadata.attemptId : null;
   return {
+    cancelledOpportunityId,
+    contextRecorder,
     recorderState,
     thresholdReadiness,
     isRecording: recorderState === 'recording',

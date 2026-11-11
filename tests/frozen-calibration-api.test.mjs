@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture } from './support/practice-fixture.mjs';
+import { fixture } from './support/legacy-core-api-fixture.mjs';
 import { restCalibration } from '../src/app/study/frozenCalibration.mjs';
 import fs from 'node:fs';
 

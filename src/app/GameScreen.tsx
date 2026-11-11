@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, ArrowLeft, CheckCircle2, Heart, XCircle, Zap } from 'lucide-react';
-import GameGuide from './GameGuide';
 import {
   DEFAULT_OBSTACLE_COUNT,
   DEFAULT_STARTING_LIVES,
@@ -11,7 +10,10 @@ import {
   type GestureTestOutcome,
 } from './study/gameHandoff';
 import { recognitionResult } from './study/recognition';
+import { inferenceWindow, validateOfficialSequence } from './study/evaluationProtocol.mjs';
 import type { Gesture } from './pipeline';
+import GameGuide from './GameGuide';
+import type { TutorialBeat } from '../../game/main.js';
 
 export type QteStatus = 'rest' | 'ready' | 'recording' | 'processing' | 'complete';
 
@@ -26,6 +28,7 @@ export interface GameQteViewState {
   encounterId?: string;
   expectedAction?: RunnerAction;
   switchDirection?: number;
+  tutorialHeld?: boolean;
 }
 
 type RunnerAction = 'jump' | 'switch-lane';
@@ -43,32 +46,6 @@ interface GamePrediction {
   confidence: number;
 }
 
-const TUTORIAL_OBSTACLE_COUNT = 10;
-type TutorialGuide = 'intro' | 'lives' | 'track' | 'wrist-up' | 'wrist-down' | 'farewell' | 'complete';
-
-const TUTORIAL_COPY: Record<TutorialGuide, string> = {
-  intro: "This timer will display your 'Rest' period and 'Recording' period. Stay ready, it moves fast.",
-  lives: 'Your lives will be tracked here. Each incorrect gesture will cause you to lose a life during the actual trial.',
-  track: 'When you enter the red portion of the track, perform and hold the gesture.',
-  'wrist-up': 'To jump over the hurdles, you will use the \'Wrist Up\' gesture. When you\'re ready, click "Next" and immediately perform the gesture.',
-  'wrist-down': 'Use \'Wrist Down\' to dodge the incoming player. When you\'re ready, click "Next" and immediately perform the gesture.',
-  farewell: 'The rest of this run will be a practice round. When you\'re ready, click "Next" to continue on your own.',
-  complete: "Your practice round is complete! Click 'Next' to continue on to the real deal. Good luck!",
-};
-
-function tutorialStorageKey(key: string) {
-  return `emg-game-tutorial:${key}`;
-}
-
-function tutorialStillPending(key?: string) {
-  if (!key) return false;
-  try {
-    return localStorage.getItem(tutorialStorageKey(key)) !== 'done';
-  } catch {
-    return false;
-  }
-}
-
 function arrowHead(tip: { x: number; y: number }, tail: { x: number; y: number }, length = 18) {
   const dx = tip.x - tail.x;
   const dy = tip.y - tail.y;
@@ -80,39 +57,21 @@ function arrowHead(tip: { x: number; y: number }, tail: { x: number; y: number }
   const baseX = tip.x - ux * length;
   const baseY = tip.y - uy * length;
   const wing = length * 0.62;
-  return {
-    x2: baseX,
-    y2: baseY,
-    points: `${tip.x},${tip.y} ${baseX + px * wing},${baseY + py * wing} ${baseX - px * wing},${baseY - py * wing}`,
-  };
+  return { x2: baseX, y2: baseY, points: `${tip.x},${tip.y} ${baseX + px * wing},${baseY + py * wing} ${baseX - px * wing},${baseY - py * wing}` };
 }
 
 function TrackGuideArrows({ points }: { points: Array<{ x: number; y: number }> }) {
-  return (
-    <svg className="pointer-events-none fixed inset-0 z-[155] h-screen w-screen" aria-hidden="true">
-      {points.map((tip, index) => {
-        const outward = index === 0 ? -1 : 1;
-        const tail = { x: tip.x + outward * 36, y: tip.y + 78 };
-        const head = arrowHead(tip, tail);
-        return (
-          <g key={index}>
-            <line x1={tail.x} y1={tail.y} x2={head.x2} y2={head.y2} stroke="#082f49" strokeWidth="9" strokeLinecap="round" />
-            <line x1={tail.x} y1={tail.y} x2={head.x2} y2={head.y2} stroke="#67e8f9" strokeWidth="4" strokeLinecap="round" />
-            <polygon points={head.points} fill="#67e8f9" stroke="#082f49" strokeWidth="3" strokeLinejoin="round" />
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
-
-function markTutorialDone(key?: string) {
-  if (!key) return;
-  try {
-    localStorage.setItem(tutorialStorageKey(key), 'done');
-  } catch {
-    // The practice run can still hand off to the recorded game in this tab.
-  }
+  return <svg data-game-track-guide aria-hidden="true" className="pointer-events-none fixed inset-0 z-[155] h-screen w-screen">
+    {points.map((tip, index) => {
+      const tail = { x: tip.x + (index === 0 ? -1 : 1) * 36, y: tip.y + 78 };
+      const head = arrowHead(tip, tail);
+      return <g key={index}>
+        <line x1={tail.x} y1={tail.y} x2={head.x2} y2={head.y2} stroke="#082f49" strokeWidth="9" strokeLinecap="round" />
+        <line x1={tail.x} y1={tail.y} x2={head.x2} y2={head.y2} stroke="#67e8f9" strokeWidth="4" strokeLinecap="round" />
+        <polygon points={head.points} fill="#67e8f9" stroke="#082f49" strokeWidth="3" strokeLinejoin="round" />
+      </g>;
+    })}
+  </svg>;
 }
 
 const QTE_COPY: Record<QteStatus, { label: string; hint: string; color: string }> = {
@@ -138,7 +97,7 @@ function QteRing({ state }: { state: GameQteViewState }) {
 
   return (
     <div className="flex flex-col items-center">
-      <div data-game-guide-target="timer" className="relative h-40 w-40">
+      <div className="relative h-40 w-40">
         <svg viewBox="0 0 160 160" className="h-full w-full -rotate-90" aria-hidden="true">
           <circle cx="80" cy="80" r={radius} fill="rgba(2, 6, 23, .74)" stroke="rgba(148, 163, 184, .2)" strokeWidth="8" />
           <circle
@@ -185,9 +144,11 @@ function QteRing({ state }: { state: GameQteViewState }) {
 function EmgTrace({
   points,
   qteState,
+  streamActive = points.length > 0,
 }: {
   points: EmgDisplayPoint[];
   qteState: GameQteViewState;
+  streamActive?: boolean;
 }) {
   const captureStartRef = useRef<number | null>(null);
   const captureEndRef = useRef<number | null>(null);
@@ -244,8 +205,8 @@ function EmgTrace({
           EMG Activity
         </div>
         <span className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-slate-400">
-          <span className={`h-1.5 w-1.5 rounded-full ${points.length ? 'bg-emerald-400 shadow-[0_0_8px_#34d399]' : 'bg-slate-600'}`} />
-          {points.length ? 'Live' : 'Waiting'}
+          <span className={`h-1.5 w-1.5 rounded-full ${streamActive ? 'bg-emerald-400 shadow-[0_0_8px_#34d399]' : 'bg-slate-600'}`} />
+          {streamActive ? 'Live' : 'Waiting'}
         </span>
       </div>
       <div className="mt-3 h-16 overflow-hidden rounded-lg border border-white/5 bg-slate-950/70">
@@ -291,24 +252,8 @@ function EmgTrace({
   );
 }
 
-export default function GameScreen({
-  onExit,
-  exitLabel = 'Back to training',
-  onSecondary,
-  secondaryLabel,
-  score,
-  streak,
-  qteState,
-  emgPoints = [],
-  actionGestures,
-  predictWindow,
-  condition,
-  obstacleCount = DEFAULT_OBSTACLE_COUNT,
-  startingLives = DEFAULT_STARTING_LIVES,
-  tutorialKey,
-  testControls = true,
-  practice = false,
-}: {
+
+export interface GameScreenProps {
   onExit: () => void;
   exitLabel?: string;
   onSecondary?: () => void;
@@ -322,10 +267,94 @@ export default function GameScreen({
   condition?: 'button' | 'threshold';
   obstacleCount?: number;
   startingLives?: number;
-  tutorialKey?: string;
   testControls?: boolean;
   practice?: boolean;
-}) {
+  officialSequence?: string[];
+  runKind?: 'official' | 'replay' | 'practice';
+  /** Caller attests ready model and active LIVE source, never Mock/file/paused. */
+  streamReady?: boolean;
+  sourceEpoch?: number;
+  recoveryReady?: boolean;
+  recoveryToken?: string;
+  subscribeSourceInterruptions?: (listener: (reason: string) => void) => () => void;
+  recoveryControls?: import('react').ReactNode;
+  onRunInvalidated?: (reason: string) => void;
+
+  /** Server-verified, fully scoped Practice receipt. Omitted for legacy callers. */
+  tutorialPractice?: { status: 'completed' | 'skipped'; scopeKey: string };
+}
+
+export default function GameScreen(props: GameScreenProps) {
+  const scope = props.tutorialPractice?.scopeKey ?? 'legacy';
+  return <GameCoordinator key={`${scope}:${props.runKind ?? 'practice'}`} {...props} />;
+}
+
+function GameCoordinator(props: GameScreenProps) {
+  const receipt = props.tutorialPractice;
+  const hintKey = receipt ? `emg-game-tutorial:${receipt.scopeKey}` : null;
+  const [completed, setCompleted] = useState(() => {
+    try { return !!hintKey && globalThis.localStorage?.getItem(hintKey) === 'complete'; }
+    catch { return false; }
+  });
+  const needsTutorial = props.runKind === 'official' && receipt?.status === 'completed' && !completed;
+  const completeTutorial = () => {
+    try { if (hintKey) globalThis.localStorage?.setItem(hintKey, 'complete'); } catch { /* UX hint only; never a receipt. */ }
+    setCompleted(true);
+  };
+  return needsTutorial
+    ? <GameRun key="tutorial" {...props} runKind="practice" practice tutorial obstacleCount={8}
+        officialSequence={undefined} condition={undefined} onSecondary={undefined} secondaryLabel={undefined}
+        onRunInvalidated={undefined} onTutorialComplete={completeTutorial} />
+    : <GameRun key="measured" {...props} />;
+}
+
+function GameRun({
+  onExit,
+  exitLabel = 'Back to training',
+  onSecondary,
+  secondaryLabel,
+  score,
+  streak,
+  qteState,
+  emgPoints = [],
+  actionGestures,
+  predictWindow,
+  condition,
+  obstacleCount = DEFAULT_OBSTACLE_COUNT,
+  startingLives = DEFAULT_STARTING_LIVES,
+  testControls = true,
+  practice = false,
+  officialSequence,
+  runKind = 'practice',
+  streamReady,
+  sourceEpoch, recoveryReady, recoveryToken, subscribeSourceInterruptions, recoveryControls,
+  onRunInvalidated,
+  tutorial = false,
+  onTutorialComplete,
+}: GameScreenProps & { tutorial?: boolean; onTutorialComplete?: () => void; }) {
+  const fixedProtocol = runKind === 'official' || runKind === 'replay';
+  const [tutorialBeat, setTutorialBeat] = useState<TutorialBeat | null>(null);
+  const [tutorialComplete, setTutorialComplete] = useState(false);
+  // Presentation substeps share the existing intro hold: no new recording/run state.
+  const [tutorialIntroStep, setTutorialIntroStep] = useState<'timer' | 'lives' | 'track'>('timer');
+  const [trackArrowPoints, setTrackArrowPoints] = useState<Array<{ x: number; y: number }>>([]);
+  const launchedRef = useRef(false);
+  const [sourceHeld, setSourceHeld] = useState(false);
+  const sourceHeldRef = useRef(false);
+  const heldCalibrationRef = useRef<string | undefined>(undefined);
+  const holdSourceRef = useRef<(reason: string) => void>(() => {});
+  const readyToLaunch = launchedRef.current || (tutorial ? streamReady === true && !!predictWindow && !!actionGestures : !fixedProtocol || (streamReady === true && !!predictWindow && !!actionGestures
+    && validateOfficialSequence(officialSequence)
+    && actionGestures.jump.id === 'wrist-up' && actionGestures.switchLane.id === 'wrist-down'));
+  const streamReadyRef = useRef(streamReady);
+  streamReadyRef.current = streamReady;
+  const invalidatedRef = useRef<string | null>(null);
+  const startedAtRef = useRef<number | null>(null);
+  const recoveryPausesRef = useRef<Array<{ startedAt: number; endedAt: number; reason: string }>>([]);
+  const openRecoveryPauseRef = useRef<{ startedAt: number; reason: string } | null>(null);
+  const runIdRef = useRef(`${runKind}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`}`);
+  const submittedRef = useRef(false);
+  const trialMetadataRef = useRef(new Map<string, {trialIndex:number;cueAt:number;latestSampleAt?:number|null;recordingStartedAt?:number|null;recordingEndedAt?:number|null;inferenceStartedAt?:number;inferenceEndedAt?:number;sampleCount?:number}>());
   const containerRef = useRef<HTMLDivElement>(null);
   const [debugKeyboardEnabled, setDebugKeyboardEnabled] = useState(true);
   const debugKeyboardEnabledRef = useRef(true);
@@ -339,6 +368,7 @@ export default function GameScreen({
   const [runnerScore, setRunnerScore] = useState(0);
   const [runnerStreak, setRunnerStreak] = useState(0);
   const [lives, setLives] = useState(startingLives);
+  const livesRef = useRef(startingLives);
   const [maxLives, setMaxLives] = useState(startingLives);
   const [correctAttempts, setCorrectAttempts] = useState(0);
   const [totalAttempts, setTotalAttempts] = useState(0);
@@ -348,20 +378,16 @@ export default function GameScreen({
   const predictWindowRef = useRef(predictWindow);
   const actionGesturesRef = useRef(actionGestures);
   const gameModuleRef = useRef<typeof import('../../game/main.js') | null>(null);
+  const tutorialHeldRef = useRef(false);
   const recordingStartRef = useRef<number | null>(null);
   const previousQteStatusRef = useRef<QteStatus>('rest');
   const processedEncountersRef = useRef(new Set<string>());
+  const completedEncountersRef = useRef(new Set<string>());
   const predictionsRef = useRef(new Map<string, GamePrediction | null>());
-  const outcomesRef = useRef<GestureTestOutcome[]>([]);
+  const outcomesRef = useRef<Array<GestureTestOutcome & {trialIndex?:number;cueAt?:number;recordingStartedAt?:number|null;recordingEndedAt?:number|null;inferenceStartedAt?:number;inferenceEndedAt?:number;sampleCount?:number}>>([]);
   const scoreRef = useRef(0);
   const finishRunRef = useRef<(obstacleSuccess?: boolean) => void>(() => {});
   const gameOverStartedRef = useRef(false);
-  const [runKind, setRunKind] = useState<'tutorial' | 'live'>(() => tutorialStillPending(tutorialKey) ? 'tutorial' : 'live');
-  const [guideBeat, setGuideBeat] = useState<TutorialGuide | null>(runKind === 'tutorial' ? 'intro' : null);
-  const [holdReady, setHoldReady] = useState(false);
-  const [trackArrowPoints, setTrackArrowPoints] = useState<Array<{ x: number; y: number }>>([]);
-  const runKindRef = useRef(runKind);
-  runKindRef.current = runKind;
 
   useEffect(() => {
     emgPointsRef.current = emgPoints;
@@ -377,14 +403,17 @@ export default function GameScreen({
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!container) return;
+    if (!container || !readyToLaunch || invalidatedRef.current) return;
+    launchedRef.current = true;
+    startedAtRef.current = Date.now();
 
     let cancelled = false;
     let unmountGame = () => {};
-    debugKeyboardEnabledRef.current = testControls;
-    setDebugKeyboardEnabled(testControls);
+    debugKeyboardEnabledRef.current = testControls && !fixedProtocol;
+    setDebugKeyboardEnabled(testControls && !fixedProtocol);
     scoreRef.current = 0;
     outcomesRef.current = [];
+    completedEncountersRef.current.clear();
     gameOverStartedRef.current = false;
     processedEncountersRef.current = new Set();
     predictionsRef.current = new Map();
@@ -395,28 +424,59 @@ export default function GameScreen({
     setCorrectAttempts(0);
     setTotalAttempts(0);
 
-    const tutorial = runKind === 'tutorial';
-
     const endRun = (obstacleSuccess: boolean) => {
       if (gameOverStartedRef.current) return;
       gameOverStartedRef.current = true;
       finishRunRef.current(obstacleSuccess);
     };
+    const invalidate = (reason: string) => {
+      if (invalidatedRef.current || gameOverStartedRef.current) return;
+      invalidatedRef.current = reason;
+      onRunInvalidated?.(reason);
+      endRun(false);
+    };
 
     import('../../game/main.js').then((game) => {
       if (!cancelled) {
         gameModuleRef.current = game;
-        if (tutorial) {
-          setGuideBeat('intro');
-          setHoldReady(false);
-        }
         unmountGame = game.mountGame(container, {
-          isDebugKeyboardEnabled: () => debugKeyboardEnabledRef.current,
-          obstacleCount: tutorial ? TUTORIAL_OBSTACLE_COUNT : obstacleCount,
-          startingLives,
+          runKind,
           tutorial,
           preserveLives: tutorial,
+          onTutorialHold: tutorial ? (beat) => { tutorialHeldRef.current = true; setTutorialBeat(beat); } : undefined,
+          officialSequence: fixedProtocol && validateOfficialSequence(officialSequence) ? officialSequence : undefined,
+          jumpGestureId: actionGesturesRef.current?.jump.id,
+          isStreamReady: () => !sourceHeldRef.current && !invalidatedRef.current && (!(fixedProtocol || tutorial) || streamReadyRef.current === true),
+          getRecordingProgress: (encounterId, trialIndex) => {
+            if (sourceHeldRef.current || (tutorial && tutorialHeldRef.current)) return 0;
+            let metadata = trialMetadataRef.current.get(encounterId);
+            if (!metadata) {
+              metadata = {trialIndex, cueAt: Date.now()};
+              trialMetadataRef.current.set(encounterId, metadata);
+            }
+            const now = Date.now();
+            const window = inferenceWindow(emgPointsRef.current, metadata.cueAt, now, metadata.latestSampleAt);
+            metadata.latestSampleAt = window.latestAt ?? metadata.latestSampleAt;
+            metadata.recordingStartedAt = window.startedAt;
+            metadata.recordingEndedAt = window.endedAt;
+            metadata.sampleCount = window.points.length;
+            const latest = window.latestAt;
+            if (fixedProtocol && window.invalidReason) {
+              holdSourceRef.current(window.invalidReason);
+              return 0;
+            }
+            if (fixedProtocol && (streamReadyRef.current !== true || (now - metadata.cueAt > 1000 && (!latest || now - latest > 1000)))) {
+              holdSourceRef.current('Live signal stopped during evaluation');
+              return 0;
+            }
+            if (!fixedProtocol && now - metadata.cueAt > 5000 && !window.complete) return 1;
+            return window.complete ? 1 : Math.min(window.progress, 0.999);
+          },
+          isDebugKeyboardEnabled: () => debugKeyboardEnabledRef.current,
+          obstacleCount,
+          startingLives,
           onQteUpdate: (nextState) => {
+            if (sourceHeldRef.current) return;
             const gestures = actionGesturesRef.current;
             const expectedGesture = nextState.expectedAction === 'switch-lane'
               ? gestures?.switchLane
@@ -430,8 +490,7 @@ export default function GameScreen({
               nextState.status === 'recording'
               && previousQteStatusRef.current !== 'recording'
             ) {
-              const points = emgPointsRef.current;
-              recordingStartRef.current = points[points.length - 1]?.time ?? Date.now();
+              recordingStartRef.current = trialMetadataRef.current.get(nextState.encounterId ?? '')?.cueAt ?? Date.now();
             }
 
             if (
@@ -440,11 +499,17 @@ export default function GameScreen({
               && !processedEncountersRef.current.has(nextState.encounterId)
             ) {
               processedEncountersRef.current.add(nextState.encounterId);
-              const startedAt = recordingStartRef.current ?? 0;
-              const inferencePoints = emgPointsRef.current
-                .filter((point) => point.time >= startedAt && typeof point.raw === 'number')
-                .map((point) => ({ time: point.time, raw: point.raw as number }));
-              const prediction = predictWindowRef.current?.(inferencePoints) ?? null;
+              const metadata = trialMetadataRef.current.get(nextState.encounterId);
+              const window = inferenceWindow(emgPointsRef.current, metadata?.cueAt ?? recordingStartRef.current ?? Date.now(), Date.now(), metadata?.latestSampleAt);
+              if (fixedProtocol && (invalidatedRef.current || window.invalidReason || streamReadyRef.current !== true)) {
+                holdSourceRef.current(window.invalidReason ?? 'Live signal stopped during evaluation');
+                return;
+              }
+              if (metadata) metadata.inferenceStartedAt = Date.now();
+              let prediction: GamePrediction | null = null;
+              try { prediction = window.complete ? predictWindowRef.current?.(window.points) ?? null : null; }
+              catch { prediction = null; }
+              if (metadata) metadata.inferenceEndedAt = Date.now();
               predictionsRef.current.set(nextState.encounterId, prediction);
 
               if (prediction && gestures) {
@@ -471,7 +536,12 @@ export default function GameScreen({
             previousQteStatusRef.current = nextState.status;
             setRunnerQteState(displayState);
           },
-          onObstacleResult: ({ correct, encounterId, expectedAction }) => {
+          onObstacleResult: ({ correct, encounterId, expectedAction, trialIndex }) => {
+            if (sourceHeldRef.current) return;
+            const indexed = typeof trialIndex === 'number' && Number.isInteger(trialIndex) && trialIndex > 0;
+            if (indexed
+              ? outcomesRef.current.some(outcome => outcome.trialIndex === trialIndex)
+              : completedEncountersRef.current.has(encounterId)) return;
             setTotalAttempts((current) => current + 1);
             setFeedback({ correct, id: Date.now() });
             if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
@@ -491,8 +561,11 @@ export default function GameScreen({
               : gestures?.jump;
             const prediction = predictionsRef.current.get(encounterId) ?? null;
             if (expectedGesture && !tutorial) {
+              completedEncountersRef.current.add(encounterId);
               outcomesRef.current.push({
-                attemptId: encounterId,
+                ...trialMetadataRef.current.get(encounterId),
+                trialIndex,
+                attemptId: `${runIdRef.current}:${trialIndex ?? outcomesRef.current.length + 1}`,
                 expectedGestureId: expectedGesture.id,
                 expectedGestureName: expectedGesture.name,
                 result: recognitionResult(expectedGesture.id, prediction),
@@ -502,29 +575,12 @@ export default function GameScreen({
             }
           },
           onLivesChange: (nextLives, nextMaxLives) => {
+            livesRef.current = nextLives;
             setLives(nextLives);
             setMaxLives(nextMaxLives);
           },
-          onGameOver: () => {
-            if (tutorial) {
-              setGuideBeat('complete');
-              setHoldReady(true);
-              return;
-            }
-            endRun(false);
-          },
-          onRunComplete: () => {
-            if (tutorial) {
-              setGuideBeat('complete');
-              setHoldReady(true);
-              return;
-            }
-            endRun(true);
-          },
-          onTutorialHold: (beat) => {
-            setGuideBeat(beat);
-            setHoldReady(true);
-          },
+          onGameOver: () => endRun(false),
+          onRunComplete: () => tutorial ? setTutorialComplete(true) : endRun(livesRef.current > 0),
         });
       }
     });
@@ -532,27 +588,53 @@ export default function GameScreen({
     return () => {
       cancelled = true;
       unmountGame();
+      if (tutorial && streamReadyRef.current === false) onExit();
+      if (fixedProtocol && !gameOverStartedRef.current) invalidate(streamReadyRef.current === false ? 'Live signal stopped during evaluation' : 'Evaluation exited before all trials completed');
       debugKeyboardEnabledRef.current = testControls;
       gameModuleRef.current = null;
       if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
     };
-  }, [obstacleCount, runKind, startingLives, testControls]);
+  }, [obstacleCount, startingLives, testControls, readyToLaunch]);
 
+  holdSourceRef.current = (reason) => {
+    if (!launchedRef.current || sourceHeldRef.current || gameOverStartedRef.current) return;
+    openRecoveryPauseRef.current = { startedAt: Math.max(startedAtRef.current ?? Date.now(), Date.now()), reason };
+    heldCalibrationRef.current = recoveryToken;
+    sourceHeldRef.current = true;
+    gameModuleRef.current?.holdForSourceRecovery();
+    setSourceHeld(true);
+  };
+  useEffect(() => subscribeSourceInterruptions?.(reason => holdSourceRef.current(reason)), [subscribeSourceInterruptions]);
+  const previousEpochRef = useRef(sourceEpoch);
   useEffect(() => {
-    if (guideBeat !== 'track') return;
+    if (streamReady === false || previousEpochRef.current !== sourceEpoch) holdSourceRef.current('Source changed');
+    previousEpochRef.current = sourceEpoch;
+  }, [streamReady, sourceEpoch]);
+
+  const watchdogBoundaryRef = useRef(Date.now());
+  useEffect(() => {
+    if (!(fixedProtocol || tutorial)) return;
+    const timer = setInterval(() => {
+      if (!launchedRef.current || sourceHeldRef.current || gameOverStartedRef.current) return;
+      const now = Date.now();
+      const window = inferenceWindow(emgPointsRef.current, watchdogBoundaryRef.current, now);
+      if (window.invalidReason || (now - watchdogBoundaryRef.current > 1000 && (window.latestAt === null || now - window.latestAt > 1000))) {
+        holdSourceRef.current(window.invalidReason ?? 'No fresh live signal');
+      }
+    }, 100);
+    return () => clearInterval(timer);
+  }, [fixedProtocol, tutorial]);
+  useEffect(() => {
+    if (!tutorial || tutorialComplete || tutorialBeat !== 'intro' || tutorialIntroStep !== 'track') return;
     let frame = 0;
     const tick = () => {
       const next = gameModuleRef.current?.closestRecordingZoneScreenPoints() ?? [];
-      setTrackArrowPoints((current) => (
-        current.length === next.length && current.every((point, index) => point.x === next[index].x && point.y === next[index].y)
-          ? current
-          : next
-      ));
+      setTrackArrowPoints(current => current.length === next.length && current.every((point, index) => point.x === next[index].x && point.y === next[index].y) ? current : next);
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [guideBeat]);
+  }, [tutorial, tutorialComplete, tutorialBeat, tutorialIntroStep]);
 
   const visibleQteState = qteState ?? runnerQteState;
   const visibleScore = score ?? runnerScore;
@@ -563,36 +645,33 @@ export default function GameScreen({
     ? `${visibleQteState.trialIndex} / ${visibleQteState.trialCount}`
     : '—';
 
-  const advanceGuide = () => {
-    if (guideBeat === 'complete') {
-      markTutorialDone(tutorialKey);
-      setGuideBeat(null);
-      setRunKind('live');
-      return;
-    }
-    if (guideBeat === 'intro') {
-      setGuideBeat('lives');
-      return;
-    }
-    if (guideBeat === 'lives') {
-      setGuideBeat('track');
-      return;
-    }
-    gameModuleRef.current?.releaseTutorialHold();
-    setGuideBeat(null);
-    setHoldReady(false);
-  };
-
   const finishRun = (obstacleSuccess?: boolean) => {
-    if (runKind !== 'live') return;
+    if (tutorial) return;
+    if (submittedRef.current) return;
+    const complete = !invalidatedRef.current && (fixedProtocol ? outcomesRef.current.length === 20 : typeof obstacleSuccess === 'boolean');
+    const endedAt = Date.now();
+    const sourceRecoveryPauses = [...recoveryPausesRef.current];
+    if (openRecoveryPauseRef.current) sourceRecoveryPauses.push({ ...openRecoveryPauseRef.current, endedAt: Math.max(openRecoveryPauseRef.current.startedAt, endedAt) });
+    const activeDurationMs = Math.max(0, endedAt - (startedAtRef.current ?? endedAt) - sourceRecoveryPauses.reduce((sum, pause) => sum + pause.endedAt - pause.startedAt, 0));
+    const payload = {
+      runKind,
+      runId: runIdRef.current,
+      officialSequence: fixedProtocol && validateOfficialSequence(officialSequence) ? officialSequence : undefined,
+      completionStatus: complete ? 'complete' as const : 'incomplete' as const,
+      invalidationReason: invalidatedRef.current ?? (complete ? null : 'Run exited before completion'),
+      startedAt: startedAtRef.current ?? undefined,
+      endedAt,
+      activeDurationMs,
+      sourceRecoveryPauses,
+      condition: condition!,
+      difficulty: DEFAULT_DIFFICULTY,
+      gameScore: score ?? scoreRef.current,
+      outcomes: [...outcomesRef.current],
+      obstacleSuccess: complete && typeof obstacleSuccess === 'boolean' ? obstacleSuccess : null,
+    };
     if (condition) {
-      const submitted = submitGameRun({
-        condition,
-        difficulty: DEFAULT_DIFFICULTY,
-        gameScore: score ?? scoreRef.current,
-        outcomes: [...outcomesRef.current],
-        obstacleSuccess: typeof obstacleSuccess === 'boolean' ? obstacleSuccess : null,
-      });
+      submittedRef.current = true;
+      const submitted = submitGameRun(payload);
       if (submitted) return;
     }
     if (onSecondary) {
@@ -606,6 +685,28 @@ export default function GameScreen({
   return (
     <div className="fixed inset-0 z-[100] overflow-hidden bg-slate-950 text-white">
       <div ref={containerRef} className="h-full w-full" />
+      {sourceHeld && <section role="alert" aria-label="Game signal recovery" className="fixed inset-0 z-[200] overflow-auto bg-slate-950/95 p-8">
+        <h2>Game held — reconnect, then redo resting setup</h2>
+        <p>Completed trials and the current model are kept. The interrupted cue will restart, not count as a wrong prediction. Do not reload.</p>
+        {recoveryControls}
+        <button type="button" disabled={streamReady !== true || recoveryReady !== true || recoveryToken === heldCalibrationRef.current} onClick={() => {
+          if (streamReadyRef.current !== true || recoveryReady !== true || recoveryToken === heldCalibrationRef.current) return;
+          for (const [id, metadata] of trialMetadataRef.current) {
+            if (!outcomesRef.current.some(outcome => outcome.trialIndex === metadata.trialIndex)) {
+              trialMetadataRef.current.delete(id); processedEncountersRef.current.delete(id); predictionsRef.current.delete(id);
+            }
+          }
+          if (openRecoveryPauseRef.current) {
+            recoveryPausesRef.current.push({ ...openRecoveryPauseRef.current, endedAt: Math.max(openRecoveryPauseRef.current.startedAt, Date.now()) });
+            openRecoveryPauseRef.current = null;
+          }
+          watchdogBoundaryRef.current = Date.now();
+          recordingStartRef.current = null; previousQteStatusRef.current = 'rest';
+          gameModuleRef.current?.resumeAfterSourceRecovery();
+          sourceHeldRef.current = false; setSourceHeld(false);
+        }}>Resume same run</button>
+      </section>}
+      {!readyToLaunch && <p role="alert" className="fixed inset-x-0 top-1/2 z-[120] text-center text-rose-200">Evaluation requires a ready model, active live stream, and valid saved 20-trial sequence.</p>}
       <div className="pointer-events-none fixed inset-0 z-40 bg-[linear-gradient(180deg,rgba(2,6,23,.76)_0%,transparent_25%,transparent_72%,rgba(2,6,23,.62)_100%)]" />
 
       <header className="pointer-events-none fixed inset-x-0 top-0 z-[110] flex items-start justify-between gap-3 p-3 md:p-5">
@@ -624,7 +725,7 @@ export default function GameScreen({
           <div className="rounded-2xl border border-cyan-300/15 bg-slate-950/80 px-3 py-2.5 shadow-2xl backdrop-blur-md md:px-4">
             <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-cyan-300">EMG Gesture</p>
             <p className="text-sm font-semibold text-white">Neural Runner</p>
-            {practice && <p className="mt-1 text-sm font-semibold text-cyan-200">Practice — separate model</p>}
+            {practice && <p className="mt-1 text-sm font-semibold text-cyan-200">{tutorial ? 'Tutorial — unscored · current frozen model · 8 obstacles' : 'Practice — separate model'}</p>}
           </div>
         </div>
 
@@ -639,7 +740,7 @@ export default function GameScreen({
             )}
           </div>
           <div className="hidden rounded-2xl border border-cyan-300/15 bg-slate-950/80 px-4 py-2.5 shadow-2xl backdrop-blur-md sm:block">
-            <p className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-500">Accuracy</p>
+            <p className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-500">Game accuracy</p>
             <p className="mt-0.5 text-base font-semibold tabular-nums text-cyan-100">{totalAttempts ? `${accuracy}%` : '—'}</p>
           </div>
           <div className="hidden rounded-2xl border border-cyan-300/15 bg-slate-950/80 px-4 py-2.5 shadow-2xl backdrop-blur-md sm:block">
@@ -684,32 +785,52 @@ export default function GameScreen({
       )}
 
       <aside className="pointer-events-none fixed right-3 top-24 z-[110] flex max-h-[calc(100vh-7rem)] w-52 flex-col gap-3 overflow-y-auto pb-2 md:right-5 md:top-28 md:w-60">
-        <section className="rounded-2xl border border-cyan-300/15 bg-slate-950/80 p-4 shadow-2xl backdrop-blur-md">
+        <section data-game-guide-target="timer" className="rounded-2xl border border-cyan-300/15 bg-slate-950/80 p-4 shadow-2xl backdrop-blur-md">
           <QteRing state={visibleQteState} />
           <div className="mt-3 border-t border-white/8 pt-3 text-center">
             <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">Target Gesture</p>
             <p className="mt-1 text-lg font-semibold text-white">{targetLabel}</p>
           </div>
         </section>
-        <EmgTrace points={emgPoints} qteState={visibleQteState} />
-        {runKind === 'live' && onSecondary && secondaryLabel && (
+        <EmgTrace points={emgPoints} qteState={visibleQteState} streamActive={fixedProtocol ? streamReady === true && !invalidatedRef.current : undefined} />
+        {onSecondary && secondaryLabel && (
           <button type="button" onClick={() => finishRun()} className="pointer-events-auto self-end rounded-xl border border-white/10 bg-slate-950/80 px-4 py-2 text-xs font-medium text-slate-300 shadow-lg backdrop-blur-md transition hover:bg-white/10 hover:text-white">
             {secondaryLabel}
           </button>
         )}
       </aside>
 
+      {tutorial && (tutorialBeat || tutorialComplete) && <GameGuide
+        centered={tutorialComplete || tutorialBeat !== 'intro'}
+        dock={!tutorialComplete && tutorialBeat === 'intro' && tutorialIntroStep === 'track' ? 'top' : undefined}
+        target={!tutorialComplete && tutorialBeat === 'intro' && tutorialIntroStep !== 'track' ? `[data-game-guide-target="${tutorialIntroStep}"]` : undefined}
+        body={tutorialComplete ? 'Practice complete. Next starts the 20-trial evaluation.'
+          : tutorialBeat === 'intro' ? tutorialIntroStep === 'timer' ? "This timer displays Rest and Recording. Stay ready."
+            : tutorialIntroStep === 'lives' ? 'Lives are tracked here. Missed obstacles cost a life during the evaluation.'
+            : 'When you enter the red portion of the track, perform and hold the gesture.'
+          : tutorialBeat === 'wrist-up' ? 'Wrist up jumps over hurdles. Select Next, then perform the gesture.'
+          : tutorialBeat === 'wrist-down' ? 'Wrist down switches lanes. Select Next, then perform the gesture.'
+          : 'Continue the practice run. Mistakes here do not cost lives.'}
+        onNext={() => {
+          if (tutorialComplete) { onTutorialComplete?.(); return; }
+          if (tutorialBeat === 'intro' && tutorialIntroStep === 'timer') { setTutorialIntroStep('lives'); return; }
+          if (tutorialBeat === 'intro' && tutorialIntroStep === 'lives') { setTutorialIntroStep('track'); return; }
+          tutorialHeldRef.current = false;
+          setTutorialBeat(null);
+          gameModuleRef.current?.releaseTutorialHold();
+        }} />}
+      {tutorial && !tutorialComplete && tutorialBeat === 'intro' && tutorialIntroStep === 'track' && <TrackGuideArrows points={trackArrowPoints} />}
       <button
         type="button"
-        onClick={onExit}
-        className="pointer-events-auto fixed bottom-4 left-4 z-[110] rounded-2xl border border-cyan-300/15 bg-slate-950/80 p-2.5 text-slate-300 shadow-2xl backdrop-blur-md transition hover:bg-white/10 hover:text-white md:left-5"
+        onClick={() => fixedProtocol ? finishRun() : onExit()}
+        className={`pointer-events-auto fixed bottom-4 left-4 ${tutorial ? 'z-[170]' : 'z-[110]'} rounded-2xl border border-cyan-300/15 bg-slate-950/80 p-2.5 text-slate-300 shadow-2xl backdrop-blur-md transition hover:bg-white/10 hover:text-white md:left-5`}
         aria-label={exitLabel}
         title={exitLabel}
       >
         <ArrowLeft className="h-4 w-4" />
       </button>
 
-      {testControls && <div className="pointer-events-auto fixed bottom-4 left-1/2 z-[110] -translate-x-1/2 rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-2 text-xs text-slate-300 backdrop-blur-md">
+      {testControls && !fixedProtocol && <div className="pointer-events-auto fixed bottom-4 left-1/2 z-[110] -translate-x-1/2 rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-2 text-xs text-slate-300 backdrop-blur-md">
         <label className="flex cursor-pointer items-center justify-center gap-2">
           <input
             type="checkbox"
@@ -726,21 +847,6 @@ export default function GameScreen({
           {debugKeyboardEnabled ? 'Arrow keys: jump / switch lanes · not EMG validation' : 'Arrow keys off · gesture recognition unchanged'}
         </p>
       </div>}
-      {guideBeat && (
-        <GameGuide
-          body={TUTORIAL_COPY[guideBeat]}
-          centered={guideBeat === 'complete'}
-          dock={guideBeat === 'track' ? 'top' : undefined}
-          target={guideBeat === 'lives'
-            ? '[data-game-guide-target="lives"]'
-            : guideBeat === 'track'
-              ? undefined
-              : '[data-game-guide-target="timer"]'}
-          nextDisabled={guideBeat !== 'complete' && !holdReady}
-          onNext={advanceGuide}
-        />
-      )}
-      {guideBeat === 'track' && <TrackGuideArrows points={trackArrowPoints} />}
     </div>
   );
 }

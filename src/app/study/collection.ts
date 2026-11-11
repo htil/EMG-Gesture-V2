@@ -14,6 +14,7 @@ export type CollectionEventType =
   | 'capture_completed'
   | 'capture_cancelled'
   | 'capture_error'
+  | 'sample_rejected'
   | 'sample_deleted'
   | 'sample_replaced';
 
@@ -60,6 +61,8 @@ export interface CollectionEvent {
 }
 
 export interface SampleRecord {
+  centerDurationMs?: number;
+  attemptId?: string;
   calibration?: import('./frozenCalibration.mjs').FrozenCalibration | null;
   firstCrossingAt?: number | null;
   sampleId: string;
@@ -85,6 +88,7 @@ export interface SampleRecord {
 }
 
 export interface TrainingRevision {
+  trainingAttemptId?: string;
   revisionId: string;
   sessionId: string;
   participantId: string;
@@ -101,6 +105,7 @@ export interface TrainingRevision {
 }
 
 export interface SessionCheckpoint {
+  condition?: Assignment;
   sessionId: string;
   generation: number;
   round: number;
@@ -114,7 +119,13 @@ export interface SessionCheckpoint {
   updatedAt: number;
 }
 
+export interface ContextEnvelope {
+  sessionId: string; generation: number; round: number; condition: Assignment;
+  context: import('./captureContext').CaptureContextRecord;
+}
+
 export type CollectionItem =
+  | { kind: 'context'; record: ContextEnvelope }
   | { kind: 'meta'; record: CollectionContext }
   | { kind: 'sample'; record: SampleRecord }
   | { kind: 'event'; record: CollectionEvent }
@@ -135,7 +146,7 @@ interface QueuedItem {
 const QUEUE_KEY = 'emg-collection-queue';
 const waiters: Array<() => void> = [];
 let failureCount = 0;
-let alertActive = false;
+const activeAlerts = new Set<string>();
 let retryTimer = 0;
 
 export function collectionId(prefix: string) {
@@ -217,8 +228,9 @@ async function postCollection(participantId: string, items: CollectionItem[]) {
     body: JSON.stringify({ id: participantId, items }),
   });
   const text = await response.text();
-  const payload = text ? JSON.parse(text) as { error?: string } : {};
+  const payload = text ? JSON.parse(text) as { error?: string; ok?: boolean; acceptedCount?: number } : {};
   if (!response.ok) throw new Error(payload.error || 'Study data could not be saved.');
+  if (payload.ok !== true || payload.acceptedCount !== items.length) throw new Error('Study data batch was not completely acknowledged; all records remain queued.');
 }
 
 function releaseWaiters() {
@@ -227,13 +239,18 @@ function releaseWaiters() {
   pending.forEach((resolve) => resolve());
 }
 
-async function postSaveAlert(participantId: string, generation: number, active: boolean) {
+function alertScope(item: CollectionItem) {
+  const r = item.record as { generation?: number; sessionId?: string; round?: number; condition?: Assignment };
+  return { generation: generationOf(item), ...(r.sessionId && r.round && r.condition
+    ? { sessionId: r.sessionId, round: r.round, condition: r.condition } : {}) };
+}
+async function postSaveAlert(participantId: string, scope: ReturnType<typeof alertScope>, active: boolean) {
   await fetch('/api/study/save-alert', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       id: participantId,
-      generation,
+      ...scope,
       active,
       pending: queue.length,
       at: new Date().toISOString(),
@@ -263,10 +280,13 @@ async function flush() {
   }
   flushing = true;
   const participantId = queue[0].participantId;
+  const scope = alertScope(queue[0].item);
+  const scopeKey = JSON.stringify(scope);
+  const alertKey = participantId + ':' + scopeKey;
   let count = 0;
-  while (count < queue.length && queue[count].participantId === participantId) count += 1;
+  while (count < queue.length && queue[count].participantId === participantId
+    && JSON.stringify(alertScope(queue[count].item)) === scopeKey) count += 1;
   const batch = queue.slice(0, count).map((entry) => entry.item);
-  const generation = generationOf(batch[0]);
   try {
     await postCollection(participantId, batch);
     queue.splice(0, count);
@@ -274,10 +294,10 @@ async function flush() {
     failureCount = 0;
     persistQueue();
     notify();
-    if (alertActive) {
-      alertActive = false;
-      void postSaveAlert(participantId, generation, false).catch(() => {
-        alertActive = true;
+    if (activeAlerts.has(alertKey)) {
+      activeAlerts.delete(alertKey);
+      void postSaveAlert(participantId, scope, false).catch(() => {
+        activeAlerts.add(alertKey);
       });
     }
   } catch (error) {
@@ -286,8 +306,8 @@ async function flush() {
     persistQueue();
     notify();
     if (failureCount >= 3) {
-      alertActive = true;
-      void postSaveAlert(participantId, generation, true).catch(() => undefined);
+      activeAlerts.add(alertKey);
+      void postSaveAlert(participantId, scope, true).catch(() => undefined);
     }
     scheduleRetry();
   } finally {
@@ -297,10 +317,20 @@ async function flush() {
   releaseWaiters();
 }
 
-export function whenCollectionSaved() {
+export function whenCollectionSaved(signal?: AbortSignal) {
+  if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('Save wait cancelled.'));
   if (queue.length === 0 && !saveError) return Promise.resolve();
-  return new Promise<void>((resolve) => {
-    waiters.push(resolve);
+  return new Promise<void>((resolve, reject) => {
+    // Cancelling an observer never cancels a send, changes scope, or removes records.
+    const cleanup = () => {
+      signal?.removeEventListener('abort', cancelled);
+      const index = waiters.indexOf(saved);
+      if (index >= 0) waiters.splice(index, 1);
+    };
+    const saved = () => { cleanup(); resolve(); };
+    const cancelled = () => { cleanup(); reject(signal?.reason ?? new Error('Save wait cancelled.')); };
+    waiters.push(saved);
+    signal?.addEventListener('abort', cancelled, { once: true });
     if (!flushing) {
       window.clearTimeout(retryTimer);
       retryTimer = 0;
@@ -311,7 +341,7 @@ export function whenCollectionSaved() {
 
 export function recordCollection(participantId: string, items: CollectionItem[]) {
   if (items.length === 0) return Promise.resolve();
-  queue.push(...items.map((item) => ({ participantId, item })));
+  queue.push(...items.map((item) => ({ participantId, item: structuredClone(item) })));
   saveError = '';
   persistQueue();
   notify();

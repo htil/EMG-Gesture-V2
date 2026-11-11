@@ -16,6 +16,7 @@ export default function ResultsPanel({
   continueLabel,
   saving,
   saveError,
+  datasetLocked = false,
 }: {
   runs: StoredGameRun[];
   currentRun: StoredGameRun | null;
@@ -28,8 +29,9 @@ export default function ResultsPanel({
   continueLabel: string;
   saving: boolean;
   saveError: string;
+  datasetLocked?: boolean;
 }) {
-  const previous = currentRun ? previousComparableRun(runs, currentRun) : null;
+  const previous = currentRun ? previousComparableRun(runs.filter(run=>run.runKind===currentRun.runKind && run.evidenceKind===currentRun.evidenceKind), currentRun) : null;
   const summary = summarizeRecognition(currentRun?.outcomes ?? [], gestures);
   const change = currentRun ? formatScoreChange(currentRun.gameScore, previous ? previous.gameScore : null) : null;
   const difficulty = currentRun?.difficulty || previous?.difficulty || DEFAULT_DIFFICULTY;
@@ -39,6 +41,7 @@ export default function ResultsPanel({
       <div>
         <p className="text-xs uppercase tracking-[0.18em] text-cyan-300/70">Results</p>
         <h2 className="mt-1 text-2xl font-light text-white">This run</h2>
+        {currentRun?.runKind && <p className="mt-2 text-sm text-amber-100">{currentRun.completionStatus === 'incomplete' ? 'Incomplete attempt — not a completed condition result' : currentRun.runKind === 'official' ? 'Official condition result' : currentRun.runKind === 'practice' ? 'Practice — not measured' : 'Replay — not measured; does not replace the official result'}{currentRun.evidenceKind === 'synthetic-test' ? ' · Test/demo data, not genuine measured live EMG' : ''}</p>}
         <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
           The previous score is the last run at the same difficulty{difficulty === DEFAULT_DIFFICULTY ? '' : ` (${difficulty})`}.
         </p>
@@ -47,7 +50,7 @@ export default function ResultsPanel({
       <section aria-label="Results guidance" className="rounded-2xl border border-cyan-300/40 bg-cyan-300/10 p-4 text-sm leading-6 text-slate-200">
         <h3 className="font-medium text-cyan-100">What these results mean</h3>
         <p>Game score describes play, not recognition accuracy. Accuracy tells you how often the model named the requested movement. Unknown means the model did not recognise a gesture and counts as unsuccessful. Recording failures are separate: no usable test recording was available, so they are not scored predictions.</p>
-        <p className="mt-2">Replay game plays again with the same kept samples and trained model; it does not retrain or reset your examples. Review Samples / Retrain lets you inspect or replace examples and then retrain. {continueLabel} {continueLabel === 'Begin collection' ? 'leaves Practice and starts measured collection with a separate dataset and model.' : continueLabel === 'Finish session' ? 'saves this round and ends the session.' : 'saves this round and moves to the next step.'}</p>
+        <p className="mt-2">Replay game plays again with the same kept samples and trained model; it does not retrain or reset your examples. {datasetLocked ? 'Review Samples is read-only. Official examples and the model remain locked; replay never replaces the official result.' : 'Review Samples / Retrain lets you inspect or replace examples and then retrain.'} {continueLabel} {continueLabel === 'Begin collection' ? 'leaves Practice and starts measured collection with a separate dataset and model.' : continueLabel === 'Finish session' ? 'saves this round and ends the session.' : 'saves this round and moves to the next step.'}</p>
       </section>
 
       <div className="grid gap-3 sm:grid-cols-3">
@@ -118,7 +121,7 @@ export default function ResultsPanel({
           Replay game
         </button>
         <button type="button" onClick={onReview} className="rounded-xl border border-white/10 px-4 py-2.5 text-xs text-slate-100">
-          Review Samples / Retrain
+          {datasetLocked ? 'Review Samples' : 'Review Samples / Retrain'}
         </button>
         <button
           type="button"
@@ -136,7 +139,7 @@ export default function ResultsPanel({
       {!continueEnabled && (
         <p className="text-xs text-amber-100">Continue stays closed until every gesture has at least the minimum number of examples again.</p>
       )}
-      <p className="text-xs leading-5 text-slate-500">When retries and retraining are allowed during the measured study is still open.</p>
+      <p className="text-xs leading-5 text-slate-500">{datasetLocked ? 'The official dataset and model cannot be changed after Train. Only the first official run counts; replay is separate.' : 'Practice may be repeated with its own separate examples and model.'}</p>
       <DismissibleNotice message={saveError} summary="Round not saved" resetKey={saving} />
     </section>
   );

@@ -1,133 +1,71 @@
+# Combined pre-pilot integration — engineering verification candidate
 
-# EMG Gesture V2
+Current branch: `pranay/flow-based-ui`. This history-preserving merge includes
+the reviewed integration commit `9992311` and Pranay's previous tip `24d9537`.
+The application sources match the reviewed candidate; destination-only history,
+documents, tests and tracked records are retained without modification.
+Read **[PILOT-INTEGRATION.md](PILOT-INTEGRATION.md)** for teammate provenance,
+intentional conflict resolutions, safe Windows launch instructions and remaining
+readiness gates. The original `pre-pilot-20261111` rollback is preserved.
 
-See **[Study integration notes](docs/STUDY_INTEGRATION.md)** for the current merged changes, retained game behavior, verification results and remaining study checks.
+This candidate combines the safe ID-entry handling fix with John's recording-zone
+visual/tutorial improvements while retaining the existing study flow and recovery.
+It is **not participant-ready without actual hardware and persistence acceptance**.
+A permanently rejected queued save is retained and reported, not bypassed.
 
-## Current laptop review instructions
+---
 
-Start with **[LAPTOP_START.md](LAPTOP_START.md)**. Use `npm run review:practice` to generate fresh disposable IDs without copying participant data. All IDs now default to real input; Mock must be selected explicitly for test-mode review. The older workflow notes and seeded-ID examples below are not the current laptop review recipe.
+## Historical transfer notes — not the current branch/clone instructions
 
-EMG Gesture V2 is a biosignal capture study interface for comparing threshold-triggered and participant button-triggered recording with either mock data or a live OpenBCI Ganglion signal.
+The material below describes an earlier WIP transfer. Its branch names, commands
+and old test totals are archival; use the current integration guide above.
 
-## Study flow
+# WIP capture-state transfer — NOT pilot-ready
 
-Participants receive an ID and enter it on the site. The ID is looked up in `data/participants.csv` and assigned to either the button version or the threshold version. The session itself does not say which version is running.
+This is an urgent **source-only WIP snapshot**, not a validated replacement release.
 
-Each round is the same path:
+## Checkpoints and validation
 
-1. `Capture`: record the required examples of each gesture with the assigned version.
-2. `Review`: inspect those waveforms, delete an example if needed, and train once the set is complete.
-3. `Play`: John's runner from the gamification branch. Arrow keys jump and switch lanes. Testing stays closed until that condition's model is ready.
-4. `Results`: see the game score against the previous run at the same difficulty, plus recognition accuracy. Then continue to the next round.
+- Local completed-work checkpoint: `8a94ac5209ae79f349bc24a89af9ff90ca5980ce` on `wip/capture-state-local-20261106`.
+- Earlier software-validated local baseline: `448ea2af5b7efd3c2bd6bbd0477d722ddb7c6461`. Subsequent real-Ganglion Button testing exposed capture cancellations, so that baseline is NOT a hardware-readiness guarantee. It is not an ancestor of this source-only branch.
+- The narrow repair passed its focused regressions and typecheck. The latest full suite had **449 passes / 1 failure** in the legacy P0 round-trip test. The failure involved its immediate disabled-Capture invocation and old expected context count. Test-only investigation was interrupted; it is NOT claimed resolved.
+- Final repaired production-browser Button/Automatic journeys, final export/restart acceptance, native Windows/Ganglion acceptance and repaired package acceptance remain outstanding. No final acceptance is claimed even if the app builds.
+- This transfer removes the hardcoded first-run admin PIN and requires a local environment variable instead. This transfer-only bootstrap change is not covered by the earlier full acceptance results.
 
-After Results, the round loops back to Capture until the experiment's repetition count is finished. Full waveforms for each finished round are written to `data/sessions/`. The play step uses the game merged from the `gamification` branch. That game does not report a score yet. When it does, it should call `submitGameRun` with the score and each gesture attempt.
+## What this preserves
 
-The paired lab canvas, with both trigger methods visible, remains at `/lab`.
+The repair covers ordered raw/React archive ownership, bounded rolling unanchored Button history, and ACK-gated cue replacement/recovery. Genuine gaps/backwards timestamps, Automatic timeout, hard limits, persistence failures and spent-ID safeguards remain intentional. The exact two-second training center, up to five seconds before/after, twenty official trials, and existing Practice/game order remain unchanged. No Practice redesign, twelve-trial reduction or unrelated game merge is included.
 
-## Run a blinded session
+The snapshot deliberately has no participant records, raw recordings, fitted participant models, test datasets, tests/fixtures, exports, logs, dependencies, build output, environment files, SSH material or credential files. `game/models` contains original visual game assets, NOT fitted EMG models. The inherited local Git history contained data paths, so this branch is an **orphan source snapshot** rather than a push of that history. Do not merge it wholesale into main.
 
-From the project root:
+## Other Windows laptop: clone and run for engineering verification only
 
-```bash
-npm install
-npm run dev
+Use native Node.js 22 x64 and Git. Open PowerShell. Stop on any failed command; do not overwrite an existing clone or point this WIP at existing study records.
+
+```powershell
+Set-Location $env:USERPROFILE
+git clone --single-branch --branch wip/capture-state-transfer-20261106 https://github.com/htil/EMG-Gesture-V2.git EMG-Capture-WIP-20261106
+if ($LASTEXITCODE -ne 0) { throw 'Clone failed' }
+Set-Location 'EMG-Capture-WIP-20261106'
+git rev-parse HEAD
+
+$pin = Read-Host 'Choose a NEW researcher PIN for this fresh local store' -AsSecureString
+$env:EMG_ADMIN_PIN = [System.Net.NetworkCredential]::new('', $pin).Password
+npm.cmd ci --include=dev --include=optional
+if ($LASTEXITCODE -ne 0) { throw 'Install failed' }
+npm.cmd run typecheck
+if ($LASTEXITCODE -ne 0) { throw 'Typecheck failed' }
+npm.cmd run build
+if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+npm.cmd run pilot -- --production --data-dir "$env:USERPROFILE\EMG-Capture-WIP-Records-20261106" --port 5220
 ```
 
-Open the local Vite URL.
+Open `http://127.0.0.1:5220/`; researcher setup is `/admin`. Keep the terminal open. Use only fresh rehearsal IDs and explicitly verify actual Ganglion versus Mock. No original participant IDs or recordings were transferred. The admin PIN is entered locally, not stored in Git; the local record store retains its settings. On restart select the same record directory. Do not paste credentials into chat.
 
-- Participants use `/` and enter the ID they were given.
-- Organizers use `/admin`. The default pin is `emg-admin` (`data/settings.json`).
-- The admin desk creates experiments, sets how many times the three-step loop repeats, generates IDs, and assigns each ID to button or threshold.
-- Do not show `data/participants.csv` to participants. That file is the assignment list.
+This source-only branch omits automated tests and review/demo launchers to comply with the no-test-datasets transfer requirement; `npm test` is not provided here. Regression sources and detailed evidence remain in the isolated original workspace/local checkpoint, not published as study data.
 
-Sample IDs for the seeded experiment are `K7M2QP`, `H4N8LR`, `P3W6TX`, and `Q9C2VD`. Their assignments are visible only in the admin desk.
+## Security and readiness
 
-## Run the app
+Known dependency advisories remain unresolved, including a Vite preview-server issue. Functional checks are not security clearance. Keep production bound to loopback, no tunnels or LAN exposure, no unrelated browsing/dev servers during a bounded rehearsal, restrict/back up records and stop afterward. Do not use this WIP for participant collection based on this transfer alone.
 
-From the project root:
-
-```bash
-npm install
-npm run dev
-```
-
-Vite will print a local URL, usually:
-
-```bash
-http://127.0.0.1:5173/
-```
-
-Open that URL in your browser.
-
-## Modes
-
-The app supports two signal source modes:
-
-- `Mock`: generated EMG-like signal for UI and recording-flow testing
-- `Connect Ganglion`: live OpenBCI Ganglion signal through browser BLE
-
-## How to use Mock mode
-
-1. Run:
-
-```bash
-npm run dev
-```
-
-2. Open the local Vite URL
-3. Leave the source toggle on `Mock`
-4. The graph will animate with generated signal data
-5. You can test threshold-triggered recording behavior without hardware
-
-## How to use Live Ganglion mode
-
-1. Run:
-
-```bash
-npm run dev
-```
-
-2. Open the local Vite URL in **Chrome or Edge**
-3. Click `Connect Ganglion`
-4. Choose the Ganglion from the browser Bluetooth picker
-5. The live signal should begin streaming into the chart
-
-Notes:
-
-- Web Bluetooth works best from `localhost` / `127.0.0.1`
-- Use Chrome or Edge, not Firefox
-- Make sure the Ganglion is not already connected to another app
-
-## Useful commands
-
-Start dev server:
-
-```bash
-npm run dev
-```
-
-Build production bundle:
-
-```bash
-npm run build
-```
-
-## Backend
-
-There is a `backend/` folder in the repo, but the current frontend live signal path uses direct browser BLE for the Ganglion. You do not need the backend running for the current UI workflow.
-
-  ## TODO
-
-  - [ ] Fixed-length recording flow: use threshold crossing only to trigger the start of capture, then record for a set duration so every sample has the same time window.
-  - [ ] Add a visible recording progress indicator, such as a loading bar or circular timer, while a fixed-length sample is being captured.
-  - [ ] Save richer sample metadata with each recording, including gesture name, timestamp, threshold used, duration, and peak signal value.
-  - [ ] Add a short cooldown between recordings so one long contraction does not accidentally create multiple samples.
-  - [ ] Improve sample quality rules so captures can be labeled more accurately as good, weak, noisy, or too short.
-  - [ ] Add a calibration flow for rest baseline and threshold suggestion before recording starts.
-  - [ ] Let the user clear all samples for the current gesture and restart collection quickly.
-  - [ ] Export recorded samples for training, ideally as JSON or CSV.
-  - [ ] Persist collected samples locally so refreshes do not wipe out a session.
-  - [ ] Add a lightweight session summary showing how many usable samples exist per gesture.
-  - [ ] Make the live status panel more explicit about source, connection state, and whether capture is idle, armed, or recording.
-  - [ ] Tune the UI around one-channel EMG collection so the workflow feels intentional rather than generic.
-  
+Existing validated Windows folders, their native dependencies/builds, and all original records are unchanged. No merge to main is authorized or performed.

@@ -197,7 +197,15 @@ function parseSamples(
   lastSampleTimestamp: number,
 ): GanglionSample[] {
   rawDataPacketToSample.rawDataPacket = Buffer.from(bytes);
-  const parsedSamples = utilities.parseGanglion(rawDataPacketToSample);
+const parsedSamples = utilities.parseGanglion(rawDataPacketToSample);
+
+if (!Array.isArray(parsedSamples)) {
+  console.debug('[GANGLION NON-SAMPLE PACKET]', {
+    packetId: bytes[0],
+    resultType: parsedSamples === null ? 'null' : typeof parsedSamples,
+  });
+  return [];
+}
   const receivedAt = Date.now();
   const firstFallbackTimestamp = Math.max(
     receivedAt - Math.max(0, parsedSamples.length - 1) * GANGLION_SAMPLE_INTERVAL_MS,

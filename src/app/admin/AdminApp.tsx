@@ -51,7 +51,49 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+import { isPilotProtocol } from '../study/api';
+
 const inputClass = 'w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-200/40';
+
+function recoverySummary(participant: Participant, alert?: SaveAlert) {
+  if (alert) return `Save warning: ${alert.pending} pending`;
+  const history = participant.roundHistory;
+  if (history) {
+    if ([...history.visits, ...history.checkpoints, ...history.finalizations, ...history.advances].some(entry => !entry.record)) return 'History evidence unavailable';
+    if (history.finalizations.some(entry => entry.record?.committed === false)) return 'Finalization journal pending';
+    if (history.advances.some(entry => entry.record?.committed === false)) return 'Round advance journal pending';
+  }
+  if (participant.status === 'completed') return participant.repeatRoundsVersion === 1
+    ? participant.canStartNextRound ? 'Submitted; next round available' : 'Submitted; next round unavailable'
+    : 'Completed';
+  const checkpoint = history?.checkpoints.find(entry => entry.record?.round === participant.currentRound && entry.record.generation === history.generation)?.record;
+  return checkpoint ? `Current checkpoint: ${checkpoint.stage}` : participant.status === 'assigned' ? 'Not started' : 'No recovery status reported';
+}
+
+function ParticipantHistory({ participant }: { participant: Participant }) {
+  const history = participant.roundHistory;
+  const submitted = new Set(history?.finalizations.filter(entry => entry.record?.committed).map(entry => {
+    const request = entry.record!.payload.request;
+    return JSON.stringify([request.generation, request.round, request.sessionId]);
+  }));
+  return <details aria-label={`Round history for ${participant.id}`} className="mt-2 text-xs">
+    <summary className="cursor-pointer text-amber-100">Round history</summary>
+    {history ? <div className="mt-2 max-h-80 space-y-2 overflow-y-auto pr-2">
+      <p>Generation {history.generation}{participant.sessionId ? ` · Current session ${participant.sessionId}` : ''}</p>
+      <p className="font-medium">Visits</p>
+      {history.visits.length === 0 && <p>No saved visits yet.</p>}
+      {history.visits.map(entry => <p key={entry.path}>{entry.record
+        ? <>Round {entry.record.visit} · {submitted.has(JSON.stringify([entry.record.generation, entry.record.visit, entry.record.sessionId])) ? 'Submitted' : entry.record.visit === participant.currentRound && participant.status === 'in_progress' ? 'Active' : 'Recorded'} · session {entry.record.sessionId ?? 'not bound'} · {entry.path}</>
+        : <>Unavailable: {entry.path}</>}</p>)}
+      <p className="font-medium">Checkpoints</p>
+      {history.checkpoints.map(entry => <p key={entry.path}>{entry.record ? <>Round {entry.record.round} · {entry.record.stage} · {entry.path}</> : <>Unavailable: {entry.path}</>}</p>)}
+      <p className="font-medium">Submission receipts</p>
+      {history.finalizations.map(entry => <p key={entry.path}>{entry.record ? <>{entry.record.committed ? 'Committed' : 'Pending'} · {entry.path}</> : <>Unavailable: {entry.path}</>}</p>)}
+      <p className="font-medium">Round advances</p>
+      {history.advances.map(entry => <p key={entry.path}>{entry.record ? <>{entry.record.committed ? 'Committed' : 'Pending'} · {entry.path}</> : <>Unavailable: {entry.path}</>}</p>)}
+    </div> : <p className="mt-2">History not provided by the server.</p>}
+  </details>;
+}
 
 export default function AdminApp() {
   const [pin, setPin] = useState(loadAdminPin);
@@ -66,12 +108,13 @@ export default function AdminApp() {
   const [notice, setNotice] = useState('');
   const [draftName, setDraftName] = useState('');
   const [draftNotes, setDraftNotes] = useState('');
-  const [draftRepetitions, setDraftRepetitions] = useState(3);
-  const [draftMin, setDraftMin] = useState(3);
-  const [draftMax, setDraftMax] = useState(3);
+  const [draftRepetitions, setDraftRepetitions] = useState(1);
+  const [draftMin, setDraftMin] = useState(8);
+  const [draftMax, setDraftMax] = useState(8);
   const [draftObstacleCount, setDraftObstacleCount] = useState(DEFAULT_OBSTACLE_COUNT);
   const [draftLives, setDraftLives] = useState(DEFAULT_STARTING_LIVES);
   const [newName, setNewName] = useState('');
+  const [groupCode, setGroupCode] = useState('');
   const [generateCount, setGenerateCount] = useState(8);
   const [isTestParticipant, setIsTestParticipant] = useState(false);
   const [assignment, setAssignment] = useState<'balanced' | Assignment>('balanced');
@@ -252,9 +295,10 @@ export default function AdminApp() {
               void run(async () => {
                 const created = await createExperiment(pin, {
                   name: newName,
-                  repetitions: 3,
-                  capturesMin: 3,
-                  capturesMax: 3,
+                  protocolVersion: 'between-subject-v2',
+                  repetitions: 1,
+                  capturesMin: 8,
+                  capturesMax: 8,
                   obstacleCount: DEFAULT_OBSTACLE_COUNT,
                   startingLives: DEFAULT_STARTING_LIVES,
                   notes: '',
@@ -311,17 +355,17 @@ export default function AdminApp() {
                 <Field label="Name">
                   <input value={draftName} onChange={(event) => setDraftName(event.target.value)} className={inputClass} />
                 </Field>
-                <Field label="Loop count (n)">
-                  <input type="number" min={1} max={30} value={draftRepetitions} onChange={(event) => setDraftRepetitions(Number(event.target.value))} className={inputClass} />
+                <Field label={(selected.protocolVersion === 'between-subject-v2' || selected.protocolVersion === 'between-subject-v1') ? 'Conditions per participant' : selected.protocolVersion === 'within-subject-v1' ? 'Historical visits' : 'Legacy loop count (n)'}>
+                  <input disabled={isPilotProtocol(selected.protocolVersion)} type="number" min={1} max={30} value={draftRepetitions} onChange={(event) => setDraftRepetitions(Number(event.target.value))} className={inputClass} />
                 </Field>
-                <Field label="Minimum samples per gesture">
-                  <input type="number" min={1} max={20} value={draftMin} onChange={(event) => setDraftMin(Number(event.target.value))} className={inputClass} />
+                <Field label={isPilotProtocol(selected.protocolVersion) ? 'Exact retained samples per gesture' : 'Minimum samples per gesture'}>
+                  <input type="number" min={1} max={20} value={draftMin} onChange={(event) => { setDraftMin(Number(event.target.value)); if (isPilotProtocol(selected.protocolVersion)) setDraftMax(Number(event.target.value)); }} className={inputClass} />
                 </Field>
                 <Field label="Maximum samples per gesture">
-                  <input type="number" min={1} max={20} value={draftMax} onChange={(event) => setDraftMax(Number(event.target.value))} className={inputClass} />
+                  <input disabled={isPilotProtocol(selected.protocolVersion)} type="number" min={1} max={20} value={draftMax} onChange={(event) => setDraftMax(Number(event.target.value))} className={inputClass} />
                 </Field>
                 <Field label="Obstacles per run">
-                  <input type="number" min={1} max={MAX_OBSTACLE_COUNT} value={draftObstacleCount} onChange={(event) => setDraftObstacleCount(Number(event.target.value))} className={inputClass} />
+                  <input disabled={isPilotProtocol(selected.protocolVersion)} type="number" min={1} max={MAX_OBSTACLE_COUNT} value={draftObstacleCount} onChange={(event) => setDraftObstacleCount(Number(event.target.value))} className={inputClass} />
                 </Field>
                 <Field label="Lives">
                   <input type="number" min={1} max={MAX_STARTING_LIVES} value={draftLives} onChange={(event) => setDraftLives(Number(event.target.value))} className={inputClass} />
@@ -343,9 +387,9 @@ export default function AdminApp() {
                 </Field>
               </div>
               <p className="mt-3 text-xs leading-5 text-slate-500">
-                A gesture can be finished once it reaches the minimum. Capture stops at the maximum. The round record stores how many samples were actually kept.
-                Each run faces the obstacle count above and starts with that many lives. Clearing the last obstacle with a life remaining opens the results screen.
+                {(selected.protocolVersion === 'between-subject-v2' || selected.protocolVersion === 'between-subject-v1') ? 'Between-subject: each participant completes one assigned method. Choose the exact retained quota before generating IDs; pilot small quotas to assess accuracy versus elapsed time. Settings freeze per participant. Brief guided Practice keeps three examples per gesture and review, without an extra training/game loop. The first measured model and balanced20 official run remain protected. Five minutes is a timing target, not a verified duration.' : selected.protocolVersion === 'within-subject-v1' ? 'Within-person AB/BA: same participant ID on both visits, independent condition datasets/models, exact quota (pilot default 8), Practice 3. Settings freeze when IDs are generated; edits apply to newly generated IDs only. Official Train locks examples/model; one balanced20 official run per condition, same saved sequence on both visits.' : 'Historical fixed-condition protocol. Its records are not converted to AB/BA. The minimum/maximum limits remain part of its original contract.'}
               </p>
+              {selected.protocolVersion === 'between-subject-v2' && <p className="mt-3 text-xs leading-5 text-cyan-100">Pre/Post v2: external Pre before activity, external Post after Submit; no app survey checkpoint or response verification. Rest calibration is mandatory for every participant. After calibration, a researcher PIN can log Skip gesture practice before the first measured sample. Completed/skipped Practice never transfers examples or models; measured quota and the locked official model/20-trial activity remain required. Historical v1 records keep their original survey gate.</p>}
               <Field label="Notes">
                 <textarea value={draftNotes} onChange={(event) => setDraftNotes(event.target.value)} rows={2} className={inputClass} />
               </Field>
@@ -388,7 +432,7 @@ export default function AdminApp() {
               <div className="flex flex-wrap items-end justify-between gap-3">
                 <div>
                   <h2 className="text-sm font-medium text-white">Hand out IDs</h2>
-                  <p className="mt-1 text-xs text-slate-500">Balanced assignment splits the batch as evenly as possible, then shuffles the order.</p>
+                  <p className="mt-1 text-xs text-slate-500">{(selected.protocolVersion === 'between-subject-v2' || selected.protocolVersion === 'between-subject-v1') ? 'Balanced assignment splits participants between Button and Automatic. Each ID has its own dataset/model and completes one condition only.' : selected.protocolVersion === 'within-subject-v1' ? 'Balanced order assigns Button then Automatic / Automatic then Button across stable people. Keep each ID for both visits.' : 'Legacy balanced assignment splits fixed conditions across IDs.'}</p>
                 </div>
                 <button
                   type="button"
@@ -399,6 +443,9 @@ export default function AdminApp() {
                 </button>
               </div>
               <div className="mt-4 flex flex-wrap items-end gap-3">
+                <Field label="Group code (optional; case preserved)">
+                  <input value={groupCode} onChange={event=>setGroupCode(event.target.value)} className={inputClass} autoCapitalize="none" />
+                </Field>
                 <Field label="How many">
                   <input type="number" min={1} max={200} value={generateCount} onChange={(event) => setGenerateCount(Number(event.target.value))} className={`${inputClass} w-28`} />
                 </Field>
@@ -409,8 +456,8 @@ export default function AdminApp() {
                       value={assignment}
                       options={[
                         { value: 'balanced', label: 'Balanced' },
-                        { value: 'button', label: 'Button only' },
-                        { value: 'threshold', label: 'Threshold only' },
+                        { value: 'button', label: selected.protocolVersion === 'within-subject-v1' ? 'Button then Automatic' : 'Button only' },
+                        { value: 'threshold', label: selected.protocolVersion === 'within-subject-v1' ? 'Automatic then Button' : 'Threshold only' },
                       ]}
                       onChange={(value) => setAssignment(value as typeof assignment)}
                       triggerClassName="rounded-xl py-2.5 text-sm"
@@ -421,7 +468,7 @@ export default function AdminApp() {
                   type="button"
                   disabled={busy}
                   onClick={() => void run(async () => {
-                    const created = await generateParticipants(pin, { experimentId: selected.id, count: generateCount, assignment, isTestParticipant });
+                    const created = await generateParticipants(pin, { experimentId: selected.id, count: generateCount, assignment, isTestParticipant, groupCode });
                     await refreshExperiments(pin, selected.id);
                     await refreshParticipants(pin, selected.id);
                     setNotice(`Created ${created.participants.length} ${isTestParticipant ? 'test/demo' : 'study'} IDs.`);
@@ -449,7 +496,7 @@ export default function AdminApp() {
               )}
 
               <div className="mt-5 overflow-x-auto">
-                <table className="w-full min-w-[720px] text-left text-sm">
+                <table className="w-full min-w-[960px] text-left text-sm">
                   <thead className="text-[10px] uppercase tracking-[0.16em] text-slate-500">
                     <tr>
                       <th className="pb-3 font-medium">ID</th>
@@ -457,22 +504,23 @@ export default function AdminApp() {
                       <th className="pb-3 font-medium">Assignment</th>
                       <th className="pb-3 font-medium">Status</th>
                       <th className="pb-3 font-medium">Round</th>
+                      <th className="pb-3 font-medium">Recovery status</th>
                       <th className="pb-3 font-medium">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {participants.map((participant) => (
                       <tr key={participant.id} className="border-t border-white/8">
-                        <td className="py-3 font-mono tracking-wider text-white">{participant.id}</td>
+                        <td className="py-3 font-mono tracking-wider text-white">{participant.id}{participant.groupCode && <span className="block text-xs text-slate-400">{participant.groupCode} / {participant.memberCode}</span>}</td>
                         <td className="py-3"><span className={`inline-block rounded-lg border px-2 py-1 text-xs ${participant.isTestParticipant === true ? 'border-amber-200/30 bg-amber-200/10 text-amber-100' : 'border-cyan-200/20 bg-cyan-200/5 text-cyan-100'}`}>{participant.isTestParticipant === true ? 'Test / demo' : 'Study / Ganglion'}</span></td>
                         <td className="py-3">
                           <div className={`w-36 ${participant.status !== 'assigned' || busy ? 'pointer-events-none opacity-60' : ''}`}>
                             <DarkSelect
                               label={`Assignment for ${participant.id}`}
-                              value={participant.condition}
+                              value={participant.conditionOrder?.[0] ?? participant.condition}
                               options={[
-                                { value: 'button', label: 'Button' },
-                                { value: 'threshold', label: 'Threshold' },
+                                { value: 'button', label: participant.protocolVersion === 'within-subject-v1' ? 'Button then Automatic' : 'Button' },
+                                { value: 'threshold', label: participant.protocolVersion === 'within-subject-v1' ? 'Automatic then Button' : 'Threshold' },
                               ]}
                               onChange={(value) => void run(async () => {
                                 await updateParticipant(pin, participant.id, value as Assignment);
@@ -484,15 +532,20 @@ export default function AdminApp() {
                           </div>
                         </td>
                         <td className="py-3 text-slate-300">{STATUS_LABEL[participant.status]}</td>
-                        <td className="py-3 tabular-nums text-slate-300">
-                          {participant.status === 'completed' ? `${selected.repetitions} / ${selected.repetitions}` : `${participant.currentRound} / ${selected.repetitions}`}
+                        <td aria-label={`Round progress for ${participant.id}`} className="py-3 tabular-nums text-slate-300">
+                          <p>Current round {participant.currentRound}</p>
+                          <p>{participant.roundsCompleted} completed</p>
+                          <ParticipantHistory participant={participant} />
+                        </td>
+                        <td aria-label={`Recovery status for ${participant.id}`} className="py-3 text-xs text-slate-300">
+                          {recoverySummary(participant, saveAlerts.find(alert => alert.participantId === participant.id))}
                         </td>
                         <td className="py-3">
                           <div className="flex gap-1">
                             <button type="button" aria-label={`Copy ${participant.id}`} onClick={() => void copyText(participant.id)} className="rounded-lg p-2 text-slate-400 hover:bg-white/5 hover:text-white">
                               <ClipboardCopy className="h-3.5 w-3.5" />
                             </button>
-                            <button type="button" aria-label={`Reset ${participant.id}`} onClick={() => void run(async () => {
+                            <button type="button" disabled={isPilotProtocol(participant.protocolVersion) && !participant.isTestParticipant} aria-label={`Reset ${participant.id}`} onClick={() => void run(async () => {
                               await resetParticipant(pin, participant.id);
                               await refreshParticipants(pin, selected.id);
                               await refreshExperiments(pin, selected.id);
@@ -513,6 +566,7 @@ export default function AdminApp() {
                   </tbody>
                 </table>
                 {participants.length === 0 && <p className="py-8 text-sm text-slate-500">Generate IDs to give to participants.</p>}
+                <p className="mt-3 text-xs text-slate-500">Recovery status reflects the last server response. Participant-browser pending saves are not visible here.</p>
               </div>
             </section>
 

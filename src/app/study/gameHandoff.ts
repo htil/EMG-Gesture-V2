@@ -5,6 +5,15 @@ export const DEFAULT_DIFFICULTY = 'standard';
 export type GestureAttemptResult = 'correct' | 'wrong' | 'unknown' | 'recording_failure';
 
 export interface GestureTestOutcome {
+  trialIndex?: number; // One-based trial ordinal from the game producer.
+  cueAt?: number;
+  recordingStartedAt?: number | null;
+  recordingEndedAt?: number | null;
+  sampleCount?: number;
+  startedAt?: number | null;
+  endedAt?: number | null;
+  inferenceStartedAt?: number | null;
+  inferenceEndedAt?: number | null;
   attemptId: string;
   expectedGestureId: string;
   expectedGestureName: string;
@@ -14,6 +23,18 @@ export interface GestureTestOutcome {
 }
 
 export interface GameRunHandoff {
+  runId?: string;
+  completionStatus?: 'complete' | 'incomplete';
+  invalidationReason?: string | null;
+  startedAt?: number;
+  endedAt?: number;
+  activeDurationMs?: number;
+  sourceRecoveryPauses?: Array<{ startedAt: number; endedAt: number; reason: string }>;
+  runKind?: 'official' | 'replay' | 'practice';
+  officialSequence?: Array<'wrist-up' | 'wrist-down'>;
+  signalSource?: 'mock' | 'live';
+  streamReady?: boolean;
+  evidenceKind?: 'synthetic-test' | 'measured-live' | 'practice';
   condition: 'button' | 'threshold';
   difficulty: string;
   gameScore: number;

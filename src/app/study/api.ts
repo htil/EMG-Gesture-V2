@@ -3,6 +3,18 @@ import type { StoredGameRun } from './gameHandoff';
 export type ParticipantStatus = 'assigned' | 'in_progress' | 'completed';
 export type ExperimentStatus = 'active' | 'closed';
 export type Assignment = 'button' | 'threshold';
+export function isPilotProtocol(value: unknown): boolean {
+  return value === 'between-subject-v2' || value === 'between-subject-v1' || value === 'within-subject-v1';
+}
+export function requiresCollectionSurvey(value: unknown): boolean {
+  return value === 'between-subject-v1' || value === 'within-subject-v1';
+}
+export function practiceDisposition(session: ClientSession | null | undefined) {
+  const practice = session?.protocolState?.practice;
+  return practice && (practice.status === 'completed' || practice.status === 'skipped')
+    && practice.sessionId === session?.sessionId && practice.generation === session?.generation
+    && practice.round === session?.round && practice.condition === session?.condition ? practice : null;
+}
 export type StudyStage = 'capture' | 'review' | 'game' | 'results' | 'done';
 export type FlowStage = Exclude<StudyStage, 'done'>;
 
@@ -17,7 +29,17 @@ export function clampStudyCount(value: unknown, fallback: number, min: number, m
   return parsed;
 }
 
+export interface ProtocolState {
+  practice?: { status: 'completed' | 'skipped'; at: number; sessionId: string; generation: number; round: number; condition: Assignment };
+  sessionId?: string;
+  trainingStatus?: 'success' | 'failure' | null;
+  generation: number; visit: number; condition: Assignment;
+  survey: { confirmedAt: string; sessionId: string; sampleIds: string[] } | null;
+  lock: { revisionId: string; sessionId: string; sampleIds: string[]; lockedAt: string; settings: unknown } | null;
+}
+
 export interface Experiment {
+  protocolVersion?: string;
   id: string;
   name: string;
   repetitions: number;
@@ -36,7 +58,30 @@ export interface Experiment {
   inProgressCount: number;
 }
 
+export interface HistoryEntry<T> { path: string; record: T | null }
+export interface HistoryJournal {
+  committed: boolean;
+  payload: { request: { generation: number; round?: number; fromRound?: number; sessionId?: string; fromSessionId?: string }; response?: { round?: number; sessionId?: string } };
+}
+export interface ParticipantRoundHistory {
+  generation: number;
+  activeRound: number;
+  status: ParticipantStatus;
+  visits: Array<HistoryEntry<ProtocolState & { completedAt?: string }>>;
+  finalizations: Array<HistoryEntry<HistoryJournal>>;
+  advances: Array<HistoryEntry<HistoryJournal>>;
+  checkpoints: Array<HistoryEntry<Pick<RestoredSession, 'generation' | 'round' | 'sessionId' | 'stage'>>>;
+}
+
 export interface Participant {
+  roundHistory?: ParticipantRoundHistory;
+  repeatRoundsVersion?: 1;
+  canStartNextRound?: boolean;
+  sessionId?: string | null;
+  protocolVersion?: string;
+  conditionOrder?: Assignment[];
+  groupCode?: string | null;
+  memberCode?: string | null;
   id: string;
   isTestParticipant: boolean;
   experimentId: string;
@@ -57,6 +102,9 @@ export interface RoundLog {
 }
 
 export interface StoredTrial {
+  centerDurationMs?: number;
+  attemptId?: string;
+  condition?: Assignment;
   calibration?: import('./frozenCalibration.mjs').FrozenCalibration | null;
   firstCrossingAt?: number | null;
   id: string;
@@ -99,6 +147,7 @@ export interface TrainingRun {
 }
 
 export interface RestoredSession {
+  contexts?: Array<import('./collection').ContextEnvelope & { derivedDisposition: 'retained' | 'deleted' | 'rejected' }>;
   sessionId: string;
   round: number;
   stage: StudyStage;
@@ -121,6 +170,17 @@ export interface SaveAlert {
 }
 
 export interface ClientSession {
+  repeatRoundsVersion?: 1;
+  canStartNextRound?: boolean;
+  finalizationReceipt?: unknown;
+  finalizationReceiptDigest?: string | null;
+  protocolVersion?: string;
+  conditionOrder?: Assignment[];
+  visit?: number;
+  officialSequence?: Array<'wrist-up' | 'wrist-down'>;
+  protocolState?: ProtocolState | null;
+  groupCode?: string | null;
+  memberCode?: string | null;
   participantId: string;
   isTestParticipant: boolean;
   experimentId: string;
@@ -182,6 +242,10 @@ export function loadClientSession(): ClientSession | null {
     if (stage !== 'capture' && stage !== 'review' && stage !== 'game' && stage !== 'results' && stage !== 'done') return null;
     if (unlockedThrough !== 'capture' && unlockedThrough !== 'review' && unlockedThrough !== 'game' && unlockedThrough !== 'results') return null;
     return {
+      repeatRoundsVersion: parsed.repeatRoundsVersion, canStartNextRound: parsed.canStartNextRound,
+      finalizationReceipt: parsed.finalizationReceipt, finalizationReceiptDigest: parsed.finalizationReceiptDigest,
+      protocolVersion: parsed.protocolVersion ?? 'legacy-fixed-v1',
+      conditionOrder: parsed.conditionOrder, visit: parsed.visit, officialSequence: parsed.officialSequence, protocolState: parsed.protocolState ?? null, groupCode: parsed.groupCode, memberCode: parsed.memberCode,
       participantId: String(parsed.participantId ?? ''),
       isTestParticipant: parsed.isTestParticipant === true,
       experimentId: String(parsed.experimentId ?? ''),
@@ -253,15 +317,29 @@ async function request<T>(path: string, init?: RequestInit, pin?: string): Promi
   return payload as T;
 }
 
+export type JoinedSession = Omit<ClientSession, 'stage' | 'trials' | 'manualTrigger' | 'unlockedThrough' | 'pendingReplacements' | 'openCapture' | 'trainingRun' | 'updatedAt' | 'sessionId' | 'runs'> & {
+  sessionId?: string | null;
+  manualTrigger?: boolean;
+  runs?: StoredGameRun[];
+  restored?: RestoredSession | null;
+};
 export function joinStudy(id: string) {
-  return request<Omit<ClientSession, 'stage' | 'trials' | 'manualTrigger' | 'unlockedThrough' | 'pendingReplacements' | 'openCapture' | 'trainingRun' | 'updatedAt'> & {
-    manualTrigger?: boolean;
-    runs?: StoredGameRun[];
-    restored?: RestoredSession | null;
-  }>('/api/study/join', {
+  return request<JoinedSession>('/api/study/join', {
     method: 'POST',
     body: JSON.stringify({ id }),
   });
+}
+
+export interface NextRoundSource {
+  id: string; experimentId: string; generation: number; condition: Assignment;
+  fromRound: number; fromSessionId: string; requestId: string; finalizationReceiptDigest: string;
+}
+export interface NextRoundReceipt {
+  repeatRoundsVersion: 1; participantId: string; experimentId: string; generation: number; condition: Assignment;
+  fromRound: number; fromSessionId: string; round: number; sessionId: string; status: 'in_progress'; requestId: string;
+}
+export function startNextRound(source: NextRoundSource) {
+  return request<NextRoundReceipt>('/api/study/protocol/next-round', { method: 'POST', body: JSON.stringify(source) });
 }
 
 export function saveGameRun(id: string, run: StoredGameRun) {
@@ -271,11 +349,27 @@ export function saveGameRun(id: string, run: StoredGameRun) {
   });
 }
 
-export function saveRound(id: string, round: number, trials: StoredTrial[]) {
-  return request<{ status: ParticipantStatus; round: number; repetitions: number }>('/api/study/progress', {
+export function saveRound(id: string, round: number, trials: StoredTrial[], scope?: Pick<ClientSession, 'generation' | 'condition' | 'sessionId'>) {
+  return request<{ status: ParticipantStatus; round: number; repetitions: number; condition: Assignment }>('/api/study/progress', {
     method: 'POST',
-    body: JSON.stringify({ id, round, trials }),
+    body: JSON.stringify({ id, round, trials, ...scope }),
   });
+}
+
+export function confirmCollectionSurvey(session: ClientSession, pin: string) {
+  return request<ProtocolState>('/api/study/protocol/survey', { method: 'POST', body: JSON.stringify({ id: session.participantId, generation: session.generation, round: session.round, condition: session.condition, sessionId: session.sessionId, confirmed: true }) }, pin);
+}
+
+export function skipGesturePractice(session: ClientSession, pin: string) {
+  if (!pin.trim()) return Promise.reject(new Error('Researcher PIN is required to skip gesture practice.'));
+  return request<ProtocolState>('/api/study/protocol/practice/skip', { method: 'POST', body: JSON.stringify({
+    id: session.participantId, sessionId: session.sessionId, generation: session.generation,
+    round: session.round, condition: session.condition,
+  }) }, pin);
+}
+
+export function lockOfficialDataset(session: ClientSession, revisionId: string) {
+  return request<ProtocolState>('/api/study/protocol/lock', { method: 'POST', body: JSON.stringify({ id: session.participantId, generation: session.generation, round: session.round, condition: session.condition, sessionId: session.sessionId, sampleIds: session.trials.map(t=>t.id), revisionId }) });
 }
 
 export function signInAdmin(pin: string) {
@@ -290,6 +384,7 @@ export function listExperiments(pin: string) {
 }
 
 export function createExperiment(pin: string, input: {
+  protocolVersion?: 'between-subject-v2' | 'between-subject-v1' | 'within-subject-v1' | 'legacy-fixed-v1';
   name: string;
   repetitions: number;
   capturesMin: number;
@@ -332,7 +427,7 @@ export function listParticipants(pin: string, experimentId: string) {
   );
 }
 
-export function generateParticipants(pin: string, input: { experimentId: string; count: number; assignment: 'balanced' | Assignment; isTestParticipant?: boolean }) {
+export function generateParticipants(pin: string, input: { experimentId: string; count: number; assignment: 'balanced' | Assignment; isTestParticipant?: boolean; groupCode?: string }) {
   return request<{ participants: Participant[] }>('/api/study/participants/generate', {
     method: 'POST',
     body: JSON.stringify(input),

@@ -4,7 +4,7 @@ import type { ClientSession } from './api';
 
 export interface PracticeSettings { segmentDurationMs: number; preTriggerWindowMs: number; countdownMs: number; activityThreshold: number }
 export interface PracticeRecord {
-  id: string; attemptId: string; flowVersion: 3; kind: string; participantId: string; experimentId: string;
+  id: string; attemptId: string; flowVersion: 3 | 4; kind: string; participantId: string; experimentId: string;
   sessionId: string; generation: number; condition: 'button' | 'threshold'; round: number;
   signalSource: 'mock' | 'live'; channelIndex: number; createdAt: number; settings: PracticeSettings;
   points: Array<{ time: number; value: number; activityEnvelope?: number }>;
@@ -89,6 +89,7 @@ export class PracticeArchive {
           triggerMode: this.rest.condition,
           captureProcedure: this.rest.condition,
           triggeredAt: sample.triggeredAt, completedAt: sample.recordingEndedAt, preTriggerPointCount: sample.preTriggerPointCount,
+          ...(sample.centerDurationMs !== undefined ? { centerDurationMs: sample.centerDurationMs, captureAttemptId: sample.attemptId } : {}),
           ...(sample.calibration !== undefined ? { calibration: sample.calibration, firstCrossingAt: sample.firstCrossingAt ?? null } : {}) }));
       } else if (item.kind === 'event') {
         const event = item.record;
