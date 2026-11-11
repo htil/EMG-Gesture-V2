@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import {readFinalization,writeFinalization,commitFinalization} from './finalization-journal.mjs';
+import {readAdvance,writeAdvance,commitAdvance} from './round-advance-journal.mjs';
 import { PILOT_PROTOCOL, PREVIOUS_PILOT_PROTOCOL, HISTORICAL_PILOT_PROTOCOL, PILOT_GESTURES, isPilot, pilotRepetitions, conditionOrder, protocolSequence } from './core-protocol.mjs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -249,7 +250,24 @@ function sanitizeStoredRun(run, participant) {
   if (!run || run.condition !== participant.condition || !Number.isFinite(Number(run.gameScore)) || !Array.isArray(run.outcomes)) {
     return null;
   }
+  const hasRecoveryAccounting = run.activeDurationMs !== undefined || run.sourceRecoveryPauses !== undefined;
+  if (hasRecoveryAccounting) {
+    const fail = () => { throw Object.assign(new Error('Invalid source recovery duration accounting.'), { status: 400 }); };
+    if (!Number.isFinite(run.startedAt) || !Number.isFinite(run.endedAt) || run.startedAt < 0 || run.endedAt < run.startedAt
+      || !Number.isFinite(run.activeDurationMs) || run.activeDurationMs < 0 || !Array.isArray(run.sourceRecoveryPauses)) fail();
+    let previousEnd = run.startedAt, pausedMs = 0;
+    for (const pause of run.sourceRecoveryPauses) {
+      if (!pause || !Number.isFinite(pause.startedAt) || !Number.isFinite(pause.endedAt)
+        || pause.startedAt < previousEnd || pause.endedAt < pause.startedAt || pause.endedAt > run.endedAt
+        || typeof pause.reason !== 'string' || !pause.reason.trim()) fail();
+      pausedMs += pause.endedAt - pause.startedAt;
+      previousEnd = pause.endedAt;
+    }
+    if (run.endedAt - run.startedAt - pausedMs !== run.activeDurationMs) fail();
+  }
   return {
+    ...(hasRecoveryAccounting ? { startedAt: run.startedAt, endedAt: run.endedAt, activeDurationMs: run.activeDurationMs,
+      sourceRecoveryPauses: run.sourceRecoveryPauses.map(({ startedAt, endedAt, reason }) => ({ startedAt, endedAt, reason })) } : {}),
     ...(isPilot(participant) ? { runKind: run.runKind, completionStatus: run.completionStatus, runId: run.runId || run.id, invalidationReason: run.invalidationReason ?? null, startedAt: run.startedAt ?? null, endedAt: run.endedAt ?? null, generation: participantGeneration(participant), signalSource: run.signalSource, streamReady: run.streamReady, evidenceKind: isTestParticipant(participant) ? 'synthetic-test' : 'measured-live', officialSequence: run.officialSequence } : {}),
     id: safeToken(run.id, randomId(8, 'RUN-')),
     sessionId: safeToken(run.sessionId, ''),
@@ -318,7 +336,7 @@ function sameGeneration(record, participant) {
 function presentParticipant(participant, repetitions) {
   const currentRound = Number(participant.current_round) || 1;
   const roundsCompleted = participant.status === 'completed'
-    ? Number(repetitions) || 0
+    ? (isPilot(participant) ? currentRound : Number(repetitions) || 0)
     : Math.max(0, currentRound - 1);
   return {
     id: participant.id,
@@ -345,7 +363,7 @@ function shuffle(list) {
   return copy;
 }
 
-export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
+export function createStudyDesk(dataDir, {finalizationFault = () => {}, roundAdvanceFault = () => {}} = {}) {
   const experimentsPath = path.join(dataDir, 'experiments.csv');
   const participantsPath = path.join(dataDir, 'participants.csv');
   const roundsPath = path.join(dataDir, 'rounds.csv');
@@ -385,7 +403,7 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
     fs.writeFileSync(runsFile(participantId), `${JSON.stringify(runs, null, 2)}\n`);
   };
   const participantRoot = (participantId) => path.join(sessionsDir, safeToken(participantId, 'participant'));
-  const checkpointFile = (participantId) => path.join(participantRoot(participantId), 'checkpoint.json');
+  const checkpointFile = (participantId, round = 1, generation = 1, repeat = false) => !repeat || Number(round) === 1 ? path.join(participantRoot(participantId), 'checkpoint.json') : path.join(participantRoot(participantId), 'checkpoints', `${generation}-${round}.json`);
   const alertFile = (participantId) => path.join(participantRoot(participantId), 'save-alert.json');
   const readJson = (filePath) => {
     if (!fs.existsSync(filePath)) return null;
@@ -457,7 +475,7 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
   });
   const buildRestore = (participant) => {
     const round = Number(participant.current_round) || 1;
-    let checkpoint = readJson(checkpointFile(participant.id));
+    let checkpoint = readJson(checkpointFile(participant.id, participant.current_round, participantGeneration(participant), participant.protocol_version===PILOT_PROTOCOL));
     if (checkpoint && !sameGeneration(checkpoint, participant)) return null;
     if (checkpoint && (Number(checkpoint.round) !== round || (isPilot(participant) && checkpoint.condition !== participant.condition))) checkpoint = null;
     const locked = isPilot(participant) ? protocolState(participant).lock : null;
@@ -563,6 +581,7 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
   const readAlert = (participant) => {
     const alert = readJson(alertFile(participant.id));
     if (!alert?.active || !sameGeneration(alert, participant)) return null;
+    if(Number(participant.current_round)>1 && (alert.round!==Number(participant.current_round) || alert.sessionId!==protocolState(participant).sessionId))return null;
     return {
       participantId: participant.id,
       message: String(alert.message || 'Study data is still not saving.'),
@@ -817,7 +836,7 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
     })) conflict('Recognition result contradicts the recorded prediction.');
     if (run.completionStatus==='complete' && (run.streamReady!==true || (run.signalSource!=='live' && !isTestParticipant(participant)))) conflict('Official/replay game requires actively streaming live EMG.');
     if(run.runKind==='official' && run.completionStatus==='complete') {
-      if(!verifyStored && runs.some(r=>r.generation===participantGeneration(participant) && r.condition===participant.condition && r.runKind==='official' && r.completionStatus==='complete')) conflict('One official run per condition; use replay.');
+      if(!verifyStored && runs.some(r=>r.generation===participantGeneration(participant) && r.round===Number(participant.current_round) && r.sessionId===run.sessionId && r.condition===participant.condition && r.runKind==='official' && r.completionStatus==='complete')) conflict('One official run per condition; use replay.');
       if(run.streamReady!==true || (run.signalSource!=='live' && !isTestParticipant(participant))) conflict('Official game requires actively streaming live EMG.');
       const sequence=JSON.parse(participant.official_sequence);
       if(canonicalPractice(run.officialSequence)!==canonicalPractice(sequence) || run.outcomes?.length!==20 || run.outcomes.some((o,i)=>o.trialIndex!==i+1 || o.expectedGestureId!==sequence[i] || !ATTEMPT_RESULTS.has(o.result))) conflict('Official game requires the saved balanced20 sequence and ordered outcomes.');
@@ -889,10 +908,51 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
     }
   };
 
+  const advanceFile = (p, round) => path.join(participantRoot(p.id), `advance-${participantGeneration(p)}-${round}.json`);
+  const fileHash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const sourceFiles = (p, sessionId) => {
+    const walk = dir => fs.existsSync(dir) ? fs.readdirSync(dir,{withFileTypes:true}).flatMap(e=>e.isDirectory()?walk(path.join(dir,e.name)):[path.join(dir,e.name)]).filter(f=>f.endsWith('.json')) : [];
+    return [...walk(collectionDir(sessionsDir,p.id,sessionId)),protocolFile(p),finalizationFile(p),path.join(sessionsDir,`${p.id}-round-${p.current_round}.json`),checkpointFile(p.id,p.current_round,participantGeneration(p),p.protocol_version===PILOT_PROTOCOL)].sort().map(file=>({file:path.relative(dataDir,file),sha256:fileHash(file)}));
+  };
+  const assertSourceFiles = files => { for(const entry of files) {const file=path.join(dataDir,entry.file);if(!fs.existsSync(file) || fileHash(file)!==entry.sha256)conflict('Archived source evidence changed; manual recovery required.');} };
+  const publishAdvance = (file,journal,state) => {
+    const p=journal.payload,index=state.participants.findIndex(x=>x.id===p.before.id);
+    if(index<0 || ![p.before,p.after].some(x=>canonicalPractice(x)===canonicalPractice(state.participants[index])))conflict('Advance participant changed; manual recovery required.');
+    assertSourceFiles(p.sourceFiles);
+    const visitFile=protocolFile(p.after),checkpoint=checkpointFile(p.after.id,p.after.current_round,participantGeneration(p.after),true);
+    // Validate every destination before any materialization.
+    for(const [target,value] of [[visitFile,p.visit],[checkpoint,p.checkpoint]])if(fs.existsSync(target) && canonicalPractice(readJson(target))!==canonicalPractice(value))conflict('Advance target changed; manual recovery required.');
+    if(!fs.existsSync(visitFile))writeJsonAtomic(visitFile,p.visit);
+    roundAdvanceFault('after-target-visit');
+    if(!fs.existsSync(checkpoint))writeJsonAtomic(checkpoint,p.checkpoint);
+    roundAdvanceFault('after-checkpoint');
+    if(canonicalPractice(state.participants[index])!==canonicalPractice(p.after)){state.participants[index]=p.after;saveParticipants(state.participants);}
+    roundAdvanceFault('after-pointer');
+    commitAdvance(file);roundAdvanceFault('after-commit');
+  };
+  const recoverAdvances = state => {
+    for(const p of state.participants){const root=participantRoot(p.id);if(!fs.existsSync(root))continue;
+      for(const name of fs.readdirSync(root).filter(n=>/^advance-\d+-\d+\.json$/.test(n)).sort((a,b)=>Number(a.split('-')[2].split('.')[0])-Number(b.split('-')[2].split('.')[0]))){const file=path.join(root,name),j=readAdvance(file);if(!j.committed)publishAdvance(file,j,state);}
+    }
+  };
+  const roundHistory = p => {
+    const root=participantRoot(p.id),names=fs.existsSync(root)?fs.readdirSync(root):[];
+    const records = pattern => names.filter(n=>pattern.test(n)).sort((a,b)=>a.localeCompare(b,undefined,{numeric:true})).map(n=>({path:n,record:readJson(path.join(root,n))}));
+    const checkpoints=records(/^checkpoint\.json$/);
+    const cp=path.join(root,'checkpoints');if(fs.existsSync(cp))for(const n of fs.readdirSync(cp).filter(n=>n.endsWith('.json')).sort((a,b)=>a.localeCompare(b,undefined,{numeric:true})))checkpoints.push({path:`checkpoints/${n}`,record:readJson(path.join(cp,n))});
+    return {participantId:p.id,experimentId:p.experiment_id,generation:participantGeneration(p),condition:p.condition,activeRound:Number(p.current_round),status:p.status,visits:records(/^visit-\d+\.json$/),finalizations:records(/^finalization-\d+-\d+\.json$/),advances:records(/^advance-\d+-\d+\.json$/),checkpoints};
+  };
+  const repeatCapability = p => {
+    if(p.protocol_version!==PILOT_PROTOCOL)return {};
+    const journal=readFinalization(finalizationFile(p));
+    return {repeatRoundsVersion:1,canStartNextRound:p.status==='completed' && journal?.committed===true && journal.payload.evidence?.bindingVersion===1,sessionId:protocolState(p).sessionId??null,finalizationReceipt:journal?.committed?journal.payload.response:null,finalizationReceiptDigest:journal?.committed?journal.sha256:null};
+  };
+
   return {
     handle({ method, pathname, searchParams, headers, body }) {
       const state = load();
       recoverFinalizations(state);
+      recoverAdvances(state);
       const route = `${method} ${pathname}`;
 
       if (route === 'POST /auth') {
@@ -900,6 +960,34 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           throw Object.assign(new Error('That pin is not recognized.'), { status: 401 });
         }
         return { status: 200, body: { ok: true } };
+      }
+
+      if (route === 'POST /protocol/next-round') {
+        const keys=['id','experimentId','generation','condition','fromRound','fromSessionId','requestId','finalizationReceiptDigest'];
+        if(!body || Object.keys(body).some(k=>!keys.includes(k)) || keys.some(k=>body[k]===undefined))conflict('Full immutable source scope and receipt digest required.');
+        const p=state.participants.find(p=>p.id===normalizeId(body.id));
+        if(!p || p.protocol_version!==PILOT_PROTOCOL || body.id!==p.id || body.experimentId!==p.experiment_id || body.generation!==participantGeneration(p) || body.condition!==p.condition || !Number.isSafeInteger(body.fromRound) || body.fromRound<1 || typeof body.fromSessionId!=='string' || !body.fromSessionId || safeToken(body.fromSessionId)!==body.fromSessionId || typeof body.requestId!=='string' || !body.requestId || body.requestId.length>120 || safeToken(body.requestId)!==body.requestId)conflict('Invalid repeat-round source scope.');
+        const file=advanceFile(p,body.fromRound),previous=readAdvance(file);
+        if(previous){const {requestId:a,...expected}=previous.payload.request,{requestId:b,...incoming}=body;if(canonicalPractice(expected)!==canonicalPractice(incoming))conflict('Advance retry source conflict.');return {status:200,body:previous.payload.response};}
+        const experiment=findExperiment(state,p.experiment_id);
+        if(experiment.status!=='active' || p.status!=='completed' || Number(p.current_round)!==body.fromRound)conflict('Only the current completed round can advance.');
+        const source=readFinalization(finalizationFile(p));
+        if(!source?.committed || source.sha256!==body.finalizationReceiptDigest || canonicalPractice(source.payload.participantAfter)!==canonicalPractice(p) || source.payload.request.sessionId!==body.fromSessionId || source.payload.evidence?.bindingVersion!==1)conflict('Committed source receipt required.');
+        if(canonicalPractice(readJson(protocolFile(p)))!==canonicalPractice(source.payload.visitAfter) || canonicalPractice(completionEvidence(source.payload.participantBefore,body.fromSessionId,source.payload.request.sampleIds))!==canonicalPractice(source.payload.evidence))conflict('Source completion evidence changed.');
+        const result=readJson(path.join(sessionsDir,`${p.id}-round-${p.current_round}.json`));
+        if(canonicalPractice(result)!==canonicalPractice(source.payload.result))conflict('Source result changed.');
+        const checkpointSource=checkpointFile(p.id,p.current_round,participantGeneration(p),true);
+        if(!fs.existsSync(checkpointSource))conflict('Source checkpoint missing; manual recovery required.');
+        const cp=readJson(checkpointSource);
+        if(!cp || cp.sessionId!==body.fromSessionId || cp.generation!==participantGeneration(p) || Number(cp.round)!==body.fromRound || cp.condition!==p.condition || !Array.isArray(cp.trials) || canonicalPractice(cp.trials.map(t=>t.id).sort())!==canonicalPractice(source.payload.request.sampleIds))conflict('Source checkpoint scope or lineage changed.');
+        const round=body.fromRound+1;if(!Number.isSafeInteger(round))conflict('Round identity exhausted.');
+        const sessionId=crypto.randomUUID(),after={...p,status:'in_progress',current_round:String(round)};
+        if(fs.existsSync(protocolFile(after)) || fs.existsSync(checkpointFile(p.id,round,participantGeneration(p),true)) || fs.existsSync(collectionDir(sessionsDir,p.id,sessionId)))conflict('Target scope already exists.');
+        const visit={generation:participantGeneration(p),visit:round,condition:p.condition,sessionId,survey:null,lock:null,practice:null};
+        const checkpoint={participantId:p.id,generation:participantGeneration(p),round,condition:p.condition,sessionId,stage:'capture',unlockedThrough:'capture',trials:[],pendingReplacements:[],modelRevisionId:null,openCapture:null,trainingRun:null,updatedAt:Date.now()};
+        const response={repeatRoundsVersion:1,participantId:p.id,experimentId:p.experiment_id,generation:participantGeneration(p),condition:p.condition,fromRound:body.fromRound,fromSessionId:body.fromSessionId,round,sessionId,status:'in_progress',requestId:body.requestId};
+        const journal=writeAdvance(file,{request:{...body},before:{...p},after,visit,checkpoint,sourceFiles:sourceFiles(p,body.fromSessionId),createdAt:nowIso(),response});
+        roundAdvanceFault('after-intent');publishAdvance(file,journal,state);return {status:200,body:response};
       }
 
       if (route === 'POST /join') {
@@ -921,6 +1009,7 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
             status: 200,
             body: {
               ...protocol,
+              ...repeatCapability(participant),
               participantId: participant.id,
               experimentId: experiment.id,
               isTestParticipant: isTestParticipant(participant),
@@ -931,7 +1020,7 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
               capturesPerRound: bounds.max,
               obstacleCount: game.obstacleCount,
               startingLives: game.startingLives,
-              round: Number(experiment.repetitions),
+              round: Number(participant.current_round),
               condition: participant.condition,
               generation: participantGeneration(participant),
               status: 'completed',
@@ -949,6 +1038,7 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           status: 200,
           body: {
             ...protocol,
+              ...repeatCapability(participant),
             participantId: participant.id,
             experimentId: experiment.id,
             isTestParticipant: isTestParticipant(participant),
@@ -1059,10 +1149,12 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
         const id = normalizeId(body.id);
         const participant = state.participants.find((entry) => entry.id === id);
         if (!participant) throw Object.assign(new Error('That ID was not recognized.'), { status: 404 });
+        if(participant.protocol_version===PILOT_PROTOCOL && (Number(participant.current_round)>1 || body.round!==undefined || body.sessionId!==undefined)) assertScope(body,participant);
         if (!sameGeneration(body, participant)) return { status: 200, body: { ok: true } };
         if (body.active) {
           writeJsonAtomic(alertFile(participant.id), {
             generation: participantGeneration(participant),
+            ...(body.round!==undefined?{round:body.round,sessionId:body.sessionId,condition:body.condition}:{}),
             active: true,
             message: String(body.message || 'Study data is still not saving.').slice(0, 300),
             pending: finiteNumber(body.pending, 0),
@@ -1105,9 +1197,14 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
         const items = Array.isArray(body.items) ? body.items : [];
         // Read-only ACK for the proven late raw-context replay mechanism. This is
         // deliberately NOT a general inactive-scope bypass or a finalized writer.
-        if(isPilot(participant) && participant.status==='completed') {
-          const journal=readFinalization(finalizationFile(participant));
-          if(!journal?.committed || canonicalPractice(journal.payload.participantAfter)!==canonicalPractice(participant))conflict('Committed completion required for archived retry.');
+        if(isPilot(participant) && (participant.status==='completed' || items.length && Number(items[0]?.record?.round)!==Number(participant.current_round))) {
+          const archivedRound=Number(items[0]?.record?.round ?? participant.current_round);
+          if(!Number.isSafeInteger(archivedRound) || archivedRound<1)conflict('Invalid archived round.');
+          const journal=readFinalization(finalizationFile(participant,archivedRound));
+          const advance=readAdvance(advanceFile(participant,archivedRound));
+          const currentExact=journal && canonicalPractice(journal.payload.participantAfter)===canonicalPractice(participant);
+          const archivedExact=advance?.committed && journal?.sha256===advance.payload.request.finalizationReceiptDigest && canonicalPractice(journal.payload.participantAfter)===canonicalPractice(advance.payload.before);
+          if(!journal?.committed || (!currentExact && !archivedExact))conflict('Committed completion required for archived retry.');
           const request=journal.payload.request;
           for(const item of items) {
             const record=item?.record,context=record?.context;
@@ -1121,6 +1218,11 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
             const directory=path.join(collectionDir(sessionsDir,participant.id,record.sessionId),'contexts');
             const previous=readJson(path.join(directory,`${hash}.json`)),raw=readJson(path.join(directory,`${hash}.context.json`));
             const expected={generation:record.generation,round:record.round,condition:record.condition,context};
+            if(archivedExact){
+              const sealed=advance.payload.sourceFiles;
+              const archivedPaths=[path.join(directory,`${hash}.json`),path.join(directory,`${hash}.context.json`)];
+              if(archivedPaths.some(file=>!sealed.some(entry=>entry.file===path.relative(dataDir,file) && fs.existsSync(file) && entry.sha256===fileHash(file))))conflict('Archived retry differs from sealed source evidence.');
+            }
             if(!previous || !raw || canonicalPractice(previous)!==canonicalPractice(expected) || canonicalPractice(raw)!==canonicalPractice(context))
               conflict('Only canonical-exact already archived context retries are acknowledged.');
           }
@@ -1289,7 +1391,7 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
             if (!sessionId) continue;
             if (!isPilot(participant)) validateTrialCalibration(record.trials, participant); // Pilot batch was fully checked before any writes.
             const trials = (Array.isArray(record.trials) ? record.trials : []).slice(0, 200).map(sanitizeTrial).filter(Boolean);
-            writeJsonAtomic(checkpointFile(participant.id), {
+            writeJsonAtomic(checkpointFile(participant.id, participant.current_round, participantGeneration(participant), participant.protocol_version===PILOT_PROTOCOL), {
               sessionId,
               condition: participant.condition,
               generation: participantGeneration(participant),
@@ -1430,7 +1532,8 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
         if(isPilot(participant)) {
           const frozen=JSON.parse(participant.frozen_settings);
           if(body.participantId!==undefined && body.participantId!==participant.id) conflict('Participant scope mismatch.');
-          const round=integerInRange(body.round,1,Number(frozen.repetitions),'Round');
+          const round=participant.protocol_version===PILOT_PROTOCOL ? Number(body.round) : integerInRange(body.round,1,Number(frozen.repetitions),'Round');
+          if(!Number.isSafeInteger(round) || round<1) conflict('Invalid round.');
           const file=finalizationFile(participant,round), prior=readFinalization(file);
           const request=finalizationRequest(body);
           if(prior) {
@@ -1443,14 +1546,14 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           validateTrialCalibration(trials,participant);
           const completedAt=nowIso(),savedByGesture={};
           for(const trial of trials) {const label=String(trial.gestureName||trial.gestureId||'unknown');savedByGesture[label]=(savedByGesture[label]||0)+1;}
-          const finished=round>=Number(frozen.repetitions);
+          const finished=participant.protocol_version===PILOT_PROTOCOL || round>=Number(frozen.repetitions);
           const after={...participant,status:finished?'completed':'in_progress',current_round:String(finished?round:round+1)};
           if(!finished)after.condition=conditionOrder(participant)[round];
           const visitBefore=readJson(protocolFile(participant));
           const payload={request,evidence,participantBefore:{...participant},participantAfter:after,visitBefore,
             visitAfter:{...protocolState(participant),completedAt},
             roundRecord:{participant_id:participant.id,experiment_id:experiment.id,round:String(round),trial_count:String(trials.length),saved_count:String(trials.length),usable_count:String(trials.filter(t=>t.quality==='usable').length),completed_at:completedAt},
-            result:{participantId:participant.id,experimentId:experiment.id,isTestParticipant:isTestParticipant(participant),condition:participant.condition,round,savedCount:trials.length,savedByGesture,completedAt,trials},
+            result:{participantId:participant.id,experimentId:experiment.id,generation:participantGeneration(participant),sessionId:body.sessionId,isTestParticipant:isTestParticipant(participant),condition:participant.condition,round,savedCount:trials.length,savedByGesture,completedAt,trials},
             response:{status:after.status,condition:after.condition,round:Number(after.current_round),repetitions:Number(frozen.repetitions)},
           };
           const journal=writeFinalization(file,payload);
@@ -1639,7 +1742,7 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           body: {
             participants: state.participants
               .filter((participant) => participant.experiment_id === experimentId)
-              .map((participant) => presentParticipant(participant, experiment.repetitions)),
+              .map((participant) => ({...presentParticipant(participant, experiment.repetitions),roundHistory:roundHistory(participant),...repeatCapability(participant)})),
             saveAlerts: state.participants
               .filter((participant) => participant.experiment_id === experimentId)
               .map(readAlert)
@@ -1808,7 +1911,9 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           for (const fileName of fs.readdirSync(sessionsDir)) {
             if (!fileName.startsWith(`${participant.id}-round-`) || !fileName.endsWith('.json')) continue;
             const roundFile = readJson(path.join(sessionsDir, fileName));
-            const known = new Set(samples.map((sample) => sample.sampleId));
+            const summarySession=roundFile?.sessionId || readFinalization(finalizationFile(participant,roundFile?.round))?.payload.request.sessionId || '';
+            const summaryGeneration=roundFile?.generation ?? participantGeneration(participant);
+            const known = new Set(samples.filter(sample=>sample.participantId===participant.id && Number(sample.round)===Number(roundFile?.round) && (sample.generation??1)===summaryGeneration && (!summarySession || sample.sessionId===summarySession)).map(sample=>sample.sampleId));
             for (const trial of Array.isArray(roundFile?.trials) ? roundFile.trials : []) {
               const sampleId = safeToken(trial?.id, '');
               if (!sampleId || known.has(sampleId)) continue;
@@ -1816,7 +1921,8 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
               const points = sanitizePoints(trial.points);
               samples.push({
                 sampleId,
-                sessionId: '',
+                sessionId: summarySession,
+                generation:summaryGeneration,
                 participantId: participant.id,
                 experimentId: experiment.id,
                 isTestParticipant: isTestParticipant(participant),
@@ -1846,6 +1952,7 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           experiment_id: session.experimentId,
           condition: session.condition,
           round: session.round,
+          generation: session.generation,
           phase: session.phase,
           signal_source: session.signalSource,
           channel: session.channelIndex,
@@ -1862,21 +1969,23 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           classifier: session.settings?.classifier ?? '',
           updated_at: session.updatedAt ?? '',
         }));
+        const scopeKey = r => JSON.stringify([r.participantId,r.generation??'',r.sessionId??'',Number(r.round),r.sampleId]);
         const replacedBy = new Map(events
           .filter((event) => event.type === 'sample_replaced' && event.sampleId)
-          .map((event) => [event.sampleId, event.replacementSampleId || '']));
+          .map((event) => [scopeKey(event), event.replacementSampleId || '']));
         const deletedIds = new Set(events
           .filter((event) => ['sample_deleted','sample_rejected'].includes(event.type) && event.sampleId)
-          .map((event) => event.sampleId));
+          .map(scopeKey));
         const sampleRows = samples.map((sample) => ({
           sample_id: sample.sampleId,
           attempt_id: sample.attemptId ?? '',
           center_duration_ms: sample.centerDurationMs ?? '',
-          status: events.some(event=>event.type==='sample_replaced' && event.sampleId===sample.sampleId) ? 'replaced' : events.some(event=>event.type==='sample_deleted' && event.sampleId===sample.sampleId) ? 'deleted' : events.some(event=>event.type==='sample_rejected' && event.sampleId===sample.sampleId) ? 'rejected' : 'retained',
+          status: events.some(event=>event.type==='sample_replaced' && scopeKey(event)===scopeKey(sample)) ? 'replaced' : events.some(event=>event.type==='sample_deleted' && scopeKey(event)===scopeKey(sample)) ? 'deleted' : events.some(event=>event.type==='sample_rejected' && scopeKey(event)===scopeKey(sample)) ? 'rejected' : 'retained',
           session_id: sample.sessionId,
           participant_id: sample.participantId,
           condition: sample.condition,
           round: sample.round,
+          generation: sample.generation,
           gesture_id: sample.gestureId,
           gesture_label: sample.gestureLabel,
           captured_at: sample.capturedAt,
@@ -1890,8 +1999,8 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           point_count: sample.pointCount,
           signal_source: sample.signalSource,
           channel: sample.channelIndex,
-          kept: deletedIds.has(sample.sampleId) ? 'no' : 'yes',
-          replaced_by: replacedBy.get(sample.sampleId) ?? '',
+          kept: deletedIds.has(scopeKey(sample)) ? 'no' : 'yes',
+          replaced_by: replacedBy.get(scopeKey(sample)) ?? '',
           segment_duration_ms: sample.settings?.segmentDurationMs ?? '',
           pre_trigger_window_ms: sample.settings?.preTriggerWindowMs ?? '',
           countdown_ms: sample.settings?.countdownMs ?? '',
@@ -1904,6 +2013,7 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           .filter((event) => event.type === 'sample_replaced')
           .map((event) => ({
             round: event.round,
+          generation: event.generation,
             session_id: event.sessionId,
             participant_id: event.participantId,
             deleted_sample_id: event.sampleId ?? '',
@@ -1916,6 +2026,7 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           participant_id: event.participantId,
           condition: event.condition,
           round: event.round,
+          generation: event.generation,
           phase: event.phase,
           type: event.type,
           at: event.at,
@@ -1929,6 +2040,7 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           participant_id: revision.participantId,
           condition: revision.condition,
           round: revision.round,
+          generation: revision.generation,
           sample_ids: Array.isArray(revision.sampleIds) ? revision.sampleIds.join('|') : '',
           classifier: revision.classifier,
           feature_set_id: revision.settings?.featureSetId ?? '',
@@ -1944,15 +2056,21 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           participant_id: run.participantId ?? '',
           condition: run.condition,
           round: run.round,
+          generation: run.generation,
           difficulty: run.difficulty,
           model_revision_id: run.modelRevisionId ?? '',
           game_score: run.gameScore,
           obstacle_success: run.obstacleSuccess == null ? '' : run.obstacleSuccess,
           recorded_at: run.recordedAt,
+          started_at: run.startedAt ?? '',
+          ended_at: run.endedAt ?? '',
+          active_duration_ms: run.activeDurationMs ?? '',
+          source_recovery_pauses_json: run.sourceRecoveryPauses === undefined ? '' : JSON.stringify(run.sourceRecoveryPauses),
         }));
         const attemptRows = runs.flatMap((run) => (Array.isArray(run.outcomes) ? run.outcomes : []).map((outcome) => ({
           run_id: run.id,
           participant_id: run.participantId,
+          session_id:run.sessionId,round:run.round,generation:run.generation,
           attempt_id: outcome.attemptId,
           expected_gesture_id: outcome.expectedGestureId,
           expected_gesture_name: outcome.expectedGestureName,
@@ -1960,13 +2078,14 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           predicted_gesture_id: outcome.predictedGestureId ?? '',
           predicted_gesture_name: outcome.predictedGestureName ?? '',
         })));
-        const labeledCsv = (headers, rows) => toCsv([...headers, 'is_test_participant'], rows.map(row => ({
+        const labeledCsv = (headers, rows) => toCsv([...headers, 'generation', 'is_test_participant'], rows.map(row => ({
           ...row,
           is_test_participant: isTestParticipant(mine.find(participant => participant.id === row.participant_id)),
         })));
-        const contextRows=contexts.flatMap(envelope=>envelope.context.points.map((point,index)=>({participant_id:envelope.participantId,session_id:envelope.context.scope.sessionId,condition:envelope.condition,round:envelope.round,context_id:envelope.context.contextId,sample_id:envelope.context.sampleId,index,region:envelope.context.center && index>=envelope.context.center.startIndex && index<envelope.context.center.endIndexExclusive?'center':envelope.context.center && index>=envelope.context.center.endIndexExclusive?'post':'pre',time:point.time,raw:point.raw,consumption_id:point.consumptionId})));
+        const contextRows=contexts.flatMap(envelope=>envelope.context.points.map((point,index)=>({participant_id:envelope.participantId,session_id:envelope.context.scope.sessionId,condition:envelope.condition,round:envelope.round,generation:envelope.generation,context_id:envelope.context.contextId,sample_id:envelope.context.sampleId,index,region:envelope.context.center && index>=envelope.context.center.startIndex && index<envelope.context.center.endIndexExclusive?'center':envelope.context.center && index>=envelope.context.center.endIndexExclusive?'post':'pre',time:point.time,raw:point.raw,consumption_id:point.consumptionId})));
         const archive = zipStore([
-          { name: 'protocol.json', data: JSON.stringify({schemaVersion:1,experiment,participants:mine.map(p=>({participantId:p.id,protocolVersion:p.protocol_version || 'legacy-fixed-v1',conditionOrder:isPilot(p)?conditionOrder(p):[p.condition],groupCode:p.group_code||null,memberCode:p.member_code||null,frozenSettings:p.frozen_settings?JSON.parse(p.frozen_settings):null,officialSequence:p.official_sequence?JSON.parse(p.official_sequence):null,visits:[readJson(path.join(participantRoot(p.id),'visit-1.json')),readJson(path.join(participantRoot(p.id),'visit-2.json'))].filter(Boolean),runs:readRuns(p.id)}))},null,2) },
+          {name:'round-history.json',data:JSON.stringify({schemaVersion:1,participants:mine.map(roundHistory)},null,2)},
+          { name: 'protocol.json', data: JSON.stringify({schemaVersion:1,experiment,participants:mine.map(p=>({participantId:p.id,protocolVersion:p.protocol_version || 'legacy-fixed-v1',conditionOrder:isPilot(p)?conditionOrder(p):[p.condition],groupCode:p.group_code||null,memberCode:p.member_code||null,frozenSettings:p.frozen_settings?JSON.parse(p.frozen_settings):null,officialSequence:p.official_sequence?JSON.parse(p.official_sequence):null,visits:roundHistory(p).visits.map(v=>v.record),runs:readRuns(p.id)}))},null,2) },
           { name: 'context-dispositions.json', data: JSON.stringify({schemaVersion:1,records:contextDispositions},null,2) },
           { name: 'contexts.json', data: JSON.stringify({schemaVersion:1,records:contexts.map(envelope=>({...envelope,derivedDisposition:contextDispositions.filter(event=>event.contextId===envelope.context.contextId && event.participantId===envelope.participantId && event.sessionId===envelope.context.scope.sessionId).sort((a,b)=>a.at-b.at).at(-1)?.disposition ?? envelope.context.disposition}))},null,2) },
           { name: 'context-points.csv', data: labeledCsv(['participant_id','session_id','condition','round','context_id','sample_id','index','region','time','raw','consumption_id'],contextRows) },
@@ -1978,8 +2097,8 @@ export function createStudyDesk(dataDir, {finalizationFault = () => {}} = {}) {
           { name: 'replacements.csv', data: labeledCsv(['round', 'session_id', 'participant_id', 'deleted_sample_id', 'replacement_sample_id', 'at'], replacementRows) },
           { name: 'events.csv', data: labeledCsv(['event_id', 'session_id', 'participant_id', 'condition', 'round', 'phase', 'type', 'at', 'sample_id', 'replacement_sample_id', 'detail'], eventRows) },
           { name: 'training.csv', data: labeledCsv(['revision_id', 'session_id', 'participant_id', 'condition', 'round', 'sample_ids', 'classifier', 'feature_set_id', 'segment_duration_ms', 'started_at', 'finished_at', 'status', 'error'], trainingRows) },
-          { name: 'runs.csv', data: labeledCsv(['run_id', 'session_id', 'participant_id', 'condition', 'round', 'difficulty', 'model_revision_id', 'game_score', 'obstacle_success', 'recorded_at'], runRows) },
-          { name: 'attempts.csv', data: labeledCsv(['run_id', 'participant_id', 'attempt_id', 'expected_gesture_id', 'expected_gesture_name', 'result', 'predicted_gesture_id', 'predicted_gesture_name'], attemptRows) },
+          { name: 'runs.csv', data: labeledCsv(['run_id', 'session_id', 'participant_id', 'condition', 'round', 'difficulty', 'model_revision_id', 'game_score', 'obstacle_success', 'recorded_at', 'started_at', 'ended_at', 'active_duration_ms', 'source_recovery_pauses_json'], runRows) },
+          { name: 'attempts.csv', data: labeledCsv(['run_id', 'participant_id', 'session_id', 'round', 'attempt_id', 'expected_gesture_id', 'expected_gesture_name', 'result', 'predicted_gesture_id', 'predicted_gesture_name'], attemptRows) },
           { name: 'waveforms.json', data: JSON.stringify({ sessions, samples }, null, 2) },
           { name: 'practice.json', data: JSON.stringify({ schemaVersion: 1, archivalOnly: true, records: practice }, null, 2) },
         ]);

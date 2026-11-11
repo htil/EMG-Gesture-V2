@@ -146,7 +146,7 @@ interface QueuedItem {
 const QUEUE_KEY = 'emg-collection-queue';
 const waiters: Array<() => void> = [];
 let failureCount = 0;
-let alertActive = false;
+const activeAlerts = new Set<string>();
 let retryTimer = 0;
 
 export function collectionId(prefix: string) {
@@ -239,13 +239,18 @@ function releaseWaiters() {
   pending.forEach((resolve) => resolve());
 }
 
-async function postSaveAlert(participantId: string, generation: number, active: boolean) {
+function alertScope(item: CollectionItem) {
+  const r = item.record as { generation?: number; sessionId?: string; round?: number; condition?: Assignment };
+  return { generation: generationOf(item), ...(r.sessionId && r.round && r.condition
+    ? { sessionId: r.sessionId, round: r.round, condition: r.condition } : {}) };
+}
+async function postSaveAlert(participantId: string, scope: ReturnType<typeof alertScope>, active: boolean) {
   await fetch('/api/study/save-alert', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       id: participantId,
-      generation,
+      ...scope,
       active,
       pending: queue.length,
       at: new Date().toISOString(),
@@ -275,10 +280,13 @@ async function flush() {
   }
   flushing = true;
   const participantId = queue[0].participantId;
+  const scope = alertScope(queue[0].item);
+  const scopeKey = JSON.stringify(scope);
+  const alertKey = participantId + ':' + scopeKey;
   let count = 0;
-  while (count < queue.length && queue[count].participantId === participantId) count += 1;
+  while (count < queue.length && queue[count].participantId === participantId
+    && JSON.stringify(alertScope(queue[count].item)) === scopeKey) count += 1;
   const batch = queue.slice(0, count).map((entry) => entry.item);
-  const generation = generationOf(batch[0]);
   try {
     await postCollection(participantId, batch);
     queue.splice(0, count);
@@ -286,10 +294,10 @@ async function flush() {
     failureCount = 0;
     persistQueue();
     notify();
-    if (alertActive) {
-      alertActive = false;
-      void postSaveAlert(participantId, generation, false).catch(() => {
-        alertActive = true;
+    if (activeAlerts.has(alertKey)) {
+      activeAlerts.delete(alertKey);
+      void postSaveAlert(participantId, scope, false).catch(() => {
+        activeAlerts.add(alertKey);
       });
     }
   } catch (error) {
@@ -298,8 +306,8 @@ async function flush() {
     persistQueue();
     notify();
     if (failureCount >= 3) {
-      alertActive = true;
-      void postSaveAlert(participantId, generation, true).catch(() => undefined);
+      activeAlerts.add(alertKey);
+      void postSaveAlert(participantId, scope, true).catch(() => undefined);
     }
     scheduleRetry();
   } finally {

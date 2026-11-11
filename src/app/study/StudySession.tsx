@@ -1,4 +1,6 @@
 import DismissibleNotice from './DismissibleNotice';
+import ParticipantDialog from './ParticipantDialog';
+import { advanceCompletedRound, pendingRoundIntent, persistRoundSession, repeatRoundAvailable } from './roundTransition';
 import { useCoreCaptureContextArchive } from './useCoreCaptureContextArchive';
 import { pickSession } from './ParticipantGate';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -119,7 +121,7 @@ function StepMap({
 }: {
   stage: StudyStage;
   round: number;
-  repetitions: number;
+  repetitions?: number;
   reachedIndex: number;
   canVisit: (stage: FlowStage) => boolean;
   onSelect: (stage: FlowStage) => void;
@@ -129,7 +131,7 @@ function StepMap({
     <section className="rounded-[28px] border border-white/25 bg-slate-900/80 p-4 md:p-6" aria-label="Session steps">
       <div className="mb-4 flex items-end justify-between gap-3">
         <div>
-          <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-cyan-300/80">Round {round} of {repetitions}</p>
+          <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-cyan-300/80">Round {round}{repetitions === undefined ? '' : ` of ${repetitions}`}</p>
           <h1 className="mt-1 text-2xl font-light text-white">Capture, review, play, then see results</h1>
         </div>
       </div>
@@ -193,7 +195,7 @@ function CaptureCounter({
 
   return (
     <div role="status" aria-label="Capture status" data-capture-state={status.label} className="flex items-center gap-3">
-      <p className="max-w-32 text-right text-xs leading-5 text-slate-300">{status.detail}</p>
+      <p className="h-20 max-w-32 overflow-y-auto text-right text-xs leading-5 text-slate-300">{status.detail}</p>
     <div className={`relative flex h-20 w-20 shrink-0 items-center justify-center rounded-full border bg-slate-950/80 ${status.label === 'Error' ? 'border-rose-300/60 text-rose-200' : status.label === 'Ready' ? 'border-emerald-300/60 text-emerald-200' : isRecording ? 'border-cyan-300/60 text-cyan-200' : 'border-amber-200/40 text-amber-100'}`}>
       <svg className="absolute inset-0 -rotate-90" viewBox="0 0 64 64" aria-hidden="true">
         <circle cx="32" cy="32" r={radius} fill="none" stroke="rgba(255,255,255,0.12)" strokeWidth="4" />
@@ -270,11 +272,6 @@ function LivePanel({
           </div>
         </div>
         <div className="flex items-center gap-3">
-          {isRecording && (
-            <span className="flex items-center gap-2 rounded-full bg-cyan-300/10 px-3 py-1.5 text-xs text-cyan-200">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300" /> Capturing
-            </span>
-          )}
           <CaptureCounter isRecording={isRecording} recordingProgress={recordingProgress} segmentDurationMs={segmentDurationMs} status={captureStatus} />
         </div>
       </div>
@@ -456,8 +453,19 @@ function ModelStatusNote({ state }: { state: ConditionModelState }) {
 }
 
 export default function StudySession() {
+  const [scopeEpoch, setScopeEpoch] = useState(0);
+  return <ScopedStudySession key={scopeEpoch} onNextScope={() => setScopeEpoch(n => n + 1)} />;
+}
+
+function ScopedStudySession({ onNextScope }: { onNextScope: () => void }) {
   const navigate = useNavigate();
-  const [measuredSession, setMeasuredSession] = useState<ClientSession | null>(() => loadClientSession());
+  const nextRoundOperation = useRef(false);
+  const [pauseConfirmation, setPauseConfirmation] = useState(false);
+  const [confirmingPause, setConfirmingPause] = useState(false);
+  const pauseOperation = useRef(false);
+  const [dismissedRecoveryKey, setDismissedRecoveryKey] = useState('');
+  const [advancingRound, setAdvancingRound] = useState(false);
+  const [measuredSession, setMeasuredSession] = useState<ClientSession | null>(() => pendingRoundIntent()?.snapshot ?? loadClientSession());
   const [serverVerified, setServerVerified] = useState(() => !isPilotProtocol(loadClientSession()?.protocolVersion));
   const serverVerifiedRef = useRef(serverVerified); serverVerifiedRef.current = serverVerified;
   const [researcherPin, setResearcherPin] = useState('');
@@ -513,7 +521,8 @@ export default function StudySession() {
     let cancelled = false;
     whenCollectionSaved().then(() => joinStudy(measuredSession.participantId)).then(joined => {
       if (cancelled) return;
-      if (joined.status === 'completed') { clearClientSession(); navigate('/'); return; }
+      if (pendingRoundIntent()) { setServerVerified(true); return; }
+      if (joined.status === 'completed' && joined.repeatRoundsVersion !== 1) { clearClientSession(); navigate('/'); return; }
       const restored = pickSession(joined, measuredSession);
       setMeasuredSession(restored);
       setPracticeMode(restored.stage === 'capture' && !restored.trials.length && !practiceDisposition(restored) ? 'setup' : 'measured');
@@ -562,7 +571,7 @@ export default function StudySession() {
 
   useEffect(() => {
     if (!measuredSession || measuredSession.stage === 'done') {
-      if (measuredSession?.stage === 'done') clearClientSession();
+      if (measuredSession?.stage === 'done' && measuredSession.repeatRoundsVersion !== 1) clearClientSession();
       return;
     }
     saveClientSession(measuredSession);
@@ -581,6 +590,7 @@ export default function StudySession() {
     recordingSignalData,
     isStreaming,
     streamEpoch,
+    streamInterruptionReason,
     subscribeRawPoints,
     subscribeSourceInterruptions,
     selectSignalSourceMode,
@@ -625,6 +635,11 @@ export default function StudySession() {
   const currentPractice = practiceDisposition(measuredSession);
   const practiceRequired = session?.protocolVersion === 'between-subject-v2' && !currentPractice;
   const practiceActive = practiceSetup || recalibrating;
+  const recoveryDialogKey = JSON.stringify([calibrationScope, streamEpoch, isStreaming]);
+  const showRecoveryDialog = signalMode === 'live' && !!streamInterruptionReason && stage !== 'done'
+    && !submissionOperation.current && (!isStreaming || !calibration) && (!isStreaming || !practiceActive)
+    && dismissedRecoveryKey !== recoveryDialogKey;
+  useEffect(() => { if (!isStreaming) setPauseConfirmation(false); }, [isStreaming]);
   const datasetLocked = !inPractice && !!session?.protocolState?.lock;
   const streamReady = isStreaming && (inPractice || session?.isTestParticipant === true || (signalMode === 'live' && liveConnectionStatus === 'streaming'));
   gameStreamRef.current = { ready: streamReady, source: signalMode };
@@ -643,7 +658,7 @@ export default function StudySession() {
     subscribeSourceInterruptions?.(reason => {
       if (!submissionOperation.current?.rawSealed && sessionRef.current?.stage !== 'done') listener(reason);
     }) ?? (() => {}), [subscribeSourceInterruptions]);
-  const captureContextArchive = useCoreCaptureContextArchive(session, stage !== 'done' && !inPractice && !practiceActive && serverVerified && isPilotProtocol(session?.protocolVersion), signalMode, streamEpoch, channelIndex, recordingSignalData, subscribeSubmissionRaw, subscribeSubmissionInterruptions);
+  const captureContextArchive = useCoreCaptureContextArchive(session, (stage !== 'done' || session?.repeatRoundsVersion === 1) && !inPractice && !practiceActive && serverVerified && isPilotProtocol(session?.protocolVersion), signalMode, streamEpoch, channelIndex, recordingSignalData, subscribeSubmissionRaw, subscribeSubmissionInterruptions);
   const [parentRecoveryError, setParentRecoveryError] = useState('');
   const [retryingRecovery, setRetryingRecovery] = useState(false);
   const recoveryError = captureContextArchive.recoveryError || parentRecoveryError;
@@ -706,7 +721,7 @@ export default function StudySession() {
     setRetryingRecovery(false);
     return () => { recoveryRetryOperation.current = null; };
   }, [recoveryRetryScope, recorderAttempt, captureContextArchive.recorder]);
-  const armed = readyCueId === recorderAttempt.attemptId && !recoveryError && !opportunityTimedOut && serverVerified && !datasetLocked && !practiceActive && !saving && !training && stage === 'capture' && isStreaming && !selectedFull && !countingDown && (session?.protocolVersion === 'between-subject-v2' ? calibration !== null && (inPractice || !practiceRequired) : manualTrigger || calibration !== null) && (!inPractice || captureIntroduced) && gameIntroduction === null;
+  const armed = readyCueId === recorderAttempt.attemptId && !recoveryError && !opportunityTimedOut && serverVerified && !datasetLocked && !practiceActive && !saving && !training && stage === 'capture' && isStreaming && !(signalMode === 'live' && streamInterruptionReason && !calibration) && !selectedFull && !countingDown && (session?.protocolVersion === 'between-subject-v2' ? calibration !== null && (inPractice || !practiceRequired) : manualTrigger || calibration !== null) && (!inPractice || captureIntroduced) && gameIntroduction === null;
   const latestSourceTime = useRef(0); latestSourceTime.current = recordingSignalData[recordingSignalData.length - 1]?.time ?? Date.now();
   useEffect(() => () => {
     // Changing the displayed cue cancels an uncaptured opportunity, not the
@@ -1097,6 +1112,7 @@ export default function StudySession() {
       runId: handoff.runId,
       startedAt: handoff.startedAt,
       endedAt: handoff.endedAt,
+      ...(handoff.activeDurationMs !== undefined ? { activeDurationMs: handoff.activeDurationMs, sourceRecoveryPauses: handoff.sourceRecoveryPauses } : {}),
       invalidationReason: handoff.invalidationReason,
       officialSequence: current.officialSequence,
       signalSource: launched?.source ?? gameStreamRef.current.source,
@@ -1503,6 +1519,7 @@ export default function StudySession() {
   const toggleStream = async () => {
     if (submissionOperation.current) return;
     if (isStreaming) {
+      if (signalMode === 'live') { setPauseConfirmation(true); return; }
       await stopStream();
       setNotice('Stream paused. Captures from this round are still here.');
       return;
@@ -1510,6 +1527,27 @@ export default function StudySession() {
     if (recoveryBlocked.current) return;
     await startStreamForMode(signalMode);
     setNotice(manualTrigger ? 'Press Capture when the gesture begins.' : 'Perform the gesture when you are ready.');
+  };
+
+  const confirmStreamPause = async () => {
+    if (pauseOperation.current || submissionOperation.current || !isStreaming) return;
+    pauseOperation.current = true;
+    setConfirmingPause(true);
+    try {
+      await stopStream();
+      setNotice('Stream paused. Captures from this round are still here.');
+      setPauseConfirmation(false);
+    } finally {
+      pauseOperation.current = false;
+      setConfirmingPause(false);
+    }
+  };
+
+  const redoRestSetup = () => {
+    if (submissionOperation.current || recoveryBlocked.current || trainingOperation.current || isRecording || countingDown || saving) return;
+    cancelOpenCapture('Recalibrating rest only.');
+    setCalibrationState(null);
+    setRecalibrating(true);
   };
 
   const skipPractice = async () => {
@@ -1618,6 +1656,20 @@ export default function StudySession() {
       operation.phase = 'posting';
       const result = await saveRound(snapshot.participantId, snapshot.round, snapshot.trials, snapshot);
       if (finishToken.current !== token) return;
+      if (result.status === 'completed' && snapshot.repeatRoundsVersion === 1) {
+        await stopStream();
+        const joined = await joinStudy(snapshot.participantId);
+        if (finishToken.current !== token) return;
+        if (joined.status !== 'completed' || joined.participantId !== snapshot.participantId
+          || joined.experimentId !== snapshot.experimentId || joined.generation !== snapshot.generation
+          || joined.condition !== snapshot.condition || joined.round !== snapshot.round
+          || joined.sessionId !== snapshot.sessionId) throw new Error('Submitted round could not be confirmed by rejoin.');
+        const completed = pickSession(joined, snapshot);
+        persistRoundSession(completed);
+        operation.phase = 'complete';
+        setMeasuredSession(completed);
+        return;
+      }
       operation.phase = 'complete';
           if (result.status === 'completed') {
             setMeasuredSession({
@@ -1673,6 +1725,28 @@ export default function StudySession() {
     }
   };
 
+  const startAnotherRound = async () => {
+    if (nextRoundOperation.current || !repeatRoundAvailable(session) || recoveryBlocked.current) return;
+    nextRoundOperation.current = true;
+    setAdvancingRound(true);
+    const token = ++finishToken.current;
+    try {
+      cancelTraining();
+      await stopStream();
+      await captureContextArchive.flush('interrupted');
+      await captureContextArchive.drain();
+      if (recoveryBlocked.current) throw new Error(recoveryBlocked.current);
+      await advanceCompletedRound(session);
+      if (finishToken.current !== token) return;
+      onNextScope(); // Unmount every old hook, timer, model, calibration and continuation.
+    } catch (cause) {
+      if (finishToken.current === token) setSaveError(`Next round is not confirmed. Retry the saved source; do not clear browser storage. ${cause instanceof Error ? cause.message : String(cause)}`);
+    } finally {
+      nextRoundOperation.current = false;
+      if (finishToken.current === token) setAdvancingRound(false);
+    }
+  };
+
   const leave = async () => {
     if (submissionOperation.current && submissionOperation.current.phase !== 'complete') return;
     cancelTraining();
@@ -1704,7 +1778,7 @@ export default function StudySession() {
           </div>
           <div className="flex items-center gap-2">
             <span className="rounded-full border border-cyan-300/15 bg-cyan-300/[0.06] px-3 py-2 text-[10px] font-medium uppercase tracking-[0.16em] text-cyan-100">
-              {session.condition === 'button' ? 'Button' : 'Threshold'} · Round {session.round}/{session.repetitions}
+              {session.condition === 'button' ? 'Button' : 'Threshold'} · Round {session.round}{session.repeatRoundsVersion === 1 ? '' : `/${session.repetitions}`}
             </span>
             <span className="hidden items-center gap-2 rounded-full border border-white/20 px-3 py-2 text-xs text-slate-400 sm:flex">
               <span className={`h-2 w-2 rounded-full ${isStreaming ? 'bg-emerald-300' : 'bg-slate-600'}`} />
@@ -1717,6 +1791,24 @@ export default function StudySession() {
         </div>
       </header>
 
+      {pauseConfirmation && <ParticipantDialog role="alertdialog" label="Confirm stream pause" title="Pause stream?"
+        cancelLabel="Cancel" cancelDisabled={confirmingPause} onCancel={() => setPauseConfirmation(false)}
+        action={{ label: 'Confirm', disabled: confirmingPause, onClick: () => void confirmStreamPause() }}>
+        <p>This disconnects the Ganglion stream. Your saved captures and game progress will stay here.</p>
+        <p>After reconnecting, redo resting setup before recording or resuming.</p>
+      </ParticipantDialog>}
+      {!pauseConfirmation && showRecoveryDialog && <ParticipantDialog label="Signal reconnection guidance"
+        title={isStreaming ? 'Redo resting setup' : streamInterruptionReason === 'stopped' ? 'Stream paused' : 'Reconnect Ganglion'}
+        onCancel={() => setDismissedRecoveryKey(recoveryDialogKey)}
+        action={isStreaming ? { label: 'Redo resting setup', disabled: !!recoveryError || isRecording || countingDown || saving || training, onClick: () => {
+          setDismissedRecoveryKey(recoveryDialogKey);
+          if (stage === 'game') { setCalibrationState(null); setRecalibrating(true); }
+          else redoRestSetup();
+        } } : { label: streamInterruptionReason === 'stopped' ? 'Restart stream' : 'Reconnect Ganglion', disabled: !!recoveryError || saving || liveConnectionStatus === 'connecting', onClick: () => void toggleStream() }}>
+        <p>{isStreaming ? 'Ganglion reconnected. Redo resting calibration before recording or resuming.' : streamInterruptionReason === 'stopped' ? 'Stream paused by you.' : 'Bluetooth connection lost.'}</p>
+        <p>{isStreaming ? 'Rest your hand and complete the resting setup. No full restart is needed.' : 'Reconnect the Ganglion, then redo resting calibration. Your saved captures and game progress stay here.'}</p>
+        {liveConnectionStatus === 'error' && <p>{liveConnectionMessage}</p>}
+      </ParticipantDialog>}
       <main className="relative mx-auto max-w-6xl space-y-5 px-4 py-6 md:px-6">
         {!!recoveryError && <section role="alert" aria-label="Raw/context recovery blocked" className="rounded-2xl border border-rose-300/50 bg-rose-950/40 p-5">
           <h2 className="font-medium">Raw/context recovery blocked</h2>
@@ -1725,18 +1817,14 @@ export default function StudySession() {
           <button type="button" disabled={retryingRecovery} onClick={() => void retryRawRecovery()} className="mt-3 rounded-xl border border-white/30 px-4 py-2 disabled:opacity-40">Retry raw/context recovery</button>
         </section>}
         {signalMode === 'mock' && <p role="status" aria-label="Simulated signal" className="rounded-xl border border-amber-300/40 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">Simulated signal — test mode. This signal is generated by the computer and does not respond to your movements.</p>}
-        {session.protocolVersion === 'between-subject-v2' && <section aria-label="Pre/Post activity protocol" className="rounded-xl border border-white/25 p-4 text-sm">
-          <p>Pre: complete the external Pre questionnaire before the activity. Post: complete the external Post questionnaire after Submit. The app does not verify questionnaire responses.</p>
-          {currentPractice && <p role="status" className="mt-2">{currentPractice.status === 'skipped' ? 'Gesture practice skipped by researcher' : 'Gesture practice completed'} · saved receipt · {new Date(currentPractice.at).toISOString()} · session {currentPractice.sessionId} · generation {currentPractice.generation} · round {currentPractice.round} · {currentPractice.condition}. Practice examples and models never count toward measured collection.</p>}
-          {!currentPractice && practiceActive && <p className="mt-2">Skip gesture practice — calibration still required. Complete the mandatory resting setup first; then the researcher can authorize skipping gesture rehearsal before any practice example.</p>}
-          {inPractice && !currentPractice && measuredSession?.trials.length === 0 && <details className="mt-3"><summary>Researcher: skip gesture practice</summary>
+        {session.protocolVersion === 'between-subject-v2' && inPractice && !currentPractice && measuredSession?.trials.length === 0 && <details open aria-label="Researcher practice controls" className="mt-3"><summary>Researcher: skip gesture practice</summary>
             <p className="mt-2">Skip rehearsal captures, model and game only. Rest calibration and all measured collection, training and official activity requirements remain.</p>
             <input aria-label="Researcher PIN" type="password" autoComplete="off" value={researcherPin} onChange={event=>setResearcherPin(event.target.value)} className="m-2 rounded bg-slate-800 p-2" />
             <button type="button" disabled={!!recoveryError || !serverVerified || !calibration || !researcherPin.trim() || saving || training || isRecording || countingDown || datasetLocked} onClick={()=>void skipPractice()} className="rounded-xl border border-white/30 px-4 py-2 disabled:opacity-40">Skip gesture practice</button>
             <DismissibleNotice message={saveError} summary="Practice skip not saved" resetKey={saving} />
-          </details>}
-        </section>}
-        {practiceActive && <GuidedPractice
+        </details>}
+
+        {practiceActive && stage !== 'game' && <GuidedPractice
           key={`${session.participantId}:${session.experimentId}:${session.sessionId}:${session.generation}:${session.round}:${session.condition}:${recalibrating}`} streamEpoch={streamEpoch} recalibration={recalibrating}
           onCancel={recalibrating ? () => { setRecalibrating(false); setPracticeCue('auto'); } : undefined}
           session={session} points={recordingSignalData} streaming={isStreaming} source={signalMode} channel={channelIndex}
@@ -1781,13 +1869,13 @@ export default function StudySession() {
           <DismissibleNotice message={practiceArchive.current?.error ?? ''} summary="Practice save issue" />
           {!!practiceArchive.current?.pending.length && <button data-practice-target="practice-save-retry" type="button" className="mt-3 rounded-xl border border-white/30 px-4 py-2" onClick={() => void practiceArchive.current?.flush()}>Retry saving practice</button>}
         </section>}
-        {!practiceActive && <StepMap stage={stage} round={session.round} repetitions={session.repetitions} reachedIndex={reachedIndex} canVisit={canVisit} onSelect={goTo} />}
+        {!practiceActive && <StepMap stage={stage} round={session.round} repetitions={session.repeatRoundsVersion === 1 ? undefined : session.repetitions} reachedIndex={reachedIndex} canVisit={canVisit} onSelect={goTo} />}
         {!practiceSetup && stage === 'capture' && !inPractice && !(session.protocolVersion === 'between-subject-v2' && currentPractice) && <button type="button" data-practice-entry disabled={!!recoveryError || isRecording || countingDown || saving || training}
           onClick={() => { if (submissionOperation.current || recoveryBlocked.current || trainingOperation.current) return; cancelOpenCapture('Entering practice.'); setPracticeMode('setup'); }} className="rounded-xl border border-white/30 px-4 py-2.5 text-xs text-slate-200 disabled:opacity-40">Reopen guided practice</button>}
 
         {!practiceActive && stage === 'capture' && <section aria-label="Fixed rest calibration" className="rounded-xl border border-white/30 p-4 text-sm">
           <p role="status">{calibration ? 'Resting setup saved.' : 'Redo your resting setup before recording.'}</p>
-          <button data-practice-target="recalibrate" type="button" disabled={!!recoveryError || isRecording || countingDown || saving || training} onClick={() => { if (submissionOperation.current || recoveryBlocked.current || trainingOperation.current) return; cancelOpenCapture('Recalibrating rest only.'); setCalibrationState(null); setRecalibrating(true); }} className="mt-3 rounded-xl border border-white/30 px-4 py-2 disabled:opacity-40">Redo resting setup</button>
+          <button data-practice-target="recalibrate" type="button" disabled={!!recoveryError || isRecording || countingDown || saving || training} onClick={redoRestSetup} className="mt-3 rounded-xl border border-white/30 px-4 py-2 disabled:opacity-40">Redo resting setup</button>
           {session.isTestParticipant === true && <details className="mt-3 text-xs text-slate-400"><summary className="cursor-pointer">Rest setup details</summary>
           <p role="status">{calibration ? `Fixed rest boundary ${calibration.threshold.toPrecision(4)} envelope units · revision ${calibration.revision}. 300ms rest / 100ms activity holds. Graph: 0 to ${calibration.displayMax.toPrecision(4)}, clipped at the top; guide = fixed boundary.` : 'No live rest calibration. Threshold active captures are blocked. Reconnect if needed and explicitly recalibrate; saved samples, models and results are kept.'}</p>
           <p className="mt-2">Check fresh resting activity against the guide, then use comfortable movements in the existing Practice flow. These are detector checks, not physiological onset validation. If checks fail, ask the researcher and repeat rest; the boundary is never tuned from gestures.</p>
@@ -1799,9 +1887,11 @@ export default function StudySession() {
             <Check className="mx-auto h-8 w-8 text-emerald-200" />
             <h2 className="mt-4 text-2xl font-light text-white">Session complete</h2>
             <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-emerald-100/80">
-              {session.protocolVersion === 'between-subject-v2' ? 'Your submitted activity is saved. Complete the external Post questionnaire now. Let the researcher know you have finished.' : session.protocolVersion === 'between-subject-v1' ? 'Your recording session is saved. Let the researcher know you have finished.' : <>All {session.repetitions} rounds are saved. You can close this page.</>}
+              {session.protocolVersion === 'between-subject-v2' ? 'Your submitted activity is saved. Let the researcher know you have finished.' : session.protocolVersion === 'between-subject-v1' ? 'Your recording session is saved. Let the researcher know you have finished.' : <>All {session.repetitions} rounds are saved. You can close this page.</>}
             </p>
             <button type="button" onClick={() => void leave()} className="mt-5 rounded-xl border border-white/25 px-4 py-3">Next participant</button>
+            {repeatRoundAvailable(session) && <button type="button" disabled={advancingRound || !!recoveryError || !serverVerified} onClick={() => void startAnotherRound()} className="mt-5 rounded-xl border border-white/25 px-4 py-3">{advancingRound ? 'Waiting for saved round acknowledgement' : 'Start next round'}</button>}
+            <DismissibleNotice message={saveError} summary="Round transition not confirmed" resetKey={advancingRound} />
           </section>
         )}
 
@@ -1825,7 +1915,7 @@ export default function StudySession() {
                     ? { label: 'Recording', text: `${Math.max(0, (segmentDurationMs - recordingProgress * segmentDurationMs) / 1000).toFixed(1)}s` }
                     : null}
               />
-              <section className="rounded-[24px] border border-white/20 bg-white/[0.025] p-4">
+              <section aria-label="This round recordings" className="h-80 overflow-y-auto rounded-[24px] border border-white/20 bg-white/[0.025] p-4">
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="text-sm font-medium text-white">This round</h2>
                   <span className="text-xs tabular-nums text-slate-500">{trials.length} saved · {cappedKept}/{totalRequired} minimum</span>
@@ -1960,7 +2050,7 @@ export default function StudySession() {
                 </div>
 
                 </fieldset></details>}
-                <div data-practice-target="capture-method" className="mt-4 rounded-2xl border border-white/25 bg-white/[0.03] p-4">
+                <div data-practice-target="capture-method" className="mt-4 h-36 overflow-y-auto rounded-2xl border border-white/25 bg-white/[0.03] p-4">
                   <p className="text-xs font-medium text-cyan-100">
                     {captureStatus.label}
                   </p>
@@ -2070,7 +2160,7 @@ export default function StudySession() {
           </section>
         )}
 
-        {!practiceActive && stage === 'game' && modelReady && streamReady && (
+        {stage === 'game' && modelReady && (
           <GameScreen
             tutorialPractice={!inPractice && currentPractice ? {
               status: currentPractice.status,
@@ -2078,7 +2168,26 @@ export default function StudySession() {
             } : undefined}
             officialSequence={inPractice ? undefined : session.officialSequence}
             runKind={inPractice ? 'practice' : session.runs.some(r=>r.condition===condition && r.round===session.round && r.runKind==='official' && r.completionStatus==='complete') ? 'replay' : 'official'}
-            streamReady={streamReady}
+            streamReady={streamReady && !recoveryError}
+            sourceEpoch={streamEpoch}
+            subscribeSourceInterruptions={subscribeSourceInterruptions}
+            recoveryReady={calibration !== null && !recoveryError}
+            recoveryToken={calibration?.revision}
+            recoveryControls={<div className="my-6 space-y-4">
+              {!streamReady && <button type="button" disabled={!!recoveryError || liveConnectionStatus === 'connecting'} onClick={() => void toggleStream()}>Reconnect device</button>}
+              {streamReady && !recalibrating && <button type="button" disabled={!!recoveryError} onClick={() => { setCalibrationState(null); setRecalibrating(true); }}>Redo resting setup</button>}
+              {recalibrating && <GuidedPractice key={`game-rest:${calibrationScope}:${streamEpoch}`} recalibration streamEpoch={streamEpoch}
+                session={session} points={recordingSignalData} streaming={isStreaming} source={signalMode} channel={channelIndex}
+                settings={{ segmentDurationMs, preTriggerWindowMs, countdownMs, activityThreshold }}
+                bluetoothAvailable={isBluetoothAvailable} connectionMessage={liveConnectionMessage}
+                onSource={() => {}} onStream={() => void toggleStream()} onCue={setPracticeCue}
+                renderSignal={() => null}
+                onComplete={rest => {
+                  if (!isStreaming || !rest.calibration || recoveryBlocked.current) return;
+                  setCalibrationState({ scope: calibrationScope, epoch: streamEpoch, value: rest.calibration as FrozenCalibration });
+                  setRecalibrating(false);
+                }} />}
+            </div>}
             testControls={session.isTestParticipant === true}
             practice={inPractice}
             onExit={() => goTo('review')}
@@ -2097,7 +2206,7 @@ export default function StudySession() {
           />
         )}
 
-        {!practiceActive && stage === 'game' && (!modelReady || !streamReady) && (
+        {!practiceActive && stage === 'game' && !modelReady && (
           <section className="overflow-hidden rounded-[28px] border border-dashed border-emerald-300/30 bg-slate-900/80">
             <div className="flex flex-wrap items-end justify-between gap-3 border-b border-white/20 p-5 md:p-6">
               <div>

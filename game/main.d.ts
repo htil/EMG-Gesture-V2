@@ -44,6 +44,8 @@ export interface GameMountOptions {
 }
 
 export function mountGame(container: HTMLElement, options?: GameMountOptions): () => void;
+export function holdForSourceRecovery(): void;
+export function resumeAfterSourceRecovery(): void;
 export function startJump(): void;
 export function startLaneSwitch(direction: number): void;
 export function queueGestureAction(

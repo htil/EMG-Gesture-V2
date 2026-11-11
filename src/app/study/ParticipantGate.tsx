@@ -1,4 +1,5 @@
 import { whenCollectionSaved } from './collection';
+import { pendingRoundIntent, persistRoundSession } from './roundTransition';
 import DismissibleNotice from './DismissibleNotice';
 import { isPilotProtocol } from './api';
 import { useState, type FormEvent } from 'react';
@@ -40,7 +41,13 @@ export function pickSession(joined: JoinedSession, existing: ClientSession | nul
     && existing.status !== 'completed'
     ? existing
     : null;
+  const joinedRuns = joined.repeatRoundsVersion === 1
+    ? (joined.runs ?? []).filter(run => run.sessionId === joined.sessionId && run.round === joined.round
+      && run.generation === generation && run.condition === condition)
+    : joined.runs ?? [];
   const shared = {
+    repeatRoundsVersion: joined.repeatRoundsVersion, canStartNextRound: joined.canStartNextRound,
+    finalizationReceipt: joined.finalizationReceipt, finalizationReceiptDigest: joined.finalizationReceiptDigest,
     protocolVersion: joined.protocolVersion, conditionOrder: joined.conditionOrder, visit: joined.visit, officialSequence: joined.officialSequence, protocolState: joined.protocolState, groupCode: joined.groupCode, memberCode: joined.memberCode,
     participantId: joined.participantId,
     isTestParticipant: joined.isTestParticipant === true,
@@ -58,6 +65,15 @@ export function pickSession(joined: JoinedSession, existing: ClientSession | nul
     manualTrigger: Boolean(joined.manualTrigger),
     status: 'in_progress' as const,
   };
+  if (joined.status === 'completed' && joined.repeatRoundsVersion === 1) {
+    if (!joined.sessionId) throw new Error('Completed round has no authoritative session. Rejoin required.');
+    const old = existing?.sessionId === joined.sessionId && existing.participantId === joined.participantId
+      && existing.experimentId === joined.experimentId && existing.generation === generation
+      && existing.round === joined.round && existing.condition === condition ? existing : null;
+    return { ...shared, sessionId: joined.sessionId, updatedAt: Date.now(), status: 'completed', stage: 'done',
+      unlockedThrough: 'results', modelRevisionId: old?.modelRevisionId ?? null, trials: old?.trials ?? [],
+      runs: old?.runs ?? joinedRuns, pendingReplacements: [], openCapture: null, trainingRun: null };
+  }
   const preferLocal = Boolean(local && !(isPilotProtocol(joined.protocolVersion) && restored) && (!restored || (local.updatedAt ?? 0) >= (restored.updatedAt ?? 0)));
   if (preferLocal && local) {
     return {
@@ -68,7 +84,7 @@ export function pickSession(joined: JoinedSession, existing: ClientSession | nul
       stage: local.stage === 'done' ? 'capture' : local.stage,
       unlockedThrough: local.unlockedThrough,
       trials: local.trials ?? [],
-      runs: local.runs?.length ? local.runs : restored?.runs ?? joined.runs ?? [],
+      runs: local.runs?.length ? local.runs : restored?.runs ?? joinedRuns,
       pendingReplacements: local.pendingReplacements ?? [],
       openCapture: local.openCapture ?? null,
       trainingRun: local.trainingRun ?? null,
@@ -83,7 +99,7 @@ export function pickSession(joined: JoinedSession, existing: ClientSession | nul
       stage: restored.stage === 'done' ? 'capture' : restored.stage,
       unlockedThrough: restored.unlockedThrough,
       trials: restored.trials ?? [],
-      runs: restored.runs?.length ? restored.runs : joined.runs ?? [],
+      runs: restored.runs?.length ? restored.runs : joinedRuns,
       pendingReplacements: restored.pendingReplacements ?? [],
       openCapture: restored.openCapture?.sampleId ? restored.openCapture : null,
       trainingRun: restored.trainingRun?.revisionId ? restored.trainingRun : null,
@@ -97,7 +113,7 @@ export function pickSession(joined: JoinedSession, existing: ClientSession | nul
     stage: 'capture',
     unlockedThrough: 'capture',
     trials: [],
-    runs: joined.runs ?? [],
+    runs: joinedRuns,
     pendingReplacements: [],
     openCapture: null,
     trainingRun: null,
@@ -123,13 +139,21 @@ export default function ParticipantGate() {
     setFinished(false);
     try {
       await whenCollectionSaved();
+      const pending = pendingRoundIntent();
+      if (pending) {
+        if (pending.source.id !== id) throw new Error('The saved round transition belongs to another participant. Preserve browser storage and recover that transition first.');
+        persistRoundSession(pending.snapshot);
+        navigate('/session');
+        return;
+      }
       const joined = await joinStudy(id);
-      if (joined.status === 'completed') {
+      if (joined.status === 'completed' && joined.repeatRoundsVersion !== 1) {
         setFinished(true);
         return;
       }
       const session = pickSession(joined, loadClientSession());
-      saveClientSession(session);
+      if (session.repeatRoundsVersion === 1) persistRoundSession(session);
+      else saveClientSession(session);
       navigate('/session');
     } catch (joinError) {
       setError(joinError instanceof Error ? joinError.message : 'That ID could not be opened.');

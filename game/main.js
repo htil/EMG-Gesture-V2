@@ -207,7 +207,34 @@ loader.load(
   }
 );
 
+let sourceRecoveryHeld = false;
+
+export function holdForSourceRecovery() {
+  sourceRecoveryHeld = true;
+  pendingGestureAction = null;
+}
+
+export function resumeAfterSourceRecovery() {
+  if (!sourceRecoveryHeld || runOver) return;
+  const upcoming = nearestUpcomingHurdle();
+  if (upcoming && !upcoming.userData.resolved) {
+    const shift = Math.min(0, -READY_START_DISTANCE - 10 - upcoming.position.z);
+    for (const hurdle of hurdles) {
+      if (!hurdle.userData.active || hurdle.userData.resolved) continue;
+      hurdle.position.z += shift;
+      hurdle.userData.recordingComplete = false;
+      previousHurdleZ.set(hurdle, hurdle.position.z);
+    }
+  }
+  pendingGestureAction = null;
+  completeUntil = 0;
+  lastCueUpdate = 0;
+  clock.getDelta();
+  sourceRecoveryHeld = false;
+}
+
 export function mountGame(container, options = {}) {
+  sourceRecoveryHeld = false;
   const resizeRenderer = () => {
     const width = container.clientWidth || window.innerWidth;
     const height = container.clientHeight || window.innerHeight;
@@ -665,7 +692,7 @@ function resetGame() {
 
 function animate() {
   const delta = clock.getDelta();
-  if (runOver || runPaused || activeGameOptions.isStreamReady?.() === false) {
+  if (runOver || runPaused || sourceRecoveryHeld || activeGameOptions.isStreamReady?.() === false) {
     if (runPaused) {
       holdRunningPose();
       updateObstacleCue();
@@ -674,6 +701,8 @@ function animate() {
     return;
   }
   if (!isTutorialRun()) updateObstacleCue();
+  // Capture validation can synchronously hold this very animation tick.
+  if (sourceRecoveryHeld || activeGameOptions.isStreamReady?.() === false) return;
   if (mixer) mixer.update(delta);
   for (const defenderMixer of defenderMixers) defenderMixer.update(delta);
 

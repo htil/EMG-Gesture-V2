@@ -245,6 +245,11 @@ export interface GameScreenProps {
   runKind?: 'official' | 'replay' | 'practice';
   /** Caller attests ready model and active LIVE source, never Mock/file/paused. */
   streamReady?: boolean;
+  sourceEpoch?: number;
+  recoveryReady?: boolean;
+  recoveryToken?: string;
+  subscribeSourceInterruptions?: (listener: (reason: string) => void) => () => void;
+  recoveryControls?: import('react').ReactNode;
   onRunInvalidated?: (reason: string) => void;
 
   /** Server-verified, fully scoped Practice receipt. Omitted for legacy callers. */
@@ -294,6 +299,7 @@ function GameRun({
   officialSequence,
   runKind = 'practice',
   streamReady,
+  sourceEpoch, recoveryReady, recoveryToken, subscribeSourceInterruptions, recoveryControls,
   onRunInvalidated,
   tutorial = false,
   onTutorialComplete,
@@ -301,13 +307,20 @@ function GameRun({
   const fixedProtocol = runKind === 'official' || runKind === 'replay';
   const [tutorialBeat, setTutorialBeat] = useState<TutorialBeat | null>(null);
   const [tutorialComplete, setTutorialComplete] = useState(false);
-  const readyToLaunch = tutorial ? streamReady === true && !!predictWindow && !!actionGestures : !fixedProtocol || (streamReady === true && !!predictWindow && !!actionGestures
+  const launchedRef = useRef(false);
+  const [sourceHeld, setSourceHeld] = useState(false);
+  const sourceHeldRef = useRef(false);
+  const heldCalibrationRef = useRef<string | undefined>(undefined);
+  const holdSourceRef = useRef<(reason: string) => void>(() => {});
+  const readyToLaunch = launchedRef.current || (tutorial ? streamReady === true && !!predictWindow && !!actionGestures : !fixedProtocol || (streamReady === true && !!predictWindow && !!actionGestures
     && validateOfficialSequence(officialSequence)
-    && actionGestures.jump.id === 'wrist-up' && actionGestures.switchLane.id === 'wrist-down');
+    && actionGestures.jump.id === 'wrist-up' && actionGestures.switchLane.id === 'wrist-down'));
   const streamReadyRef = useRef(streamReady);
   streamReadyRef.current = streamReady;
   const invalidatedRef = useRef<string | null>(null);
   const startedAtRef = useRef<number | null>(null);
+  const recoveryPausesRef = useRef<Array<{ startedAt: number; endedAt: number; reason: string }>>([]);
+  const openRecoveryPauseRef = useRef<{ startedAt: number; reason: string } | null>(null);
   const runIdRef = useRef(`${runKind}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`}`);
   const submittedRef = useRef(false);
   const trialMetadataRef = useRef(new Map<string, {trialIndex:number;cueAt:number;latestSampleAt?:number|null;recordingStartedAt?:number|null;recordingEndedAt?:number|null;inferenceStartedAt?:number;inferenceEndedAt?:number;sampleCount?:number}>());
@@ -338,6 +351,7 @@ function GameRun({
   const recordingStartRef = useRef<number | null>(null);
   const previousQteStatusRef = useRef<QteStatus>('rest');
   const processedEncountersRef = useRef(new Set<string>());
+  const completedEncountersRef = useRef(new Set<string>());
   const predictionsRef = useRef(new Map<string, GamePrediction | null>());
   const outcomesRef = useRef<Array<GestureTestOutcome & {trialIndex?:number;cueAt?:number;recordingStartedAt?:number|null;recordingEndedAt?:number|null;inferenceStartedAt?:number;inferenceEndedAt?:number;sampleCount?:number}>>([]);
   const scoreRef = useRef(0);
@@ -359,6 +373,7 @@ function GameRun({
   useEffect(() => {
     const container = containerRef.current;
     if (!container || !readyToLaunch || invalidatedRef.current) return;
+    launchedRef.current = true;
     startedAtRef.current = Date.now();
 
     let cancelled = false;
@@ -367,6 +382,7 @@ function GameRun({
     setDebugKeyboardEnabled(testControls && !fixedProtocol);
     scoreRef.current = 0;
     outcomesRef.current = [];
+    completedEncountersRef.current.clear();
     gameOverStartedRef.current = false;
     processedEncountersRef.current = new Set();
     predictionsRef.current = new Map();
@@ -399,9 +415,9 @@ function GameRun({
           onTutorialHold: tutorial ? (beat) => { tutorialHeldRef.current = true; setTutorialBeat(beat); } : undefined,
           officialSequence: fixedProtocol && validateOfficialSequence(officialSequence) ? officialSequence : undefined,
           jumpGestureId: actionGesturesRef.current?.jump.id,
-          isStreamReady: () => !invalidatedRef.current && (!(fixedProtocol || tutorial) || streamReadyRef.current === true),
+          isStreamReady: () => !sourceHeldRef.current && !invalidatedRef.current && (!(fixedProtocol || tutorial) || streamReadyRef.current === true),
           getRecordingProgress: (encounterId, trialIndex) => {
-            if (tutorial && tutorialHeldRef.current) return 0;
+            if (sourceHeldRef.current || (tutorial && tutorialHeldRef.current)) return 0;
             let metadata = trialMetadataRef.current.get(encounterId);
             if (!metadata) {
               metadata = {trialIndex, cueAt: Date.now()};
@@ -415,11 +431,11 @@ function GameRun({
             metadata.sampleCount = window.points.length;
             const latest = window.latestAt;
             if (fixedProtocol && window.invalidReason) {
-              invalidate(window.invalidReason);
+              holdSourceRef.current(window.invalidReason);
               return 0;
             }
             if (fixedProtocol && (streamReadyRef.current !== true || (now - metadata.cueAt > 1000 && (!latest || now - latest > 1000)))) {
-              invalidate('Live signal stopped during evaluation');
+              holdSourceRef.current('Live signal stopped during evaluation');
               return 0;
             }
             if (!fixedProtocol && now - metadata.cueAt > 5000 && !window.complete) return 1;
@@ -429,6 +445,7 @@ function GameRun({
           obstacleCount,
           startingLives,
           onQteUpdate: (nextState) => {
+            if (sourceHeldRef.current) return;
             const gestures = actionGesturesRef.current;
             const expectedGesture = nextState.expectedAction === 'switch-lane'
               ? gestures?.switchLane
@@ -454,7 +471,7 @@ function GameRun({
               const metadata = trialMetadataRef.current.get(nextState.encounterId);
               const window = inferenceWindow(emgPointsRef.current, metadata?.cueAt ?? recordingStartRef.current ?? Date.now(), Date.now(), metadata?.latestSampleAt);
               if (fixedProtocol && (invalidatedRef.current || window.invalidReason || streamReadyRef.current !== true)) {
-                invalidate(window.invalidReason ?? 'Live signal stopped during evaluation');
+                holdSourceRef.current(window.invalidReason ?? 'Live signal stopped during evaluation');
                 return;
               }
               if (metadata) metadata.inferenceStartedAt = Date.now();
@@ -489,6 +506,11 @@ function GameRun({
             setRunnerQteState(displayState);
           },
           onObstacleResult: ({ correct, encounterId, expectedAction, trialIndex }) => {
+            if (sourceHeldRef.current) return;
+            const indexed = typeof trialIndex === 'number' && Number.isInteger(trialIndex) && trialIndex > 0;
+            if (indexed
+              ? outcomesRef.current.some(outcome => outcome.trialIndex === trialIndex)
+              : completedEncountersRef.current.has(encounterId)) return;
             setTotalAttempts((current) => current + 1);
             setFeedback({ correct, id: Date.now() });
             if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
@@ -508,6 +530,7 @@ function GameRun({
               : gestures?.jump;
             const prediction = predictionsRef.current.get(encounterId) ?? null;
             if (expectedGesture && !tutorial) {
+              completedEncountersRef.current.add(encounterId);
               outcomesRef.current.push({
                 ...trialMetadataRef.current.get(encounterId),
                 trialIndex,
@@ -542,6 +565,34 @@ function GameRun({
     };
   }, [obstacleCount, startingLives, testControls, readyToLaunch]);
 
+  holdSourceRef.current = (reason) => {
+    if (!launchedRef.current || sourceHeldRef.current || gameOverStartedRef.current) return;
+    openRecoveryPauseRef.current = { startedAt: Math.max(startedAtRef.current ?? Date.now(), Date.now()), reason };
+    heldCalibrationRef.current = recoveryToken;
+    sourceHeldRef.current = true;
+    gameModuleRef.current?.holdForSourceRecovery();
+    setSourceHeld(true);
+  };
+  useEffect(() => subscribeSourceInterruptions?.(reason => holdSourceRef.current(reason)), [subscribeSourceInterruptions]);
+  const previousEpochRef = useRef(sourceEpoch);
+  useEffect(() => {
+    if (streamReady === false || previousEpochRef.current !== sourceEpoch) holdSourceRef.current('Source changed');
+    previousEpochRef.current = sourceEpoch;
+  }, [streamReady, sourceEpoch]);
+
+  const watchdogBoundaryRef = useRef(Date.now());
+  useEffect(() => {
+    if (!(fixedProtocol || tutorial)) return;
+    const timer = setInterval(() => {
+      if (!launchedRef.current || sourceHeldRef.current || gameOverStartedRef.current) return;
+      const now = Date.now();
+      const window = inferenceWindow(emgPointsRef.current, watchdogBoundaryRef.current, now);
+      if (window.invalidReason || (now - watchdogBoundaryRef.current > 1000 && (window.latestAt === null || now - window.latestAt > 1000))) {
+        holdSourceRef.current(window.invalidReason ?? 'No fresh live signal');
+      }
+    }, 100);
+    return () => clearInterval(timer);
+  }, [fixedProtocol, tutorial]);
   const visibleQteState = qteState ?? runnerQteState;
   const visibleScore = score ?? runnerScore;
   const visibleStreak = streak ?? runnerStreak;
@@ -555,6 +606,10 @@ function GameRun({
     if (tutorial) return;
     if (submittedRef.current) return;
     const complete = !invalidatedRef.current && (fixedProtocol ? outcomesRef.current.length === 20 : typeof obstacleSuccess === 'boolean');
+    const endedAt = Date.now();
+    const sourceRecoveryPauses = [...recoveryPausesRef.current];
+    if (openRecoveryPauseRef.current) sourceRecoveryPauses.push({ ...openRecoveryPauseRef.current, endedAt: Math.max(openRecoveryPauseRef.current.startedAt, endedAt) });
+    const activeDurationMs = Math.max(0, endedAt - (startedAtRef.current ?? endedAt) - sourceRecoveryPauses.reduce((sum, pause) => sum + pause.endedAt - pause.startedAt, 0));
     const payload = {
       runKind,
       runId: runIdRef.current,
@@ -562,7 +617,9 @@ function GameRun({
       completionStatus: complete ? 'complete' as const : 'incomplete' as const,
       invalidationReason: invalidatedRef.current ?? (complete ? null : 'Run exited before completion'),
       startedAt: startedAtRef.current ?? undefined,
-      endedAt: Date.now(),
+      endedAt,
+      activeDurationMs,
+      sourceRecoveryPauses,
       condition: condition!,
       difficulty: DEFAULT_DIFFICULTY,
       gameScore: score ?? scoreRef.current,
@@ -585,6 +642,27 @@ function GameRun({
   return (
     <div className="fixed inset-0 z-[100] overflow-hidden bg-slate-950 text-white">
       <div ref={containerRef} className="h-full w-full" />
+      {sourceHeld && <section role="alert" aria-label="Game signal recovery" className="fixed inset-0 z-[200] overflow-auto bg-slate-950/95 p-8">
+        <h2>Game held — reconnect, then redo resting setup</h2>
+        <p>Completed trials and the current model are kept. The interrupted cue will restart, not count as a wrong prediction. Do not reload.</p>
+        {recoveryControls}
+        <button type="button" disabled={streamReady !== true || recoveryReady !== true || recoveryToken === heldCalibrationRef.current} onClick={() => {
+          if (streamReadyRef.current !== true || recoveryReady !== true || recoveryToken === heldCalibrationRef.current) return;
+          for (const [id, metadata] of trialMetadataRef.current) {
+            if (!outcomesRef.current.some(outcome => outcome.trialIndex === metadata.trialIndex)) {
+              trialMetadataRef.current.delete(id); processedEncountersRef.current.delete(id); predictionsRef.current.delete(id);
+            }
+          }
+          if (openRecoveryPauseRef.current) {
+            recoveryPausesRef.current.push({ ...openRecoveryPauseRef.current, endedAt: Math.max(openRecoveryPauseRef.current.startedAt, Date.now()) });
+            openRecoveryPauseRef.current = null;
+          }
+          watchdogBoundaryRef.current = Date.now();
+          recordingStartRef.current = null; previousQteStatusRef.current = 'rest';
+          gameModuleRef.current?.resumeAfterSourceRecovery();
+          sourceHeldRef.current = false; setSourceHeld(false);
+        }}>Resume same run</button>
+      </section>}
       {!readyToLaunch && <p role="alert" className="fixed inset-x-0 top-1/2 z-[120] text-center text-rose-200">Evaluation requires a ready model, active live stream, and valid saved 20-trial sequence.</p>}
       <div className="pointer-events-none fixed inset-0 z-40 bg-[linear-gradient(180deg,rgba(2,6,23,.76)_0%,transparent_25%,transparent_72%,rgba(2,6,23,.62)_100%)]" />
 

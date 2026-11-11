@@ -55,6 +55,46 @@ import { isPilotProtocol } from '../study/api';
 
 const inputClass = 'w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-200/40';
 
+function recoverySummary(participant: Participant, alert?: SaveAlert) {
+  if (alert) return `Save warning: ${alert.pending} pending`;
+  const history = participant.roundHistory;
+  if (history) {
+    if ([...history.visits, ...history.checkpoints, ...history.finalizations, ...history.advances].some(entry => !entry.record)) return 'History evidence unavailable';
+    if (history.finalizations.some(entry => entry.record?.committed === false)) return 'Finalization journal pending';
+    if (history.advances.some(entry => entry.record?.committed === false)) return 'Round advance journal pending';
+  }
+  if (participant.status === 'completed') return participant.repeatRoundsVersion === 1
+    ? participant.canStartNextRound ? 'Submitted; next round available' : 'Submitted; next round unavailable'
+    : 'Completed';
+  const checkpoint = history?.checkpoints.find(entry => entry.record?.round === participant.currentRound && entry.record.generation === history.generation)?.record;
+  return checkpoint ? `Current checkpoint: ${checkpoint.stage}` : participant.status === 'assigned' ? 'Not started' : 'No recovery status reported';
+}
+
+function ParticipantHistory({ participant }: { participant: Participant }) {
+  const history = participant.roundHistory;
+  const submitted = new Set(history?.finalizations.filter(entry => entry.record?.committed).map(entry => {
+    const request = entry.record!.payload.request;
+    return JSON.stringify([request.generation, request.round, request.sessionId]);
+  }));
+  return <details aria-label={`Round history for ${participant.id}`} className="mt-2 text-xs">
+    <summary className="cursor-pointer text-amber-100">Round history</summary>
+    {history ? <div className="mt-2 max-h-80 space-y-2 overflow-y-auto pr-2">
+      <p>Generation {history.generation}{participant.sessionId ? ` · Current session ${participant.sessionId}` : ''}</p>
+      <p className="font-medium">Visits</p>
+      {history.visits.length === 0 && <p>No saved visits yet.</p>}
+      {history.visits.map(entry => <p key={entry.path}>{entry.record
+        ? <>Round {entry.record.visit} · {submitted.has(JSON.stringify([entry.record.generation, entry.record.visit, entry.record.sessionId])) ? 'Submitted' : entry.record.visit === participant.currentRound && participant.status === 'in_progress' ? 'Active' : 'Recorded'} · session {entry.record.sessionId ?? 'not bound'} · {entry.path}</>
+        : <>Unavailable: {entry.path}</>}</p>)}
+      <p className="font-medium">Checkpoints</p>
+      {history.checkpoints.map(entry => <p key={entry.path}>{entry.record ? <>Round {entry.record.round} · {entry.record.stage} · {entry.path}</> : <>Unavailable: {entry.path}</>}</p>)}
+      <p className="font-medium">Submission receipts</p>
+      {history.finalizations.map(entry => <p key={entry.path}>{entry.record ? <>{entry.record.committed ? 'Committed' : 'Pending'} · {entry.path}</> : <>Unavailable: {entry.path}</>}</p>)}
+      <p className="font-medium">Round advances</p>
+      {history.advances.map(entry => <p key={entry.path}>{entry.record ? <>{entry.record.committed ? 'Committed' : 'Pending'} · {entry.path}</> : <>Unavailable: {entry.path}</>}</p>)}
+    </div> : <p className="mt-2">History not provided by the server.</p>}
+  </details>;
+}
+
 export default function AdminApp() {
   const [pin, setPin] = useState(loadAdminPin);
   const [authed, setAuthed] = useState(false);
@@ -456,7 +496,7 @@ export default function AdminApp() {
               )}
 
               <div className="mt-5 overflow-x-auto">
-                <table className="w-full min-w-[720px] text-left text-sm">
+                <table className="w-full min-w-[960px] text-left text-sm">
                   <thead className="text-[10px] uppercase tracking-[0.16em] text-slate-500">
                     <tr>
                       <th className="pb-3 font-medium">ID</th>
@@ -464,6 +504,7 @@ export default function AdminApp() {
                       <th className="pb-3 font-medium">Assignment</th>
                       <th className="pb-3 font-medium">Status</th>
                       <th className="pb-3 font-medium">Round</th>
+                      <th className="pb-3 font-medium">Recovery status</th>
                       <th className="pb-3 font-medium">Actions</th>
                     </tr>
                   </thead>
@@ -491,8 +532,13 @@ export default function AdminApp() {
                           </div>
                         </td>
                         <td className="py-3 text-slate-300">{STATUS_LABEL[participant.status]}</td>
-                        <td className="py-3 tabular-nums text-slate-300">
-                          {participant.status === 'completed' ? `${selected.repetitions} / ${selected.repetitions}` : `${participant.currentRound} / ${selected.repetitions}`}
+                        <td aria-label={`Round progress for ${participant.id}`} className="py-3 tabular-nums text-slate-300">
+                          <p>Current round {participant.currentRound}</p>
+                          <p>{participant.roundsCompleted} completed</p>
+                          <ParticipantHistory participant={participant} />
+                        </td>
+                        <td aria-label={`Recovery status for ${participant.id}`} className="py-3 text-xs text-slate-300">
+                          {recoverySummary(participant, saveAlerts.find(alert => alert.participantId === participant.id))}
                         </td>
                         <td className="py-3">
                           <div className="flex gap-1">
@@ -520,6 +566,7 @@ export default function AdminApp() {
                   </tbody>
                 </table>
                 {participants.length === 0 && <p className="py-8 text-sm text-slate-500">Generate IDs to give to participants.</p>}
+                <p className="mt-3 text-xs text-slate-500">Recovery status reflects the last server response. Participant-browser pending saves are not visible here.</p>
               </div>
             </section>
 

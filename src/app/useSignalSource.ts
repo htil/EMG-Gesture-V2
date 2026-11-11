@@ -23,6 +23,7 @@ type UseSignalSourceResult = {
   signalSourceMode: SignalSourceMode;
   isStreaming: boolean;
   streamEpoch: number;
+  streamInterruptionReason: 'stopped' | 'disconnected' | null;
   selectSignalSourceMode: (mode: SignalSourceMode) => Promise<void>;
   startStream: () => Promise<void>;
   startStreamForMode: (mode: SignalSourceMode) => Promise<void>;
@@ -90,6 +91,7 @@ export function useSignalSource(
   const [signalSourceMode, setSignalSourceMode] = useState<SignalSourceMode>('mock');
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamEpoch, setStreamEpoch] = useState(0);
+  const [streamInterruptionReason, setStreamInterruptionReason] = useState<'stopped' | 'disconnected' | null>(null);
   const [liveConnectionStatus, setLiveConnectionStatus] = useState<LiveConnectionStatus>('disconnected');
   const [liveConnectionMessage, setLiveConnectionMessage] = useState('Idle. Select a source and start stream.');
   const [liveDeviceName, setLiveDeviceName] = useState<string | null>(null);
@@ -209,6 +211,7 @@ export function useSignalSource(
   }, []);
 
   const selectSignalSourceMode = useCallback(async (mode: SignalSourceMode) => {
+    setStreamInterruptionReason(null);
     notifyInterruption('source_or_channel_changed');
     setStreamEpoch(epoch => epoch + 1);
     await disconnectGanglion();
@@ -225,6 +228,7 @@ export function useSignalSource(
   }, [disconnectGanglion, resetDisplayState]);
 
   const startMockStream = useCallback(async () => {
+    setStreamInterruptionReason(null);
     notifyInterruption('source_reset');
     setStreamEpoch(epoch => epoch + 1);
     await disconnectGanglion();
@@ -292,6 +296,7 @@ export function useSignalSource(
 
       connection.onDisconnected(() => {
         if (ganglionRef.current !== connection) return;
+        setStreamInterruptionReason('disconnected');
         notifyInterruption('disconnected');
         setStreamEpoch(epoch => epoch + 1);
         if (ganglionRef.current === connection) {
@@ -331,6 +336,7 @@ export function useSignalSource(
   }, [signalSourceMode, startStreamForMode]);
 
   const stopStream = useCallback(async () => {
+    setStreamInterruptionReason('stopped');
     notifyInterruption('stopped');
     setStreamEpoch(epoch => epoch + 1);
     await disconnectGanglion();
@@ -460,6 +466,7 @@ export function useSignalSource(
     signalSourceMode,
     isStreaming,
     streamEpoch,
+    streamInterruptionReason,
     selectSignalSourceMode,
     startStream,
     startStreamForMode,

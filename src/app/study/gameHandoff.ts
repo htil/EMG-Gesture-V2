@@ -28,6 +28,8 @@ export interface GameRunHandoff {
   invalidationReason?: string | null;
   startedAt?: number;
   endedAt?: number;
+  activeDurationMs?: number;
+  sourceRecoveryPauses?: Array<{ startedAt: number; endedAt: number; reason: string }>;
   runKind?: 'official' | 'replay' | 'practice';
   officialSequence?: Array<'wrist-up' | 'wrist-down'>;
   signalSource?: 'mock' | 'live';

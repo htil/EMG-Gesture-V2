@@ -58,7 +58,26 @@ export interface Experiment {
   inProgressCount: number;
 }
 
+export interface HistoryEntry<T> { path: string; record: T | null }
+export interface HistoryJournal {
+  committed: boolean;
+  payload: { request: { generation: number; round?: number; fromRound?: number; sessionId?: string; fromSessionId?: string }; response?: { round?: number; sessionId?: string } };
+}
+export interface ParticipantRoundHistory {
+  generation: number;
+  activeRound: number;
+  status: ParticipantStatus;
+  visits: Array<HistoryEntry<ProtocolState & { completedAt?: string }>>;
+  finalizations: Array<HistoryEntry<HistoryJournal>>;
+  advances: Array<HistoryEntry<HistoryJournal>>;
+  checkpoints: Array<HistoryEntry<Pick<RestoredSession, 'generation' | 'round' | 'sessionId' | 'stage'>>>;
+}
+
 export interface Participant {
+  roundHistory?: ParticipantRoundHistory;
+  repeatRoundsVersion?: 1;
+  canStartNextRound?: boolean;
+  sessionId?: string | null;
   protocolVersion?: string;
   conditionOrder?: Assignment[];
   groupCode?: string | null;
@@ -151,6 +170,10 @@ export interface SaveAlert {
 }
 
 export interface ClientSession {
+  repeatRoundsVersion?: 1;
+  canStartNextRound?: boolean;
+  finalizationReceipt?: unknown;
+  finalizationReceiptDigest?: string | null;
   protocolVersion?: string;
   conditionOrder?: Assignment[];
   visit?: number;
@@ -219,6 +242,8 @@ export function loadClientSession(): ClientSession | null {
     if (stage !== 'capture' && stage !== 'review' && stage !== 'game' && stage !== 'results' && stage !== 'done') return null;
     if (unlockedThrough !== 'capture' && unlockedThrough !== 'review' && unlockedThrough !== 'game' && unlockedThrough !== 'results') return null;
     return {
+      repeatRoundsVersion: parsed.repeatRoundsVersion, canStartNextRound: parsed.canStartNextRound,
+      finalizationReceipt: parsed.finalizationReceipt, finalizationReceiptDigest: parsed.finalizationReceiptDigest,
       protocolVersion: parsed.protocolVersion ?? 'legacy-fixed-v1',
       conditionOrder: parsed.conditionOrder, visit: parsed.visit, officialSequence: parsed.officialSequence, protocolState: parsed.protocolState ?? null, groupCode: parsed.groupCode, memberCode: parsed.memberCode,
       participantId: String(parsed.participantId ?? ''),
@@ -292,15 +317,29 @@ async function request<T>(path: string, init?: RequestInit, pin?: string): Promi
   return payload as T;
 }
 
+export type JoinedSession = Omit<ClientSession, 'stage' | 'trials' | 'manualTrigger' | 'unlockedThrough' | 'pendingReplacements' | 'openCapture' | 'trainingRun' | 'updatedAt' | 'sessionId' | 'runs'> & {
+  sessionId?: string | null;
+  manualTrigger?: boolean;
+  runs?: StoredGameRun[];
+  restored?: RestoredSession | null;
+};
 export function joinStudy(id: string) {
-  return request<Omit<ClientSession, 'stage' | 'trials' | 'manualTrigger' | 'unlockedThrough' | 'pendingReplacements' | 'openCapture' | 'trainingRun' | 'updatedAt'> & {
-    manualTrigger?: boolean;
-    runs?: StoredGameRun[];
-    restored?: RestoredSession | null;
-  }>('/api/study/join', {
+  return request<JoinedSession>('/api/study/join', {
     method: 'POST',
     body: JSON.stringify({ id }),
   });
+}
+
+export interface NextRoundSource {
+  id: string; experimentId: string; generation: number; condition: Assignment;
+  fromRound: number; fromSessionId: string; requestId: string; finalizationReceiptDigest: string;
+}
+export interface NextRoundReceipt {
+  repeatRoundsVersion: 1; participantId: string; experimentId: string; generation: number; condition: Assignment;
+  fromRound: number; fromSessionId: string; round: number; sessionId: string; status: 'in_progress'; requestId: string;
+}
+export function startNextRound(source: NextRoundSource) {
+  return request<NextRoundReceipt>('/api/study/protocol/next-round', { method: 'POST', body: JSON.stringify(source) });
 }
 
 export function saveGameRun(id: string, run: StoredGameRun) {

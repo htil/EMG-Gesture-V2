@@ -21,7 +21,7 @@ export default function PracticeGuide({ step, busy = false }: { step: PracticeGu
     if (typeof document === 'undefined' || busy || !expanded || !step.target) return;
     const element = document.querySelector<HTMLElement>(step.target);
     if (!element) return;
-    element.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+    // Recording/status steps must not move the participant's viewport.
     const update = () => {
       const next = element.getBoundingClientRect();
       if (!element.isConnected || next.width <= 0 || next.height <= 0 || next.bottom < 0 || next.top > window.innerHeight) { setRect(null); return; }
@@ -49,7 +49,8 @@ export default function PracticeGuide({ step, busy = false }: { step: PracticeGu
   }, [step.id, step.target, step.title, step.body, busy, expanded]);
   return <>
     {rect && <div data-practice-highlight aria-hidden="true" className="pointer-events-none fixed z-30 rounded-2xl border-[3px] border-cyan-300 shadow-[0_0_0_9999px_rgba(2,6,23,0.28)]" style={rect} />}
-    <section ref={panel} aria-label="Practice guidance" data-guide-step={step.id} data-guide-side={placement?.side} style={placement ? { position: 'fixed', left: placement.left, top: placement.top, width: placement.width, maxHeight: 'calc(100vh - 24px)', overflowY: 'auto', zIndex: 40 } : undefined} className="relative z-40 rounded-2xl border-2 border-cyan-300/60 bg-slate-950 px-5 py-4 text-white shadow-xl">
+    <div data-practice-guide-slot style={{ height: 256 }}>
+    <section ref={panel} aria-label="Practice guidance" data-guide-step={step.id} data-guide-side={placement?.side} style={placement ? { position: 'fixed', left: placement.left, top: placement.top, width: placement.width, maxHeight: 'calc(100vh - 24px)', overflowY: 'auto', zIndex: 40 } : { maxHeight: '100%', overflowY: 'auto' }} className="relative z-40 rounded-2xl border-2 border-cyan-300/60 bg-slate-950 px-5 py-4 text-white shadow-xl">
       <div className="flex items-start justify-between gap-4">
         <div><p className="text-xs uppercase tracking-wider text-cyan-200">Practice</p><h2 aria-live="polite" className="mt-1 text-lg font-semibold">{step.title}</h2></div>
         <button type="button" aria-expanded={expanded} className="shrink-0 rounded-lg border border-white/30 px-3 py-2 text-xs" onClick={() => setExpanded(value => !value)}>{expanded ? 'Hide guidance' : 'Show guidance again'}</button>
@@ -57,5 +58,6 @@ export default function PracticeGuide({ step, busy = false }: { step: PracticeGu
       {expanded && <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-200">{step.body}</p>}
       {step.action && <button type="button" disabled={busy || step.action.disabled} className="mt-3 rounded-xl bg-cyan-300 px-5 py-3 text-sm font-medium text-slate-950 disabled:opacity-40" onClick={step.action.onClick}>{step.action.label}</button>}
     </section>
+    </div>
   </>;
 }
