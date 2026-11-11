@@ -1,3 +1,22 @@
+# Combined pre-pilot integration — engineering verification candidate
+
+Current local branch: `integration/pre-pilot-combined-20261111`, based on `e9cb573`.
+Read **[PILOT-INTEGRATION.md](PILOT-INTEGRATION.md)** for teammate provenance,
+intentional conflict resolutions, safe Windows launch instructions and remaining
+readiness gates. The original `pre-pilot-20261111` rollback is preserved.
+
+This candidate combines the safe ID-entry handling fix with John's recording-zone
+visual/tutorial improvements while retaining the existing study flow and recovery.
+It is **not participant-ready without actual hardware and persistence acceptance**.
+A permanently rejected queued save is retained and reported, not bypassed.
+
+---
+
+## Historical transfer notes — not the current branch/clone instructions
+
+The material below describes an earlier WIP transfer. Its branch names, commands
+and old test totals are archival; use the current integration guide above.
+
 # WIP capture-state transfer — NOT pilot-ready
 
 This is an urgent **source-only WIP snapshot**, not a validated replacement release.

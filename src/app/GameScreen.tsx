@@ -46,6 +46,34 @@ interface GamePrediction {
   confidence: number;
 }
 
+function arrowHead(tip: { x: number; y: number }, tail: { x: number; y: number }, length = 18) {
+  const dx = tip.x - tail.x;
+  const dy = tip.y - tail.y;
+  const span = Math.hypot(dx, dy) || 1;
+  const ux = dx / span;
+  const uy = dy / span;
+  const px = -uy;
+  const py = ux;
+  const baseX = tip.x - ux * length;
+  const baseY = tip.y - uy * length;
+  const wing = length * 0.62;
+  return { x2: baseX, y2: baseY, points: `${tip.x},${tip.y} ${baseX + px * wing},${baseY + py * wing} ${baseX - px * wing},${baseY - py * wing}` };
+}
+
+function TrackGuideArrows({ points }: { points: Array<{ x: number; y: number }> }) {
+  return <svg data-game-track-guide aria-hidden="true" className="pointer-events-none fixed inset-0 z-[155] h-screen w-screen">
+    {points.map((tip, index) => {
+      const tail = { x: tip.x + (index === 0 ? -1 : 1) * 36, y: tip.y + 78 };
+      const head = arrowHead(tip, tail);
+      return <g key={index}>
+        <line x1={tail.x} y1={tail.y} x2={head.x2} y2={head.y2} stroke="#082f49" strokeWidth="9" strokeLinecap="round" />
+        <line x1={tail.x} y1={tail.y} x2={head.x2} y2={head.y2} stroke="#67e8f9" strokeWidth="4" strokeLinecap="round" />
+        <polygon points={head.points} fill="#67e8f9" stroke="#082f49" strokeWidth="3" strokeLinejoin="round" />
+      </g>;
+    })}
+  </svg>;
+}
+
 const QTE_COPY: Record<QteStatus, { label: string; hint: string; color: string }> = {
   rest: { label: 'Rest', hint: 'Relax and watch for the next cue', color: '#22d3ee' },
   ready: { label: 'Get Ready', hint: 'Prepare the target gesture', color: '#38bdf8' },
@@ -307,6 +335,9 @@ function GameRun({
   const fixedProtocol = runKind === 'official' || runKind === 'replay';
   const [tutorialBeat, setTutorialBeat] = useState<TutorialBeat | null>(null);
   const [tutorialComplete, setTutorialComplete] = useState(false);
+  // Presentation substeps share the existing intro hold: no new recording/run state.
+  const [tutorialIntroStep, setTutorialIntroStep] = useState<'timer' | 'lives' | 'track'>('timer');
+  const [trackArrowPoints, setTrackArrowPoints] = useState<Array<{ x: number; y: number }>>([]);
   const launchedRef = useRef(false);
   const [sourceHeld, setSourceHeld] = useState(false);
   const sourceHeldRef = useRef(false);
@@ -593,6 +624,18 @@ function GameRun({
     }, 100);
     return () => clearInterval(timer);
   }, [fixedProtocol, tutorial]);
+  useEffect(() => {
+    if (!tutorial || tutorialComplete || tutorialBeat !== 'intro' || tutorialIntroStep !== 'track') return;
+    let frame = 0;
+    const tick = () => {
+      const next = gameModuleRef.current?.closestRecordingZoneScreenPoints() ?? [];
+      setTrackArrowPoints(current => current.length === next.length && current.every((point, index) => point.x === next[index].x && point.y === next[index].y) ? current : next);
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [tutorial, tutorialComplete, tutorialBeat, tutorialIntroStep]);
+
   const visibleQteState = qteState ?? runnerQteState;
   const visibleScore = score ?? runnerScore;
   const visibleStreak = streak ?? runnerStreak;
@@ -668,7 +711,7 @@ function GameRun({
 
       <header className="pointer-events-none fixed inset-x-0 top-0 z-[110] flex items-start justify-between gap-3 p-3 md:p-5">
         <div className="flex items-stretch gap-2">
-          <div className="rounded-2xl border border-rose-300/20 bg-slate-950/80 px-3 py-2.5 shadow-2xl backdrop-blur-md md:px-4" aria-live="polite">
+          <div data-game-guide-target="lives" className="rounded-2xl border border-rose-300/20 bg-slate-950/80 px-3 py-2.5 shadow-2xl backdrop-blur-md md:px-4" aria-live="polite">
             <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-rose-300">Lives</p>
             <div className="mt-1 flex max-w-36 flex-wrap items-center gap-1" role="img" aria-label={`${lives} of ${maxLives} lives remaining`}>
               {Array.from({ length: maxLives }, (_, index) => (
@@ -742,7 +785,7 @@ function GameRun({
       )}
 
       <aside className="pointer-events-none fixed right-3 top-24 z-[110] flex max-h-[calc(100vh-7rem)] w-52 flex-col gap-3 overflow-y-auto pb-2 md:right-5 md:top-28 md:w-60">
-        <section className="rounded-2xl border border-cyan-300/15 bg-slate-950/80 p-4 shadow-2xl backdrop-blur-md">
+        <section data-game-guide-target="timer" className="rounded-2xl border border-cyan-300/15 bg-slate-950/80 p-4 shadow-2xl backdrop-blur-md">
           <QteRing state={visibleQteState} />
           <div className="mt-3 border-t border-white/8 pt-3 text-center">
             <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">Target Gesture</p>
@@ -757,18 +800,26 @@ function GameRun({
         )}
       </aside>
 
-      {tutorial && (tutorialBeat || tutorialComplete) && <GameGuide centered
-        body={tutorialComplete ? 'All 8 unscored tutorial obstacles are complete. Next starts a fresh 20-trial evaluation.'
-          : tutorialBeat === 'intro' ? 'Try 8 unscored obstacles with your current frozen model. No examples or results are saved. Read each explanation, then select Next.'
-          : tutorialBeat === 'wrist-up' ? 'Wrist up jumps over an obstacle. Next starts a fresh two-second gesture window; reading time is not recorded.'
-          : tutorialBeat === 'wrist-down' ? 'Wrist down switches lanes. Next starts a fresh two-second gesture window; reading time is not recorded.'
-          : 'Continue through all 8 unscored obstacles. Mistakes do not cost lives. Next resumes the tutorial.'}
+      {tutorial && (tutorialBeat || tutorialComplete) && <GameGuide
+        centered={tutorialComplete || tutorialBeat !== 'intro'}
+        dock={!tutorialComplete && tutorialBeat === 'intro' && tutorialIntroStep === 'track' ? 'top' : undefined}
+        target={!tutorialComplete && tutorialBeat === 'intro' && tutorialIntroStep !== 'track' ? `[data-game-guide-target="${tutorialIntroStep}"]` : undefined}
+        body={tutorialComplete ? 'Practice complete. Next starts the 20-trial evaluation.'
+          : tutorialBeat === 'intro' ? tutorialIntroStep === 'timer' ? "This timer displays Rest and Recording. Stay ready."
+            : tutorialIntroStep === 'lives' ? 'Lives are tracked here. Missed obstacles cost a life during the evaluation.'
+            : 'When you enter the red portion of the track, perform and hold the gesture.'
+          : tutorialBeat === 'wrist-up' ? 'Wrist up jumps over hurdles. Select Next, then perform the gesture.'
+          : tutorialBeat === 'wrist-down' ? 'Wrist down switches lanes. Select Next, then perform the gesture.'
+          : 'Continue the practice run. Mistakes here do not cost lives.'}
         onNext={() => {
           if (tutorialComplete) { onTutorialComplete?.(); return; }
+          if (tutorialBeat === 'intro' && tutorialIntroStep === 'timer') { setTutorialIntroStep('lives'); return; }
+          if (tutorialBeat === 'intro' && tutorialIntroStep === 'lives') { setTutorialIntroStep('track'); return; }
           tutorialHeldRef.current = false;
           setTutorialBeat(null);
           gameModuleRef.current?.releaseTutorialHold();
         }} />}
+      {tutorial && !tutorialComplete && tutorialBeat === 'intro' && tutorialIntroStep === 'track' && <TrackGuideArrows points={trackArrowPoints} />}
       <button
         type="button"
         onClick={() => fixedProtocol ? finishRun() : onExit()}

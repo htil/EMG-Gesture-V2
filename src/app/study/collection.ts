@@ -317,10 +317,20 @@ async function flush() {
   releaseWaiters();
 }
 
-export function whenCollectionSaved() {
+export function whenCollectionSaved(signal?: AbortSignal) {
+  if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('Save wait cancelled.'));
   if (queue.length === 0 && !saveError) return Promise.resolve();
-  return new Promise<void>((resolve) => {
-    waiters.push(resolve);
+  return new Promise<void>((resolve, reject) => {
+    // Cancelling an observer never cancels a send, changes scope, or removes records.
+    const cleanup = () => {
+      signal?.removeEventListener('abort', cancelled);
+      const index = waiters.indexOf(saved);
+      if (index >= 0) waiters.splice(index, 1);
+    };
+    const saved = () => { cleanup(); resolve(); };
+    const cancelled = () => { cleanup(); reject(signal?.reason ?? new Error('Save wait cancelled.')); };
+    waiters.push(saved);
+    signal?.addEventListener('abort', cancelled, { once: true });
     if (!flushing) {
       window.clearTimeout(retryTimer);
       retryTimer = 0;

@@ -1,8 +1,8 @@
-import { whenCollectionSaved } from './collection';
+import { retryCollectionSave, subscribeCollectionStatus, whenCollectionSaved, type CollectionStatus } from './collection';
 import { pendingRoundIntent, persistRoundSession } from './roundTransition';
 import DismissibleNotice from './DismissibleNotice';
 import { isPilotProtocol } from './api';
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router';
 import { Activity, ArrowRight } from 'lucide-react';
 import {
@@ -125,20 +125,49 @@ export default function ParticipantGate() {
   const [participantId, setParticipantId] = useState('');
   const [error, setError] = useState('');
   const [finished, setFinished] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [phase, setPhase] = useState<'idle' | 'saving' | 'checking'>('idle');
+  const busy = phase !== 'idle';
+  const [saveStatus, setSaveStatus] = useState<CollectionStatus>({ pending: 0, error: '' });
+  const [saveWaitError, setSaveWaitError] = useState('');
+  const operation = useRef<AbortController | null>(null);
+  useEffect(() => {
+    const unsubscribe = subscribeCollectionStatus(setSaveStatus);
+    return () => { unsubscribe(); };
+  }, []);
+  useEffect(() => () => {
+    operation.current?.abort(new Error('Participant entry closed.'));
+    operation.current = null;
+  }, []);
 
-  const submit = async (event: FormEvent) => {
+  const submit = async (event: FormEvent, retry = false) => {
     event.preventDefault();
+    if (operation.current) return;
     const id = participantId.trim();
     if (!id) {
       setError('Enter the ID you were given.');
       return;
     }
-    setBusy(true);
+    const owner = new AbortController();
+    operation.current = owner;
+    setPhase('saving');
     setError('');
+    setSaveWaitError('');
     setFinished(false);
+    let checkingId = false;
+    let unsubscribe = () => {};
+    let timer: number | undefined;
     try {
-      await whenCollectionSaved();
+      if (retry) void retryCollectionSave();
+      unsubscribe = subscribeCollectionStatus(status => {
+        if (status.error) owner.abort(new Error(status.error));
+      });
+      timer = window.setTimeout(() => owner.abort(new Error('Earlier recordings are still waiting for a save acknowledgement. Entry has not continued. Retry saving; keep this browser storage and the original record folder.')), 10000);
+      await whenCollectionSaved(owner.signal);
+      window.clearTimeout(timer);
+      unsubscribe();
+      if (operation.current !== owner || owner.signal.aborted) return;
+      checkingId = true;
+      setPhase('checking');
       const pending = pendingRoundIntent();
       if (pending) {
         if (pending.source.id !== id) throw new Error('The saved round transition belongs to another participant. Preserve browser storage and recover that transition first.');
@@ -147,6 +176,7 @@ export default function ParticipantGate() {
         return;
       }
       const joined = await joinStudy(id);
+      if (operation.current !== owner || owner.signal.aborted) return;
       if (joined.status === 'completed' && joined.repeatRoundsVersion !== 1) {
         setFinished(true);
         return;
@@ -156,9 +186,15 @@ export default function ParticipantGate() {
       else saveClientSession(session);
       navigate('/session');
     } catch (joinError) {
-      setError(joinError instanceof Error ? joinError.message : 'That ID could not be opened.');
+      if (operation.current === owner) {
+        const message = joinError instanceof Error ? joinError.message : 'That ID could not be opened.';
+        if (checkingId) setError(message);
+        else setSaveWaitError(message);
+      }
     } finally {
-      setBusy(false);
+      window.clearTimeout(timer);
+      unsubscribe();
+      if (operation.current === owner) { operation.current = null; setPhase('idle'); }
     }
   };
 
@@ -186,6 +222,7 @@ export default function ParticipantGate() {
           <input
             id="participant-id"
             value={participantId}
+            disabled={busy}
             autoFocus
             autoCapitalize="characters"
             autoCorrect="off"
@@ -195,6 +232,12 @@ export default function ParticipantGate() {
             placeholder="••••••"
           />
           <DismissibleNotice message={error} summary="Participant access issue" resetKey={busy} className="mt-3" />
+          {(saveStatus.pending > 0 || saveStatus.error || saveWaitError) && <section role="alert" aria-label="Earlier recordings are waiting to save" className="mt-3 rounded-xl border border-amber-300/40 bg-amber-300/10 p-4 text-sm text-amber-100">
+            <p className="font-medium">Earlier recordings are blocking entry</p>
+            <p className="mt-2">{saveStatus.error || saveWaitError || 'Waiting for the server to acknowledge earlier recordings.'}</p>
+            <p className="mt-2">{saveStatus.pending} queued record(s). Entry does not discard queued recordings. Keep this browser profile and the original record folder; a researcher may need to recover a rejected save.</p>
+            <button type="button" disabled={busy || !participantId.trim()} onClick={event => void submit(event, true)} className="mt-3 rounded-xl border border-amber-200/40 px-4 py-2 disabled:opacity-50">Retry saving and check ID</button>
+          </section>}
           {finished && (
             <p className="mt-3 text-sm leading-6 text-emerald-200">
               This session is already finished. You can close the page.
@@ -205,7 +248,7 @@ export default function ParticipantGate() {
             disabled={busy}
             className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-cyan-300 px-5 py-3.5 text-sm font-medium text-slate-950 transition hover:bg-cyan-200 disabled:opacity-50"
           >
-            {busy ? 'Checking ID' : 'Continue'}
+            {phase === 'saving' ? 'Waiting for earlier saves' : phase === 'checking' ? 'Checking ID' : 'Continue'}
             {!busy && <ArrowRight className="h-4 w-4" />}
           </button>
         </form>
