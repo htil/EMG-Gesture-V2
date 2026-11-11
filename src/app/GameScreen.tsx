@@ -44,14 +44,15 @@ interface GamePrediction {
 }
 
 const TUTORIAL_OBSTACLE_COUNT = 10;
-type TutorialGuide = 'intro' | 'lives' | 'wrist-up' | 'wrist-down' | 'farewell' | 'complete';
+type TutorialGuide = 'intro' | 'lives' | 'track' | 'wrist-up' | 'wrist-down' | 'farewell' | 'complete';
 
 const TUTORIAL_COPY: Record<TutorialGuide, string> = {
-  intro: "Now it's time to test our model! This timer will display your 'Rest' period and 'Recording' period. Stay ready, it moves fast!",
-  lives: 'Your lives will be tracked here. Each incorrect gesture will cause you to lose a life during the actual trial. Try to make it to the end without losing them all.',
-  'wrist-up': 'Now that the Rest period has passed, it\'s time to perform your first gesture. To jump over the hurdles, you will use the \'Wrist Up\' gesture. When you\'re ready, click "Next" and immediately perform the gesture!',
-  'wrist-down': 'It\'s time for your other gesture. Use \'Wrist Down\' to dodge the incoming player. When you\'re ready, click "Next" and immediately perform the gesture!',
-  farewell: 'Great job! The rest of this run will be a practice round. Remember that when the timer reads \'Recording\' it\'s time to perform your gesture. When you\'re ready, click "Next" to continue on your own!',
+  intro: "This timer will display your 'Rest' period and 'Recording' period. Stay ready, it moves fast.",
+  lives: 'Your lives will be tracked here. Each incorrect gesture will cause you to lose a life during the actual trial.',
+  track: 'When you enter the red portion of the track, perform and hold the gesture.',
+  'wrist-up': 'To jump over the hurdles, you will use the \'Wrist Up\' gesture. When you\'re ready, click "Next" and immediately perform the gesture.',
+  'wrist-down': 'Use \'Wrist Down\' to dodge the incoming player. When you\'re ready, click "Next" and immediately perform the gesture.',
+  farewell: 'The rest of this run will be a practice round. When you\'re ready, click "Next" to continue on your own.',
   complete: "Your practice round is complete! Click 'Next' to continue on to the real deal. Good luck!",
 };
 
@@ -66,6 +67,43 @@ function tutorialStillPending(key?: string) {
   } catch {
     return false;
   }
+}
+
+function arrowHead(tip: { x: number; y: number }, tail: { x: number; y: number }, length = 18) {
+  const dx = tip.x - tail.x;
+  const dy = tip.y - tail.y;
+  const span = Math.hypot(dx, dy) || 1;
+  const ux = dx / span;
+  const uy = dy / span;
+  const px = -uy;
+  const py = ux;
+  const baseX = tip.x - ux * length;
+  const baseY = tip.y - uy * length;
+  const wing = length * 0.62;
+  return {
+    x2: baseX,
+    y2: baseY,
+    points: `${tip.x},${tip.y} ${baseX + px * wing},${baseY + py * wing} ${baseX - px * wing},${baseY - py * wing}`,
+  };
+}
+
+function TrackGuideArrows({ points }: { points: Array<{ x: number; y: number }> }) {
+  return (
+    <svg className="pointer-events-none fixed inset-0 z-[155] h-screen w-screen" aria-hidden="true">
+      {points.map((tip, index) => {
+        const outward = index === 0 ? -1 : 1;
+        const tail = { x: tip.x + outward * 36, y: tip.y + 78 };
+        const head = arrowHead(tip, tail);
+        return (
+          <g key={index}>
+            <line x1={tail.x} y1={tail.y} x2={head.x2} y2={head.y2} stroke="#082f49" strokeWidth="9" strokeLinecap="round" />
+            <line x1={tail.x} y1={tail.y} x2={head.x2} y2={head.y2} stroke="#67e8f9" strokeWidth="4" strokeLinecap="round" />
+            <polygon points={head.points} fill="#67e8f9" stroke="#082f49" strokeWidth="3" strokeLinejoin="round" />
+          </g>
+        );
+      })}
+    </svg>
+  );
 }
 
 function markTutorialDone(key?: string) {
@@ -321,6 +359,7 @@ export default function GameScreen({
   const [runKind, setRunKind] = useState<'tutorial' | 'live'>(() => tutorialStillPending(tutorialKey) ? 'tutorial' : 'live');
   const [guideBeat, setGuideBeat] = useState<TutorialGuide | null>(runKind === 'tutorial' ? 'intro' : null);
   const [holdReady, setHoldReady] = useState(false);
+  const [trackArrowPoints, setTrackArrowPoints] = useState<Array<{ x: number; y: number }>>([]);
   const runKindRef = useRef(runKind);
   runKindRef.current = runKind;
 
@@ -499,6 +538,22 @@ export default function GameScreen({
     };
   }, [obstacleCount, runKind, startingLives, testControls]);
 
+  useEffect(() => {
+    if (guideBeat !== 'track') return;
+    let frame = 0;
+    const tick = () => {
+      const next = gameModuleRef.current?.closestRecordingZoneScreenPoints() ?? [];
+      setTrackArrowPoints((current) => (
+        current.length === next.length && current.every((point, index) => point.x === next[index].x && point.y === next[index].y)
+          ? current
+          : next
+      ));
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [guideBeat]);
+
   const visibleQteState = qteState ?? runnerQteState;
   const visibleScore = score ?? runnerScore;
   const visibleStreak = streak ?? runnerStreak;
@@ -517,6 +572,10 @@ export default function GameScreen({
     }
     if (guideBeat === 'intro') {
       setGuideBeat('lives');
+      return;
+    }
+    if (guideBeat === 'lives') {
+      setGuideBeat('track');
       return;
     }
     gameModuleRef.current?.releaseTutorialHold();
@@ -671,11 +730,17 @@ export default function GameScreen({
         <GameGuide
           body={TUTORIAL_COPY[guideBeat]}
           centered={guideBeat === 'complete'}
-          target={guideBeat === 'lives' ? '[data-game-guide-target="lives"]' : '[data-game-guide-target="timer"]'}
+          dock={guideBeat === 'track' ? 'top' : undefined}
+          target={guideBeat === 'lives'
+            ? '[data-game-guide-target="lives"]'
+            : guideBeat === 'track'
+              ? undefined
+              : '[data-game-guide-target="timer"]'}
           nextDisabled={guideBeat !== 'complete' && !holdReady}
           onNext={advanceGuide}
         />
       )}
+      {guideBeat === 'track' && <TrackGuideArrows points={trackArrowPoints} />}
     </div>
   );
 }

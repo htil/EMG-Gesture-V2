@@ -20,6 +20,12 @@ const HURDLE_SPACING = 40;
 const HURDLE_HIT_DEPTH = 0.35;
 const JUMP_ACTION_DISTANCE = 4.5;
 const LANE_SWITCH_ACTION_DISTANCE = 3.5;
+// Distances ahead of the runner. Recording is the stretch the timer paints rose.
+const READY_START_DISTANCE = 30;
+const RECORDING_START_DISTANCE = 22;
+const RECORDING_END_DISTANCE = 10;
+const RECORDING_ZONE_LENGTH = RECORDING_START_DISTANCE - RECORDING_END_DISTANCE;
+const RECORDING_ZONE_CENTER = (RECORDING_START_DISTANCE + RECORDING_END_DISTANCE) / 2;
 
 const scene = new THREE.Scene();
 const stadium = createStadium(scene);
@@ -50,6 +56,13 @@ const laneArrowMaterial = new THREE.MeshBasicMaterial({
   transparent: true,
   depthWrite: false,
 });
+const recordingZoneMaterial = new THREE.MeshBasicMaterial({
+  color: 0xfb7185,
+  polygonOffset: true,
+  polygonOffsetFactor: -4,
+  polygonOffsetUnits: -4,
+});
+const recordingZoneGeometry = new THREE.PlaneGeometry(LANE_WIDTH, RECORDING_ZONE_LENGTH);
 const hurdleFootGeometry = new THREE.BoxGeometry(0.16, 0.05, 0.62);
 const hurdlePostGeometry = new THREE.BoxGeometry(0.05, HURDLE_HEIGHT, 0.05);
 const hurdleRailGeometry = new THREE.BoxGeometry(HURDLE_WIDTH - 0.12, 0.03, 0.03);
@@ -93,7 +106,6 @@ let preserveLives = false;
 let tutorialBeat = 'free';
 let tutorialSkipEncounter = '';
 let runPoseHeld = false;
-const RECORDING_START_DISTANCE = 22;
 const previousHurdleZ = new WeakMap();
 
 const hemiLight = new THREE.HemisphereLight(
@@ -308,6 +320,30 @@ export function queueGestureAction(action, direction, encounterId) {
   pendingGestureAction = { action, direction, encounterId };
 }
 
+const recordingZoneSample = new THREE.Vector3();
+const recordingZoneCamera = new THREE.Vector3();
+
+// Screen position of the nearest red section, one point on each gray lane.
+export function closestRecordingZoneScreenPoints() {
+  const upcoming = nearestUpcomingHurdle();
+  const canvas = activeRenderer?.domElement;
+  if (!upcoming || !canvas) return [];
+  const rect = canvas.getBoundingClientRect();
+  const points = [];
+  for (const x of [-LANE_OFFSET, LANE_OFFSET]) {
+    recordingZoneSample.set(x, 0.08, RECORDING_ZONE_CENTER);
+    upcoming.localToWorld(recordingZoneSample);
+    recordingZoneCamera.copy(recordingZoneSample).applyMatrix4(camera.matrixWorldInverse);
+    if (recordingZoneCamera.z >= -0.05) continue;
+    recordingZoneSample.project(camera);
+    points.push({
+      x: rect.left + (recordingZoneSample.x * 0.5 + 0.5) * rect.width,
+      y: rect.top + (-recordingZoneSample.y * 0.5 + 0.5) * rect.height,
+    });
+  }
+  return points;
+}
+
 export function releaseTutorialHold() {
   if (tutorialBeat === 'intro') tutorialBeat = 'to-wrist-up';
   else if (tutorialBeat === 'wrist-up') tutorialBeat = 'to-wrist-down';
@@ -514,10 +550,22 @@ function wholeNumber(value, fallback, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, parsed));
 }
 
+// Sits on each gray lane for the same approach window the timer labels Recording.
+function addRecordingZone(group) {
+  for (const x of [-LANE_OFFSET, LANE_OFFSET]) {
+    const zone = new THREE.Mesh(recordingZoneGeometry, recordingZoneMaterial);
+    zone.rotation.x = -Math.PI / 2;
+    zone.position.set(x, 0.06, RECORDING_ZONE_CENTER);
+    zone.renderOrder = 2;
+    group.add(zone);
+  }
+}
+
 function createObstacle(index) {
   const isLaneGate = index % 2 === 1;
   const openLane = Math.floor(index / 2) % 2 === 0 ? 1 : 0;
   const hurdle = isLaneGate ? createLaneGate(openLane) : createHurdle();
+  addRecordingZone(hurdle);
   hurdle.userData.obstacleType = isLaneGate ? 'switch' : 'jump';
   hurdle.userData.openLane = isLaneGate ? openLane : null;
   hurdle.userData.obstacleId = index;
@@ -892,19 +940,19 @@ function updateObstacleCue() {
   const distance = upcoming ? -upcoming.position.z : HURDLE_SPACING;
   const { targetGestureName, ...cueContext } = cueContextFor(upcoming);
 
-  if (distance > 30) {
+  if (distance > READY_START_DISTANCE) {
     activeGameOptions.onQteUpdate?.({ status: 'rest', progress: 0, targetGestureName, ...cueContext });
-  } else if (distance > 22) {
+  } else if (distance > RECORDING_START_DISTANCE) {
     activeGameOptions.onQteUpdate?.({
       status: 'ready',
-      progress: Math.min(1, (30 - distance) / 8),
+      progress: Math.min(1, (READY_START_DISTANCE - distance) / (READY_START_DISTANCE - RECORDING_START_DISTANCE)),
       targetGestureName,
       ...cueContext,
     });
-  } else if (distance > 10) {
+  } else if (distance > RECORDING_END_DISTANCE) {
     activeGameOptions.onQteUpdate?.({
       status: 'recording',
-      progress: Math.min(1, Math.max(0, (22 - distance) / 12)),
+      progress: Math.min(1, Math.max(0, (RECORDING_START_DISTANCE - distance) / RECORDING_ZONE_LENGTH)),
       targetGestureName,
       ...cueContext,
     });

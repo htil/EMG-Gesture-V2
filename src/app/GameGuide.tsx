@@ -3,13 +3,14 @@ import { useEffect, useRef, useState } from 'react';
 interface Props {
   body: string;
   centered?: boolean;
+  dock?: 'top';
   target?: string;
   nextDisabled?: boolean;
   onNext: () => void;
 }
 
 // Presentation only. The game decides when a step is showing and what happens next.
-export default function GameGuide({ body, centered = false, target, nextDisabled = false, onNext }: Props) {
+export default function GameGuide({ body, centered = false, dock, target, nextDisabled = false, onNext }: Props) {
   const panel = useRef<HTMLElement | null>(null);
   const [placement, setPlacement] = useState<{ top: number; left: number; width: number } | null>(null);
   const [rect, setRect] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
@@ -73,8 +74,8 @@ export default function GameGuide({ body, centered = false, target, nextDisabled
     <section
       ref={panel}
       aria-label="Game guidance"
-      style={centered || !placement ? undefined : { position: 'fixed', left: placement.left, top: placement.top, width: placement.width, maxHeight: 'calc(100vh - 24px)', overflowY: 'auto', zIndex: 160 }}
-      className={`rounded-2xl border-2 border-cyan-300/60 bg-slate-950 px-5 py-4 text-white shadow-xl ${centered ? 'relative z-[160] w-[min(420px,calc(100vw-32px))]' : !placement ? 'fixed left-4 top-1/2 z-[160] w-[min(420px,calc(100vw-32px))] -translate-y-1/2' : ''}`}
+      style={centered || dock || !placement ? undefined : { position: 'fixed', left: placement.left, top: placement.top, width: placement.width, maxHeight: 'calc(100vh - 24px)', overflowY: 'auto', zIndex: 160 }}
+      className={`rounded-2xl border-2 border-cyan-300/60 bg-slate-950 px-5 py-4 text-white shadow-xl ${centered ? 'relative z-[160] w-[min(420px,calc(100vw-32px))]' : dock === 'top' ? 'fixed left-4 top-20 z-[160] w-[min(420px,calc(100vw-32px))]' : !placement ? 'fixed left-4 top-1/2 z-[160] w-[min(420px,calc(100vw-32px))] -translate-y-1/2' : ''}`}
     >
       <p className="text-xs uppercase tracking-wider text-cyan-200">Practice</p>
       <p className="mt-2 text-sm leading-6 text-slate-200">{body}</p>
