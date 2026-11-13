@@ -1,0 +1,101 @@
+[[AdvancedFormat]]
+
+[[Block:Immediate post-collection questionnaire]]
+[[Question:DB]]
+[[ID:COLLECTION_INSTRUCTIONS]]
+Complete a new Session response for this person and this measured experience immediately after measured collection and BEFORE training, game/test or Results for that measured dataset. You may skip any question.
+
+[[Question:TE:SingleLine]]
+[[ID:GROUP_CODE]]
+Enter the group code given to you, preserving its case exactly.
+
+[[Question:TE:SingleLine]]
+[[ID:INDIVIDUAL_SUFFIX]]
+Enter your individual suffix exactly as given, preserving its case. Do not enter a name.
+
+[[Question:TE:SingleLine]]
+[[ID:VISIT_CODE]]
+Enter the neutral visit code given to you exactly as given.
+
+[[Question:TE:SingleLine]]
+[[ID:SESSION_CODE]]
+Enter the neutral session code given to you exactly as given.
+
+[[Question:Matrix:SingleAnswer]]
+[[ID:COLLECTION_RATINGS]]
+Think only about collecting training examples with the recording method you just used. How much do you agree or disagree with each statement?
+[[AdvancedChoices]]
+[[Choice:1]]
+It was easy to collect examples.
+[[Choice:2]]
+It was clear when I should perform each movement.
+[[Choice:3]]
+I could predict when recording would start.
+[[Choice:4]]
+I felt in control of when recording started.
+[[Choice:5]]
+I was able to record the examples I intended to collect.
+[[Choice:6]]
+Collecting examples required a lot of mental effort.
+[[Choice:7]]
+Collecting examples was physically tiring.
+[[Choice:8]]
+I felt frustrated while collecting examples.
+[[Choice:9]]
+I would feel confident using this recording method again.
+[[AdvancedAnswers]]
+[[Answer:1]]
+1 - Strongly disagree
+[[Answer:2]]
+2 - Disagree
+[[Answer:3]]
+3 - Somewhat disagree
+[[Answer:4]]
+4 - Neither agree nor disagree
+[[Answer:5]]
+5 - Somewhat agree
+[[Answer:6]]
+6 - Agree
+[[Answer:7]]
+7 - Strongly agree
+
+[[Question:TE:Essay]]
+[[ID:COLLECTION_UNEXPECTED]]
+Was anything confusing or unexpected? Please describe what happened.
+
+
+[[Block:Pause for Train, game/test and Results]]
+[[Question:DB]]
+[[ID:WITHIN_VISIT_PAUSE]]
+Pause here while you complete Train, game/test and Results for this experience. Keep this response open within this visit. Continue only when the researcher asks. Do not submit yet.
+
+
+[[Block:Perceived understanding - after this experience]]
+[[Question:DB]]
+[[ID:UNDERSTANDING_INSTRUCTIONS]]
+Continue only after Train, game/test and Results for this same experience. Answer the following questions, then submit this Session response.
+
+[[Question:Matrix:SingleAnswer]]
+[[ID:PERCEIVED_UNDERSTANDING]]
+Thinking about this activity, how much do you agree or disagree with each statement?
+[[AdvancedChoices]]
+[[Choice:1]]
+The system helped me better understand the data collection and cleaning process in a machine learning system.
+[[Choice:2]]
+The system helped me better understand how a model is trained for a machine learning system.
+[[Choice:3]]
+The system helped me better understand classification in a machine learning system.
+[[Choice:4]]
+The system helped me better understand the evaluation process of a machine learning system.
+[[AdvancedAnswers]]
+[[Answer:1]]
+Strongly disagree
+[[Answer:2]]
+Somewhat disagree
+[[Answer:3]]
+Neither agree nor disagree
+[[Answer:4]]
+Somewhat agree
+[[Answer:5]]
+Strongly agree
+

@@ -3,9 +3,8 @@
 import type { Gesture } from './types';
 
 export const DEFAULT_GESTURES: Gesture[] = [
-  { id: 'pinch', name: 'Pinch' },
-  { id: 'squeeze', name: 'Squeeze' },
-  { id: 'relax', name: 'Relax' },
+  { id: 'wrist-up', name: 'Wrist up' },
+  { id: 'wrist-down', name: 'Wrist down' },
 ];
 
 export function createGesture(name: string): Gesture {

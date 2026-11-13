@@ -1,0 +1,28 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import {mount,text} from './support/mounted-capture-state-fixture.mjs';
+const out=process.env.EMG_BATCH_EVIDENCE_DIR;
+if(!out)throw new Error('EMG_BATCH_EVIDENCE_DIR required');
+fs.mkdirSync(out,{recursive:true});
+test('mounted Pause stream retires held Retry; pending raw survives and fresh Retry stays ACK fenced',async t=>{
+ const result={coverage:'actual mounted StudySession, legitimate enabled Pause stream; actual recorder/archive/journal/collection and temp backend; Mock 20Hz/v1 setup receipt stub, not participant readiness',checks:[]};
+ t.after(()=>fs.writeFileSync(path.join(out,'mounted-ownership.json'),JSON.stringify(result,null,2)));
+ const f=await mount(t,'button',false,{pilot:true,measuredSetupStub:true});await f.click('Start mock stream');await f.advance(6000);
+ const set=localStorage.setItem.bind(localStorage);let broken=false,failedJournal;
+ localStorage.setItem=(k,v)=>{if(broken&&k.startsWith('emg-context-recovery:')){const j=JSON.parse(v);if(failedJournal||[...j.active,...j.sealed].some(r=>r.center)){failedJournal=String(v);throw new Error('SYNTHETIC_CHECKPOINT_FAILURE');}}set(k,v);};
+ await f.click('Capture Space');broken=true;await f.advance(11000);assert.ok(f.button('Retry raw/context recovery'));assert.ok(failedJournal);broken=false;
+ let release;const gate=new Promise(r=>release=r);t.after(()=>release());const fetch=globalThis.fetch;let held=0;
+ globalThis.fetch=async(...args)=>{if(args[0]==='/api/study/collection'){held++;await gate;}return fetch(...args);};
+ await f.click('Retry raw/context recovery');await f.advance(250);assert.ok(held>0);assert.equal(f.button('Retry raw/context recovery').props.disabled,true);
+ const queue=JSON.parse(localStorage.getItem('emg-collection-queue'));assert.ok(queue.some(q=>q.item.kind==='context'));result.pendingCount=queue.length;
+ await f.click('Pause stream');await f.advance(50);
+ assert.equal(f.button('Retry raw/context recovery').props.disabled,false,'legitimate source stop retires busy ownership');result.checks.push('retired Retry no longer owns new-source busy flag');
+ await f.click('Retry raw/context recovery');await f.advance(250);assert.equal(f.button('Retry raw/context recovery').props.disabled,true);assert.ok(!f.button('Capture Space')||f.button('Capture Space').props.disabled);assert.deepEqual(JSON.parse(localStorage.getItem('emg-collection-queue')).slice(0,queue.length),queue);result.checks.push('new Retry held ACK preserves pending queue and blocks Capture');
+ release();await f.advance(2500);assert.ok(!text(f.renderer.toJSON()).includes('SYNTHETIC_CHECKPOINT_FAILURE'));assert.equal(f.button('Retry raw/context recovery'),undefined);assert.ok(f.button('Start mock stream')&&!f.button('Start mock stream').props.disabled);result.checks.push('current explicit Retry recovers after real ACK without autoarming paused source');
+ const walk=root=>fs.readdirSync(root,{withFileTypes:true}).flatMap(e=>e.isDirectory()?walk(path.join(root,e.name)):[path.join(root,e.name)]);
+ const contexts=walk(f.data).filter(p=>p.endsWith('.context.json')).map(p=>JSON.parse(fs.readFileSync(p,'utf8')));
+ const journal=JSON.parse(failedJournal),pending=[...journal.active,...journal.sealed].find(r=>r.center);const recovered=contexts.find(r=>r.contextId===pending.contextId);assert.ok(recovered,'original pending context ID persisted after source stop');
+ for(const point of pending.points)assert.deepEqual(recovered.points.find(p=>p.consumptionId===point.consumptionId),point);result.checks.push('original RAM raw points persisted byte-equivalent under original context ID');result.status='PASS';
+});

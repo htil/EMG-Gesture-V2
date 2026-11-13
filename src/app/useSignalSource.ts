@@ -3,6 +3,8 @@ import { connectGanglion as connectGanglionDevice, isWebBluetoothAvailable, type
 
 export type SignalPoint = {
   time: number;
+  /** Monotonic consumption identity, not a physiological sample clock. */
+  consumptionId?: number;
   value: number;
   raw: number;
   activityEnvelope: number;
@@ -14,10 +16,14 @@ export type SignalSourceMode = 'mock' | 'live';
 export type LiveConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'streaming' | 'error';
 
 type UseSignalSourceResult = {
+  subscribeRawPoints: (listener: (point: SignalPoint) => void, includePending?: boolean) => () => void;
+  subscribeSourceInterruptions: (listener: (reason: string) => void) => () => void;
   signalData: SignalPoint[];
   recordingSignalData: SignalPoint[];
   signalSourceMode: SignalSourceMode;
   isStreaming: boolean;
+  streamEpoch: number;
+  streamInterruptionReason: 'stopped' | 'disconnected' | null;
   selectSignalSourceMode: (mode: SignalSourceMode) => Promise<void>;
   startStream: () => Promise<void>;
   startStreamForMode: (mode: SignalSourceMode) => Promise<void>;
@@ -29,6 +35,9 @@ type UseSignalSourceResult = {
   liveDisplayScale: number;
   liveSampleRateHz: number;
   isBluetoothAvailable: boolean;
+  isDisplayScaleFrozen: boolean;
+  freezeDisplayScale: () => void;
+  getDisplayValueForNormalizedActivity: (normalizedValue: number) => number;
 };
 
 const EMG_SIGNAL_MULTIPLIER = 10_000_000;
@@ -43,9 +52,12 @@ const MIN_ACTIVITY_RANGE = 0.12;
 const BASELINE_SMOOTHING = 0.15;
 const ACTIVE_REFERENCE_SMOOTHING = 0.18;
 const ACTIVE_REFERENCE_HEADROOM = 1.1;
+const DEFAULT_DISPLAY_BASELINE = 0;
+const DEFAULT_DISPLAY_UPPER_REFERENCE = 1;
+const MIN_DISPLAY_CALIBRATION_POINTS = 40;
 
 const clampSignalValue = (value: number) => Math.max(0, Math.min(1, value));
-const trimPointsToTimeWindow = (points: SignalPoint[], windowMs: number) => {
+const trimPointsToTimeWindow = <T extends { time: number }>(points: T[], windowMs: number): T[] => {
   if (points.length === 0) {
     return points;
   }
@@ -78,18 +90,37 @@ export function useSignalSource(
   const [recordingSignalData, setRecordingSignalData] = useState<SignalPoint[]>([]);
   const [signalSourceMode, setSignalSourceMode] = useState<SignalSourceMode>('mock');
   const [isStreaming, setIsStreaming] = useState(false);
+  const [streamEpoch, setStreamEpoch] = useState(0);
+  const [streamInterruptionReason, setStreamInterruptionReason] = useState<'stopped' | 'disconnected' | null>(null);
   const [liveConnectionStatus, setLiveConnectionStatus] = useState<LiveConnectionStatus>('disconnected');
   const [liveConnectionMessage, setLiveConnectionMessage] = useState('Idle. Select a source and start stream.');
   const [liveDeviceName, setLiveDeviceName] = useState<string | null>(null);
   const [livePacketCount, setLivePacketCount] = useState(0);
   const [liveDisplayScale, setLiveDisplayScale] = useState(1);
   const [liveSampleRateHz, setLiveSampleRateHz] = useState(0);
+  const [isDisplayScaleFrozen, setIsDisplayScaleFrozen] = useState(false);
+  const rawListenersRef = useRef(new Set<(point: SignalPoint) => void>());
+  const interruptionListenersRef = useRef(new Set<(reason: string) => void>());
+  const consumptionIdRef = useRef(0);
+  const subscribeRawPoints = useCallback((listener: (point: SignalPoint) => void, includePending = false) => {
+    // Ownership handoff is synchronous and ordered: consume acquired, unrendered
+    // identities before subscribing to newer acquisition. Never infer from time.
+    if (includePending) pendingRecordingPointsRef.current.forEach(listener);
+    rawListenersRef.current.add(listener);
+    return () => { rawListenersRef.current.delete(listener); };
+  }, []);
+  const subscribeSourceInterruptions = useCallback((listener: (reason: string) => void) => { interruptionListenersRef.current.add(listener); return () => { interruptionListenersRef.current.delete(listener); }; }, []);
+  const notifyInterruption = useCallback((reason: string) => { for (const listener of interruptionListenersRef.current) listener(reason); }, []);
+  const publishRawPoint = useCallback((point: SignalPoint) => { point.consumptionId = consumptionIdRef.current++; for (const listener of rawListenersRef.current) listener(point); return point; }, []);
   const ganglionRef = useRef<GanglionConnection | null>(null);
   const featureWindowRef = useRef<{ time: number; value: number }[]>([]);
   const activityReferenceWindowRef = useRef<{ time: number; value: number }[]>([]);
   const pendingRecordingPointsRef = useRef<SignalPoint[]>([]);
   const activityBaselineRef = useRef(0);
   const activityUpperReferenceRef = useRef(MIN_ACTIVITY_RANGE);
+  const displayBaselineRef = useRef(DEFAULT_DISPLAY_BASELINE);
+  const displayUpperReferenceRef = useRef(DEFAULT_DISPLAY_UPPER_REFERENCE);
+  const displayScaleFrozenRef = useRef(false);
   const selectedChannelIndexRef = useRef(selectedChannelIndex);
   const sampleRateTimesRef = useRef<number[]>([]);
   const displaySensitivityRef = useRef(displaySensitivity);
@@ -99,6 +130,8 @@ export function useSignalSource(
   }, [displaySensitivity]);
 
   useEffect(() => {
+    notifyInterruption('source_or_channel_changed');
+    setStreamEpoch(epoch => epoch + 1);
     selectedChannelIndexRef.current = selectedChannelIndex;
     featureWindowRef.current = [];
     activityReferenceWindowRef.current = [];
@@ -106,6 +139,10 @@ export function useSignalSource(
     sampleRateTimesRef.current = [];
     activityBaselineRef.current = 0;
     activityUpperReferenceRef.current = MIN_ACTIVITY_RANGE;
+    displayBaselineRef.current = DEFAULT_DISPLAY_BASELINE;
+    displayUpperReferenceRef.current = DEFAULT_DISPLAY_UPPER_REFERENCE;
+    displayScaleFrozenRef.current = false;
+    setIsDisplayScaleFrozen(false);
     setLiveDisplayScale(1);
     setLiveSampleRateHz(0);
 
@@ -116,9 +153,10 @@ export function useSignalSource(
   }, [selectedChannelIndex, signalSourceMode]);
 
   const pushMockSignalPoint = useCallback((point: SignalPoint) => {
+    publishRawPoint(point);
     setRecordingSignalData(prev => trimPointsToTimeWindow([...prev, point], RECORDING_WINDOW_MS));
     setSignalData(prev => trimPointsToTimeWindow([...prev, point], displayWindowMs));
-  }, [displayWindowMs]);
+  }, [displayWindowMs, publishRawPoint]);
 
   const disconnectGanglion = useCallback(async () => {
     const connection = ganglionRef.current;
@@ -138,6 +176,8 @@ export function useSignalSource(
   }, []);
 
   const resetDisplayState = useCallback(() => {
+    notifyInterruption('source_reset');
+    setStreamEpoch(epoch => epoch + 1);
     setSignalData([]);
     setRecordingSignalData([]);
     setLivePacketCount(0);
@@ -151,7 +191,29 @@ export function useSignalSource(
     sampleRateTimesRef.current = [];
   }, []);
 
+  const freezeDisplayScale = useCallback(() => {
+    if (activityReferenceWindowRef.current.length < MIN_DISPLAY_CALIBRATION_POINTS) {
+      displayBaselineRef.current = DEFAULT_DISPLAY_BASELINE;
+      displayUpperReferenceRef.current = DEFAULT_DISPLAY_UPPER_REFERENCE;
+    }
+    displayScaleFrozenRef.current = true;
+    setIsDisplayScaleFrozen(true);
+  }, []);
+
+  const getDisplayValueForNormalizedActivity = useCallback((normalizedValue: number) => {
+    const envelopeValue = activityBaselineRef.current + normalizedValue * (
+      activityUpperReferenceRef.current - activityBaselineRef.current
+    );
+    return clampSignalValue(
+      (envelopeValue - displayBaselineRef.current) /
+        Math.max(displayUpperReferenceRef.current - displayBaselineRef.current, MIN_ACTIVITY_RANGE),
+    );
+  }, []);
+
   const selectSignalSourceMode = useCallback(async (mode: SignalSourceMode) => {
+    setStreamInterruptionReason(null);
+    notifyInterruption('source_or_channel_changed');
+    setStreamEpoch(epoch => epoch + 1);
     await disconnectGanglion();
     setIsStreaming(false);
     setSignalSourceMode(mode);
@@ -166,6 +228,9 @@ export function useSignalSource(
   }, [disconnectGanglion, resetDisplayState]);
 
   const startMockStream = useCallback(async () => {
+    setStreamInterruptionReason(null);
+    notifyInterruption('source_reset');
+    setStreamEpoch(epoch => epoch + 1);
     await disconnectGanglion();
     resetDisplayState();
     setSignalSourceMode('mock');
@@ -176,6 +241,8 @@ export function useSignalSource(
   }, [disconnectGanglion, resetDisplayState]);
 
   const connectGanglion = useCallback(async () => {
+    notifyInterruption('source_reset');
+    setStreamEpoch(epoch => epoch + 1);
     if (!isWebBluetoothAvailable()) {
       setLiveConnectionStatus('error');
       setLiveConnectionMessage('Web Bluetooth needs Chrome or Edge on localhost/HTTPS.');
@@ -198,6 +265,7 @@ export function useSignalSource(
       setLiveConnectionMessage('Connected. Starting stream...');
 
       connection.onSample((sample) => {
+        if (ganglionRef.current !== connection) return;
         const rawSample = sample.data[selectedChannelIndexRef.current] ?? 0;
         const scaledRawSample = rawSample * EMG_SIGNAL_MULTIPLIER;
         featureWindowRef.current.push({
@@ -217,16 +285,20 @@ export function useSignalSource(
         setLivePacketCount(count => count + 1);
         sampleRateTimesRef.current.push(sample.timestamp);
         sampleRateTimesRef.current = sampleRateTimesRef.current.filter((time) => time >= sample.timestamp - 1000);
-        pendingRecordingPointsRef.current.push({
+        pendingRecordingPointsRef.current.push(publishRawPoint({
           time: sample.timestamp,
           value: activityEnvelope,
           raw: rawSample,
           activityEnvelope,
           normalizedActivity: 0,
-        });
+        }));
       });
 
       connection.onDisconnected(() => {
+        if (ganglionRef.current !== connection) return;
+        setStreamInterruptionReason('disconnected');
+        notifyInterruption('disconnected');
+        setStreamEpoch(epoch => epoch + 1);
         if (ganglionRef.current === connection) {
           ganglionRef.current = null;
         }
@@ -264,6 +336,9 @@ export function useSignalSource(
   }, [signalSourceMode, startStreamForMode]);
 
   const stopStream = useCallback(async () => {
+    setStreamInterruptionReason('stopped');
+    notifyInterruption('stopped');
+    setStreamEpoch(epoch => epoch + 1);
     await disconnectGanglion();
     setIsStreaming(false);
     resetDisplayState();
@@ -334,16 +409,28 @@ export function useSignalSource(
       setLiveDisplayScale(activityUpperReferenceRef.current);
       setLiveSampleRateHz(sampleRateTimesRef.current.length);
 
+      if (!displayScaleFrozenRef.current) {
+        displayBaselineRef.current = targetBaseline;
+        displayUpperReferenceRef.current = Math.max(
+          getPercentile(recentEnvelopeValues, ACTIVE_REFERENCE_PERCENTILE) * ACTIVE_REFERENCE_HEADROOM,
+          targetBaseline + MIN_ACTIVITY_RANGE,
+        );
+      }
+
       const normalizedPending = pending.map((point) => {
         const normalizedActivity = clampSignalValue(
           (point.activityEnvelope - activityBaselineRef.current) /
             Math.max(activityUpperReferenceRef.current - activityBaselineRef.current, MIN_ACTIVITY_RANGE),
         );
+        const displayActivity = clampSignalValue(
+          (point.activityEnvelope - displayBaselineRef.current) /
+            Math.max(displayUpperReferenceRef.current - displayBaselineRef.current, MIN_ACTIVITY_RANGE),
+        );
 
         return {
           ...point,
           normalizedActivity,
-          value: normalizedActivity,
+          value: displayActivity,
         };
       });
 
@@ -366,15 +453,20 @@ export function useSignalSource(
 
   useEffect(() => {
     return () => {
+      notifyInterruption('unmounted');
       void disconnectGanglion();
     };
   }, [disconnectGanglion]);
 
   return {
+    subscribeRawPoints,
+    subscribeSourceInterruptions,
     signalData,
     recordingSignalData,
     signalSourceMode,
     isStreaming,
+    streamEpoch,
+    streamInterruptionReason,
     selectSignalSourceMode,
     startStream,
     startStreamForMode,
@@ -385,6 +477,9 @@ export function useSignalSource(
     livePacketCount,
     liveDisplayScale,
     liveSampleRateHz,
-    isBluetoothAvailable: isWebBluetoothAvailable()
+    isBluetoothAvailable: isWebBluetoothAvailable(),
+    isDisplayScaleFrozen,
+    freezeDisplayScale,
+    getDisplayValueForNormalizedActivity,
   };
 }

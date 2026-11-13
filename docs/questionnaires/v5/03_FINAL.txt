@@ -1,0 +1,213 @@
+[[AdvancedFormat]]
+
+[[Block:Final - after both recording-method experiences]]
+[[Question:DB]]
+[[ID:COMPLETION_INSTRUCTIONS]]
+Complete this form once after BOTH recording-method experiences are complete. If either experience is incomplete, tell the researcher before continuing. You may skip any question.
+
+[[Question:TE:SingleLine]]
+[[ID:GROUP_CODE]]
+Enter the group code given to you, preserving its case exactly.
+
+[[Question:TE:SingleLine]]
+[[ID:INDIVIDUAL_SUFFIX]]
+Enter your individual suffix exactly as given, preserving its case. Do not enter a name.
+
+[[Question:TE:SingleLine]]
+[[ID:VISIT_CODE]]
+Enter the neutral visit code given to you exactly as given.
+
+[[Question:TE:SingleLine]]
+[[ID:SESSION_CODE]]
+Enter the neutral session code given to you exactly as given.
+
+
+[[Block:Overall usability]]
+[[Question:DB]]
+[[ID:SUS_INSTRUCTIONS]]
+For these questions, "This system" means the whole application across both experiences, not a comparison between Button recording and Automatic recording. Record your immediate response to each item. The five positions run from 1 (Strongly disagree) to 5 (Strongly agree). If you feel unable to respond to an item, the original SUS instructions suggest the centre point (3); you may still leave any item unanswered.
+System Usability Scale (SUS), John Brooke (1996). Original scale copyright Digital Equipment Corporation, 1986; freely available for usability assessment with source acknowledgement in published reports.
+
+[[Question:MC:SingleAnswer:Vertical]]
+[[ID:SUS01]]
+I think that I would like to use this system frequently
+[[AdvancedChoices]]
+[[Choice:1]]
+1 - Strongly disagree
+[[Choice:2]]
+2
+[[Choice:3]]
+3
+[[Choice:4]]
+4
+[[Choice:5]]
+5 - Strongly agree
+
+[[Question:MC:SingleAnswer:Vertical]]
+[[ID:SUS02]]
+I found the system unnecessarily complex
+[[AdvancedChoices]]
+[[Choice:1]]
+1 - Strongly disagree
+[[Choice:2]]
+2
+[[Choice:3]]
+3
+[[Choice:4]]
+4
+[[Choice:5]]
+5 - Strongly agree
+
+[[Question:MC:SingleAnswer:Vertical]]
+[[ID:SUS03]]
+I thought the system was easy to use
+[[AdvancedChoices]]
+[[Choice:1]]
+1 - Strongly disagree
+[[Choice:2]]
+2
+[[Choice:3]]
+3
+[[Choice:4]]
+4
+[[Choice:5]]
+5 - Strongly agree
+
+[[Question:MC:SingleAnswer:Vertical]]
+[[ID:SUS04]]
+I think that I would need the support of a technical person to be able to use this system
+[[AdvancedChoices]]
+[[Choice:1]]
+1 - Strongly disagree
+[[Choice:2]]
+2
+[[Choice:3]]
+3
+[[Choice:4]]
+4
+[[Choice:5]]
+5 - Strongly agree
+
+[[Question:MC:SingleAnswer:Vertical]]
+[[ID:SUS05]]
+I found the various functions in this system were well integrated
+[[AdvancedChoices]]
+[[Choice:1]]
+1 - Strongly disagree
+[[Choice:2]]
+2
+[[Choice:3]]
+3
+[[Choice:4]]
+4
+[[Choice:5]]
+5 - Strongly agree
+
+[[Question:MC:SingleAnswer:Vertical]]
+[[ID:SUS06]]
+I thought there was too much inconsistency in this system
+[[AdvancedChoices]]
+[[Choice:1]]
+1 - Strongly disagree
+[[Choice:2]]
+2
+[[Choice:3]]
+3
+[[Choice:4]]
+4
+[[Choice:5]]
+5 - Strongly agree
+
+[[Question:MC:SingleAnswer:Vertical]]
+[[ID:SUS07]]
+I would imagine that most people would learn to use this system very quickly
+[[AdvancedChoices]]
+[[Choice:1]]
+1 - Strongly disagree
+[[Choice:2]]
+2
+[[Choice:3]]
+3
+[[Choice:4]]
+4
+[[Choice:5]]
+5 - Strongly agree
+
+[[Question:MC:SingleAnswer:Vertical]]
+[[ID:SUS08]]
+I found the system very cumbersome to use
+[[AdvancedChoices]]
+[[Choice:1]]
+1 - Strongly disagree
+[[Choice:2]]
+2
+[[Choice:3]]
+3
+[[Choice:4]]
+4
+[[Choice:5]]
+5 - Strongly agree
+
+[[Question:MC:SingleAnswer:Vertical]]
+[[ID:SUS09]]
+I felt very confident using the system
+[[AdvancedChoices]]
+[[Choice:1]]
+1 - Strongly disagree
+[[Choice:2]]
+2
+[[Choice:3]]
+3
+[[Choice:4]]
+4
+[[Choice:5]]
+5 - Strongly agree
+
+[[Question:MC:SingleAnswer:Vertical]]
+[[ID:SUS10]]
+I needed to learn a lot of things before I could get going with this system
+[[AdvancedChoices]]
+[[Choice:1]]
+1 - Strongly disagree
+[[Choice:2]]
+2
+[[Choice:3]]
+3
+[[Choice:4]]
+4
+[[Choice:5]]
+5 - Strongly agree
+
+
+[[Block:Final comparison]]
+[[Question:DB]]
+[[ID:FINAL_INSTRUCTIONS]]
+Think about your experience with both recording methods. Complete the following questions, then submit this Final response.
+
+[[Question:MC:SingleAnswer:Vertical]]
+[[ID:FINAL_PREFERENCE]]
+Which recording method would you choose to use again?
+[[AdvancedChoices]]
+[[Choice:1]]
+Button recording
+[[Choice:2]]
+Automatic recording
+[[Choice:3]]
+No preference
+
+[[Question:TE:Essay]]
+[[ID:FINAL_PREFERENCE_REASON]]
+Why did you choose that answer?
+
+[[Question:TE:Essay]]
+[[ID:FINAL_MOVEMENT_CHANGES]]
+Did you change how you performed the movements when using either method? If so, how?
+
+[[Question:TE:Essay]]
+[[ID:FINAL_BIGGEST_DIFFERENCE]]
+What was the biggest difference you noticed between the two recording methods?
+
+[[Question:TE:Essay]]
+[[ID:FINAL_IMPROVEMENT]]
+What is the most important thing you would change or improve?
+
